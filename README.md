@@ -23,8 +23,13 @@ sudo apt install qemu-system-x86
 # 编译
 make build
 
-# 运行
+# 运行（图形窗口模式，如果有图形界面）
 make run
+# 或者
+make run-gui
+
+# 运行（终端模式，适合 SSH 或无图形界面）
+make run-term
 
 # 清理
 make clean
@@ -36,8 +41,11 @@ make clean
 # 编译
 nasm -f bin boot.asm -o boot.bin
 
-# 在 QEMU 中运行
+# 在 QEMU 图形窗口中运行
 qemu-system-x86_64 -drive format=raw,file=boot.bin
+
+# 在终端中运行（适合 SSH 或无图形界面）
+qemu-system-x86_64 -curses -drive format=raw,file=boot.bin
 ```
 
 ## 程序说明
@@ -48,13 +56,28 @@ qemu-system-x86_64 -drive format=raw,file=boot.bin
 2. 在屏幕上显示 "Hello from Boot Sector!"
 3. 进入无限循环（halt）
 
+## 查看输出
+
+### 图形窗口模式
+如果使用 `make run` 或 `make run-gui`，QEMU 会打开一个图形窗口显示输出。如果看不到窗口：
+- 检查是否有图形界面（X11/Wayland）
+- 如果在 SSH 会话中，需要 X11 转发（`ssh -X`）
+- 或者使用终端模式：`make run-term`
+
+### 终端模式
+如果使用 `make run-term` 或 `-curses` 选项，输出会直接显示在终端中，适合：
+- SSH 远程连接
+- 无图形界面的服务器
+- 需要直接在终端查看输出的情况
+
 ## 退出 QEMU
 
-在 QEMU 窗口中按 `Ctrl+Alt+G` 释放鼠标，然后按 `Ctrl+C` 或关闭窗口。
+### 图形窗口模式
+- 按 `Ctrl+Alt+G` 释放鼠标，然后关闭窗口
+- 或按 `Ctrl+Alt+Q` 退出 QEMU
 
-或者使用快捷键：
-- `Ctrl+Alt+G` - 释放/捕获鼠标
-- `Ctrl+Alt+Q` - 退出 QEMU
+### 终端模式
+- 按 `Ctrl+A` 然后按 `X` 退出 QEMU
 
 ## 注意事项
 
