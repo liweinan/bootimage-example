@@ -22,14 +22,15 @@ $(BOOT_BIN): $(BOOT_ASM)
 run: run-gui
 
 run-gui: $(BOOT_BIN)
-	@echo "在 QEMU 图形窗口中启动引导扇区..."
+	@echo "在 QEMU 图形窗口中启动引导扇区（使用 SDL 显示）..."
 	@echo "提示: 如果没有看到窗口，请尝试 'make run-term' 在终端中运行"
-	$(QEMU) $(QEMUFLAGS)
+	$(QEMU) -display sdl $(QEMUFLAGS)
 
 run-term: $(BOOT_BIN)
 	@echo "在 QEMU 终端模式中启动引导扇区..."
-	@echo "提示: 按 Ctrl+A 然后按 X 退出"
-	$(QEMU) -curses $(QEMUFLAGS)
+	@echo "提示: 退出方法 - 按 Ctrl+A，松开后按 X（大写）"
+	@echo "      如果不起作用，尝试 Ctrl+A 然后按 C，输入 quit 后回车"
+	$(QEMU) -display curses $(QEMUFLAGS)
 
 clean:
 	rm -f $(BOOT_BIN)
