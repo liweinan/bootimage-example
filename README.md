@@ -2,6 +2,9 @@
 
 这是一个简单的引导扇区程序示例，演示了如何在裸机上运行代码。
 
+<img width="2296" height="1410" alt="fe4f9ff229c104aee6d03f53d2dbee6c" src="https://github.com/user-attachments/assets/170fbdec-6b11-4e7a-8272-fccfcdb35d1e" />
+
+
 ## 前置要求
 
 在 Ubuntu Linux 上，需要安装以下工具：
