@@ -4,6 +4,11 @@
 - [一、概述：中断是什么？](#一概述中断是什么)
 - [二、软件层面：操作系统中的中断实现](#二软件层面操作系统中的中断实现)
 - [三、学习路径：DOS中断编程](#三学习路径dos中断编程)
+  - [3.1 为什么从DOS开始学习？](#31-为什么从dos开始学习)
+  - [3.2 DOS中断的实现层次](#32-dos中断的实现层次)
+  - [3.3 实用的DOS中断编程示例](#33-实用的dos中断编程示例)
+  - [3.4 重要的DOS中断服务](#34-重要的dos中断服务)
+  - [3.5 BIOS中断实现原理与学习资源](#35-bios中断实现原理与学习资源)
 - [四、裸机编程：绕过操作系统](#四裸机编程绕过操作系统)
 - [五、硬件层面：CPU内部的中断实现](#五硬件层面cpu内部的中断实现)
 - [六、学习资源与工具](#六学习资源与工具)
@@ -151,6 +156,271 @@ tick_count db 0
 | **INT 13h** | 磁盘服务 | 02h:读扇区, 03h:写扇区 |
 | **INT 16h** | 键盘服务 | 00h:读取按键, 01h:检查按键 |
 | **INT 21h** | DOS功能 | 09h:显示字符串, 4Ch:程序终止 |
+
+### 3.5 BIOS中断实现原理与学习资源
+
+#### 3.5.1 BIOS中断机制详解
+
+**中断向量表（IVT）的工作原理**：
+
+在实模式下，BIOS 在内存低地址（0x0000-0x03FF）维护中断向量表：
+- 每个中断号对应一个 4 字节的向量（段地址:偏移地址）
+- 中断 0x10 的向量位于 `0x10 * 4 = 0x0040`
+- 这 4 字节指向 BIOS 视频服务例程的入口地址
+
+**`int 0x10` 的完整执行流程**：
+
+```
+1. 保存当前状态（CPU硬件自动完成）
+   - 将标志寄存器（FLAGS）压入栈
+   - 将当前代码段（CS）压入栈
+   - 将下一条指令地址（IP）压入栈
+   - 清除中断标志（IF）和陷阱标志（TF）
+
+2. 查找中断向量
+   - 从内存地址 0x0040 读取 4 字节
+   - 这 4 字节包含：偏移地址（低 2 字节）+ 段地址（高 2 字节）
+
+3. 跳转到中断处理程序
+   - 将 CS:IP 设置为向量表中的地址
+   - CPU 开始执行 BIOS 的视频服务代码
+
+4. BIOS 处理程序执行
+   - 读取寄存器参数（如 ah=0x0E 或 ax=0x0003）
+   - 根据功能号执行相应的视频操作
+   - 操作完成后执行 IRET（中断返回）
+
+5. 恢复执行
+   - IRET 指令恢复之前保存的 CS、IP 和 FLAGS
+   - 程序继续执行 int 指令后的下一条指令
+```
+
+**示例：引导扇区中的 INT 10h 使用**：
+
+```nasm
+; 设置显示模式
+mov ax, 0x0003      ; ah=0x00（设置模式功能），al=0x03（80x25文本模式）
+int 0x10            ; 调用 BIOS 中断，设置显示模式
+
+; 显示字符
+mov ah, 0x0E        ; ah=0x0E（TTY模式显示字符功能）
+mov al, 'H'         ; al=要显示的字符
+int 0x10            ; 调用 BIOS 中断，显示字符
+```
+
+#### 3.5.2 开源 BIOS 项目学习资源
+
+**1. SeaBIOS（强烈推荐）**
+
+- **项目地址**：https://github.com/coreboot/seabios
+- **说明**：开源的传统 BIOS 实现，QEMU 默认使用
+- **关键源码文件**：
+  - `src/vgabios.c` - VGA BIOS 实现
+  - `src/bios.h` - BIOS 中断服务定义
+  - `src/interrupts.c` - 中断处理程序
+  - `src/vgahooks.c` - INT 10h 视频服务实现
+
+**快速开始查看源码**：
+```bash
+# 克隆仓库
+git clone https://github.com/coreboot/seabios.git
+cd seabios
+
+# 查找 INT 10h 相关代码
+grep -r "int.*0x10\|INT.*10h\|int10" src/
+
+# 查看中断向量表初始化
+grep -A 20 "int 0x10\|INT 10h" src/interrupts.c
+
+# 查看 VGA 相关实现
+cat src/vgahooks.c | grep -A 30 "handle_int10"
+```
+
+**2. Coreboot**
+
+- **项目地址**：https://github.com/coreboot/coreboot
+- **说明**：开源固件框架，SeaBIOS 可作为 payload
+- **学习重点**：BIOS 初始化流程、硬件抽象层
+
+#### 3.5.3 虚拟机实现源码学习
+
+**1. QEMU 源码**
+
+- **项目地址**：https://github.com/qemu/qemu
+- **关键源码位置**：
+  - `pc-bios/` - BIOS 镜像（SeaBIOS）
+  - `hw/display/` - 显示设备模拟
+  - `hw/vga/` - VGA 硬件模拟
+  - `target/i386/` - x86 CPU 模拟（中断处理）
+
+**查看中断模拟代码**：
+```bash
+git clone https://github.com/qemu/qemu.git
+cd qemu
+
+# 查找中断相关代码
+grep -r "int.*0x10\|interrupt.*10" hw/
+
+# 查看 VGA 硬件模拟
+cat hw/vga/vga.c | grep -A 20 "int.*10"
+```
+
+**使用 QEMU Monitor 调试**：
+```bash
+# 启动 QEMU 并进入 monitor 模式
+qemu-system-x86_64 -monitor stdio -drive format=raw,file=boot.bin
+
+# 在 monitor 中输入以下命令：
+# info registers          # 查看寄存器状态
+# x/4wx 0x40              # 查看 INT 10h 向量（地址 0x0040）
+# info mem                # 查看内存映射
+```
+
+**2. DOSBox 源码**
+
+- **项目地址**：https://github.com/dosbox-staging/dosbox-staging
+- **关键源码文件**：
+  - `src/hardware/vga.cpp` - VGA 模拟
+  - `src/dos/dos.cpp` - DOS 中断处理
+  - `src/hardware/int10.cpp` - INT 10h 实现（**推荐从这里开始学习**）
+
+**查看 INT 10h 实现**：
+```bash
+git clone https://github.com/dosbox-staging/dosbox-staging.git
+cd dosbox-staging
+
+# DOSBox 的 INT 10h 实现在这里（代码结构清晰，有详细注释）
+cat src/hardware/int10.cpp
+```
+
+#### 3.5.4 硬件文档资源
+
+**1. VGA 硬件规范**
+
+- **VGA 寄存器文档**：
+  - 《VGA Hardware Programming Guide》
+  - 《IBM VGA Technical Reference Manual》
+- **在线资源**：
+  - https://wiki.osdev.org/VGA_Hardware
+  - https://www.scanline.ca/vga/
+- **VGA 关键地址**：
+  - I/O 端口：0x3C0-0x3DF（VGA 控制寄存器）
+  - 内存映射：0xA0000-0xBFFFF（VGA 显存）
+
+**2. Intel CPU 架构手册**
+
+- **文档名称**：《Intel® 64 and IA-32 Architectures Software Developer's Manual》
+- **关键章节**：
+  - Volume 3, Chapter 6: "Interrupt and Exception Handling"
+  - Volume 3, Chapter 9: "8086 Emulation"
+- **下载地址**：https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+
+#### 3.5.5 学习路径建议
+
+**阶段 1：理解中断机制（1-2 周）**
+
+1. 阅读 SeaBIOS 的 `src/interrupts.c`
+2. 理解中断向量表的初始化过程
+3. 查看 `src/vgahooks.c` 中的 INT 10h 处理函数
+
+**阶段 2：查看具体实现（2-3 周）**
+
+1. **从 DOSBox 开始**（推荐）：
+   - 阅读 `src/hardware/int10.cpp`
+   - 代码结构清晰，注释详细，易于理解
+
+2. **深入 SeaBIOS**：
+   - 查看 `src/vgahooks.c` - INT 10h 入口
+   - 查看 `src/vgabios.c` - VGA 硬件操作
+
+3. **理解硬件模拟**：
+   - 阅读 QEMU 的 `hw/vga/vga.c` - VGA 硬件模拟
+   - 阅读 QEMU 的 `hw/display/vga.c` - 显示逻辑
+
+**阶段 3：硬件层面（3-4 周）**
+
+1. **学习 VGA 寄存器**：
+   - 研究 VGA I/O 端口（0x3C0-0x3DF）
+   - 理解 VGA 内存映射（0xA0000-0xBFFFF）
+   - 实践：直接操作 VGA 寄存器显示字符
+
+2. **阅读硬件模拟代码**：
+   - QEMU 的 `hw/vga/vga.c` - VGA 硬件模拟
+   - QEMU 的 `hw/display/vga.c` - 显示逻辑
+
+**阶段 4：实践项目（持续）**
+
+1. **在 QEMU 中调试**：
+   ```bash
+   # 使用 QEMU monitor 查看中断向量表
+   qemu-system-x86_64 -monitor stdio -drive format=raw,file=boot.bin
+   ```
+
+2. **编写自己的 INT 10h 处理程序**：
+   ```nasm
+   ; 挂钩中断向量
+   cli
+   mov ax, 0
+   mov es, ax
+   mov word [es:0x10*4], my_int10_handler    ; 设置偏移地址
+   mov [es:0x10*4+2], cs                      ; 设置段地址
+   sti
+   
+   my_int10_handler:
+       ; 实现自己的视频服务
+       cmp ah, 0x0E
+       je .tty_output
+       ; ... 其他功能处理
+       iret
+   
+   .tty_output:
+       ; 实现字符显示
+       iret
+   ```
+
+#### 3.5.6 推荐阅读顺序
+
+1. **第一步**：DOSBox 的 `int10.cpp`
+   - 代码结构清晰，注释详细
+   - 理解 BIOS 中断的模拟实现
+
+2. **第二步**：SeaBIOS 的 `vgahooks.c`
+   - 更接近真实 BIOS 的实现
+   - 理解中断向量表的实际使用
+
+3. **第三步**：QEMU 的 VGA 硬件模拟
+   - 理解硬件层面的实现
+   - 学习如何模拟 VGA 硬件
+
+4. **第四步**：硬件文档
+   - VGA 规范文档
+   - Intel CPU 架构手册
+
+#### 3.5.7 实用命令速查
+
+**查看 SeaBIOS 源码**：
+```bash
+# 克隆并查找 INT 10h 相关代码
+git clone https://github.com/coreboot/seabios.git
+cd seabios
+find . -name "*.c" -o -name "*.h" | xargs grep -l "int.*10\|INT.*10" | head -10
+```
+
+**查看 DOSBox 源码**：
+```bash
+# 克隆并查看 INT 10h 实现
+git clone https://github.com/dosbox-staging/dosbox-staging.git
+cd dosbox-staging
+cat src/hardware/int10.cpp
+```
+
+**查看 QEMU 源码**：
+```bash
+# 克隆并查找 VGA 相关代码
+git clone https://github.com/qemu/qemu.git
+cd qemu
+grep -r "vga\|VGA" hw/display/ hw/vga/ | head -20
+```
 
 ## 四、裸机编程：绕过操作系统
 
