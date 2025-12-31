@@ -11,8 +11,10 @@ MANUAL_INT_BIN = manual_int_demo.bin
 MANUAL_INT_ASM = manual_int_demo.asm
 EVENT_DEMO_BIN = event_demo.bin
 EVENT_DEMO_ASM = event_demo.asm
+KEYBOARD_DEMO_BIN = keyboard_demo.bin
+KEYBOARD_DEMO_ASM = keyboard_demo.asm
 
-.PHONY: all build run run-gui run-term clean help manual-int manual-int-gui manual-int-term event-demo event-demo-gui event-demo-term
+.PHONY: all build run run-gui run-term clean help manual-int manual-int-gui manual-int-term event-demo event-demo-gui event-demo-term keyboard-demo keyboard-demo-gui keyboard-demo-term
 
 all: build
 
@@ -37,7 +39,7 @@ run-term: $(BOOT_BIN)
 	$(QEMU) -display curses $(QEMUFLAGS)
 
 clean:
-	rm -f $(BOOT_BIN) $(MANUAL_INT_BIN) $(EVENT_DEMO_BIN)
+	rm -f $(BOOT_BIN) $(MANUAL_INT_BIN) $(EVENT_DEMO_BIN) $(KEYBOARD_DEMO_BIN)
 	@echo "已清理生成的文件"
 
 # 手动实现 INT 指令的示例
@@ -78,6 +80,27 @@ event-demo-term: $(EVENT_DEMO_BIN)
 	@echo "      如果不起作用，尝试 Ctrl+A 然后按 C，输入 quit 后回车"
 	$(QEMU) -display curses -drive format=raw,file=$(EVENT_DEMO_BIN)
 
+# 键盘输入处理示例
+keyboard-demo: $(KEYBOARD_DEMO_BIN)
+
+$(KEYBOARD_DEMO_BIN): $(KEYBOARD_DEMO_ASM)
+	$(ASM) $(ASMFLAGS) $(KEYBOARD_DEMO_ASM) -o $(KEYBOARD_DEMO_BIN)
+	@echo "编译完成: $(KEYBOARD_DEMO_BIN)"
+	@ls -lh $(KEYBOARD_DEMO_BIN)
+
+keyboard-demo-gui: $(KEYBOARD_DEMO_BIN)
+	@echo "在 QEMU 图形窗口中运行键盘输入处理示例..."
+	@echo "提示: 如果没有看到窗口，请尝试 'make keyboard-demo-term' 在终端中运行"
+	@echo "      按任意键会显示：'x' was pressed!"
+	$(QEMU) -display sdl -drive format=raw,file=$(KEYBOARD_DEMO_BIN)
+
+keyboard-demo-term: $(KEYBOARD_DEMO_BIN)
+	@echo "在 QEMU 终端模式中运行键盘输入处理示例..."
+	@echo "提示: 退出方法 - 按 Ctrl+A，松开后按 X（大写）"
+	@echo "      如果不起作用，尝试 Ctrl+A 然后按 C，输入 quit 后回车"
+	@echo "      按任意键会显示：'x' was pressed!"
+	$(QEMU) -display curses -drive format=raw,file=$(KEYBOARD_DEMO_BIN)
+
 help:
 	@echo "可用目标:"
 	@echo "  make build           - 编译 boot.asm 生成 boot.bin"
@@ -94,6 +117,11 @@ help:
 	@echo "  make event-demo      - 编译 event_demo.asm"
 	@echo "  make event-demo-gui  - 在图形窗口中运行事件机制演示"
 	@echo "  make event-demo-term - 在终端中运行事件机制演示"
+	@echo ""
+	@echo "键盘输入处理示例:"
+	@echo "  make keyboard-demo      - 编译 keyboard_demo.asm"
+	@echo "  make keyboard-demo-gui  - 在图形窗口中运行键盘输入处理示例"
+	@echo "  make keyboard-demo-term - 在终端中运行键盘输入处理示例"
 	@echo ""
 	@echo "  make clean           - 删除生成的文件"
 	@echo "  make help            - 显示此帮助信息"
