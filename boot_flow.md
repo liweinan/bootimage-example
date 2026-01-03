@@ -289,6 +289,80 @@ bios_error:
    ; 3. 远跳转到保护模式代码
    jmp 0x08:protected_mode_code
    ```
+   
+   **`0x08` 的含义：段选择子（Segment Selector）**
+   
+   `0x08` 是保护模式下的**段选择子**，不是实模式的段地址。
+   
+   **段选择子的结构（16位）：**
+   ```
+   Bit 15-3: 索引（Index）- 指向GDT中的描述符
+   Bit 2:    TI（Table Indicator）- 0=GDT, 1=LDT
+   Bit 1-0:  RPL（Requested Privilege Level）- 特权级（0-3）
+   ```
+   
+   **`0x08` 的解析：**
+   - **二进制**：`0000 0000 0000 1000`
+   - **索引**：`0x08 / 8 = 1`（每个描述符占8字节）
+   - **TI**：`0`（使用GDT）
+   - **RPL**：`0`（Ring 0，最高特权级）
+   - **含义**：指向GDT中的第1个描述符（索引1），通常是代码段描述符
+   
+   **为什么是索引1？**
+   
+   GDT的结构通常是：
+   ```
+   GDT[0]: 空描述符（NULL descriptor，必须为0）
+   GDT[1]: 代码段描述符（Code segment descriptor）
+   GDT[2]: 数据段描述符（Data segment descriptor）
+   ...
+   ```
+   
+   - 索引0是空描述符，不能使用
+   - 索引1通常是代码段描述符（32位，可执行，Ring 0）
+   - 所以 `0x08`（索引1）指向代码段
+   
+   **段选择子 vs 实模式段地址：**
+   
+   | 特性 | 实模式段地址 | 保护模式段选择子 |
+   |------|------------|----------------|
+   | **格式** | 16位段地址（如 `0x07C0`） | 16位选择子（如 `0x08`） |
+   | **含义** | 段基址 = 段地址 × 16 | 索引GDT/LDT中的描述符 |
+   | **计算** | 物理地址 = 段地址 × 16 + 偏移 | 线性地址 = 段描述符基址 + 偏移 |
+   | **示例** | `0x07C0:0x0000` = `0x7C00` | `0x08:offset` = 通过GDT[1]计算 |
+   
+   **完整的GDT示例：**
+   ```asm
+   gdt:
+       ; 索引0：空描述符（必须为0）
+       dd 0x00000000
+       dd 0x00000000
+       
+       ; 索引1：32位代码段（0x08）
+       dw 0xFFFF      ; 段界限（低16位）
+       dw 0x0000      ; 段基址（低16位）
+       db 0x00        ; 段基址（中8位）
+       db 0x9A        ; 访问权限：可执行、可读、Ring 0
+       db 0xCF        ; 标志：32位，粒度4KB
+       db 0x00        ; 段基址（高8位）
+       
+       ; 索引2：32位数据段（0x10）
+       dw 0xFFFF
+       dw 0x0000
+       db 0x00
+       db 0x92        ; 访问权限：可读写、Ring 0
+       db 0xCF
+       db 0x00
+   
+   gdt_descriptor:
+       dw gdt_end - gdt - 1  ; GDT大小
+       dd gdt                ; GDT地址
+   gdt_end:
+   ```
+   
+   在这个例子中：
+   - `0x08` = 索引1 = 代码段描述符
+   - `0x10` = 索引2 = 数据段描述符
 
 2. **保护模式 → 实模式**
    ```asm
@@ -343,6 +417,36 @@ bios_error:
    - CPU复位后从0xFFFF0开始执行（实模式可访问）
    - BIOS代码需要能在实模式下访问
    - 通过硬件地址解码实现双重映射
+   
+   **QEMU源代码实现：**
+   
+   在QEMU的 `target/i386/cpu.c` 文件中，`x86_cpu_reset_hold()` 函数设置了CPU复位后的初始状态：
+   
+   ```c
+   // QEMU 源代码：target/i386/cpu.c:9130-9149
+   static void x86_cpu_reset_hold(Object *obj, ResetType type)
+   {
+       CPUX86State *env = &cpu->env;
+       
+       // ... 其他初始化代码 ...
+       
+       // 设置CS段寄存器：段选择子=0xF000，基址=0xFFFF0000，界限=0xFFFF
+       cpu_x86_load_seg_cache(env, R_CS, 0xf000, 0xffff0000, 0xffff,
+                              DESC_P_MASK | DESC_S_MASK | DESC_CS_MASK |
+                              DESC_R_MASK | DESC_A_MASK);
+       
+       // 设置EIP寄存器为0xFFF0
+       env->eip = 0xfff0;
+       
+       // ... 其他初始化代码 ...
+   }
+   ```
+   
+   **关键点：**
+   - **CS = 0xF000**：段选择子（实模式下，段地址 = 0xF000）
+   - **EIP = 0xFFF0**：指令指针
+   - **实际执行地址**：`CS × 16 + EIP = 0xF000 × 16 + 0xFFF0 = 0xF0000 + 0xFFF0 = 0xFFFF0`
+   - 这符合x86架构规范：CPU复位后从 `0xFFFF0` 开始执行
    ```
 
 4. **引导扇区的加载位置**
