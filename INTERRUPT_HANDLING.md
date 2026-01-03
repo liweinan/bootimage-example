@@ -14,7 +14,7 @@
 
 ## BIOS 中断向量表（IVT）初始化
 
-**详细内容请参考：** [boot_flow.md - Section 3.3](boot_flow.md#33-中断向量表ivt初始化)
+**详细内容请参考：** [BOOT_FLOW.md - Section 3.3](BOOT_FLOW.md#33-中断向量表ivt初始化)
 
 ### 调用时机
 
@@ -52,7 +52,7 @@ ivt_init()（中断向量表初始化，第 113 行调用）← 这里！
 - 所有 256 个向量都有条目，确保即使发生未预期的中断，CPU 也能安全返回
 - PIC 初始化之前就设置好硬件中断处理程序，确保后续 PIC 初始化时如果发生中断，IVT 中已有有效处理程序
 
-**详细代码和说明请参考：** [boot_flow.md - Section 3.3](boot_flow.md#33-中断向量表ivt初始化)
+**详细代码和说明请参考：** [BOOT_FLOW.md - Section 3.3](BOOT_FLOW.md#33-中断向量表ivt初始化)
 
 ---
 
@@ -135,7 +135,7 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 
 ## BIOS IVT 与 Kernel IDT 的软件中断服务程序对比
 
-**详细内容请参考：** [boot_flow.md - Section 6.5](boot_flow.md#65-bios-ivt-与-kernel-idt-的软件中断服务程序对比)
+**详细内容请参考：** [BOOT_FLOW.md - Section 6.5](BOOT_FLOW.md#65-bios-ivt-与-kernel-idt-的软件中断服务程序对比)
 
 **重要结论：BIOS 的 IVT 和 Kernel 的 IDT 都不仅设置硬件中断处理程序，还设置软件中断服务程序。**
 
@@ -182,13 +182,13 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 | **调用方式** | `INT` 指令 | `INT 0x80` 或 `SYSCALL` 指令 |
 | **运行模式** | 实模式（16位） | 保护模式/长模式（32/64位） |
 
-**详细说明请参考：** [boot_flow.md - Section 6.5](boot_flow.md#65-bios-ivt-与-kernel-idt-的软件中断服务程序对比)
+**详细说明请参考：** [BOOT_FLOW.md - Section 6.5](BOOT_FLOW.md#65-bios-ivt-与-kernel-idt-的软件中断服务程序对比)
 
 ---
 
 ## UEFI 中断处理机制
 
-**详细内容请参考：** [boot_flow.md - Section 6.6](boot_flow.md#66-uefi-中断处理机制)
+**详细内容请参考：** [BOOT_FLOW.md - Section 6.6](BOOT_FLOW.md#66-uefi-中断处理机制)
 
 **重要说明：UEFI 与 BIOS 在中断处理机制上有根本性差异。**
 
@@ -226,7 +226,7 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 | **硬件中断处理** | 通过 PIC + IVT | 通过 APIC + IDT |
 | **事件处理机制** | 中断驱动 | 事件驱动（CreateEvent, RegisterProtocolNotify） |
 
-**详细说明请参考：** [boot_flow.md - Section 6.6](boot_flow.md#66-uefi-中断处理机制)
+**详细说明请参考：** [BOOT_FLOW.md - Section 6.6](BOOT_FLOW.md#66-uefi-中断处理机制)
 
 ---
 
@@ -324,7 +324,7 @@ static inline u8 inb(u16 port) {
 5. **PIC 端口地址**：硬件固定的 I/O 端口地址和地址解码机制
 
 **更多详细信息请参考：**
-- [boot_flow.md](boot_flow.md) - 完整的启动流程文档
+- [BOOT_FLOW.md](BOOT_FLOW.md) - 完整的启动流程文档
 - [APPENDIX_A_KEYBOARD_INTERRUPT.md](APPENDIX_A_KEYBOARD_INTERRUPT.md) - 键盘中断处理代码分析
 - [APPENDIX_B_EVENT_MECHANISM.md](APPENDIX_B_EVENT_MECHANISM.md) - 应用层事件机制与操作系统实现
 

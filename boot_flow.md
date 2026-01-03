@@ -201,7 +201,8 @@ bios_error:
 - CPU 复位后从 `0xFFFF0`（BIOS 入口点）开始执行
 
 > **注意**：关于 BIOS 运行模式（实模式/保护模式）、内存布局、地址映射等详细内容，请参见 [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)。  
-> 关于 QEMU 软件实现与真实硬件加载 BIOS 的区别，请参见 [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)。
+> 关于 QEMU 软件实现与真实硬件加载 BIOS 的区别，请参见 [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)。  
+> 关于哪些 BIOS 代码未映射到 128KB 区域且需要保护模式访问的详细分析，请参见 [BIOS 代码布局分析：128KB 映射区域外的保护模式代码](BIOS_CODE_LAYOUT_ANALYSIS.md)。
 
 ---
 
