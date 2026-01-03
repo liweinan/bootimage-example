@@ -1645,6 +1645,8 @@ grub_relocator32_boot()
 
 ### 最小引导扇区程序代码
 
+> **相关文档**：关于最小引导扇区程序（`boot.asm`）与 GRUB 引导扇区代码（`boot.S`）的详细对比分析，请参见 [boot.asm 与 GRUB boot.S 对比分析](BOOTSECTOR_COMPARISON.md)。
+
 ```asm
 ; boot.asm - 最小引导扇区程序
 ; 这是一个 512 字节的引导扇区程序，BIOS 会将其加载到内存地址 0x7C00 处执行
