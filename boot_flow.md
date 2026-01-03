@@ -4761,7 +4761,7 @@ epoll_wait(epoll_fd, events, MAX_EVENTS, -1);  // 异步等待，事件到达时
 ```mermaid
 flowchart TB
     A["应用层<br/>epoll/select/poll/kqueue<br/>应用接口"]
-    B["系统调用层<br/>sys_epoll_*<br/>系统调用接口"]
+    B["系统调用层<br/>sys_epoll<br/>系统调用接口"]
     C["内核事件框架<br/>eventpoll/fs/notify<br/>内核事件管理"]
     D["设备驱动层<br/>驱动事件队列<br/>设备事件源"]
     E["中断处理层<br/>IRQ handlers<br/>硬件中断"]
@@ -6318,12 +6318,12 @@ enum {
 
 ```mermaid
 flowchart TD
-    A["硬件层: 网卡接收到数据包<br/>网卡 DMA 写入内存<br/>产生硬件中断 IRQ 19"]
-    B["中断处理层: 硬件中断处理程序<br/>CPU 跳转到中断向量<br/>确认中断、标记软中断<br/>代码: net_rx_action 上半部"]
-    C["软中断层: 网络接收软中断<br/>从 DMA 缓冲区读取数据包<br/>解析协议头 IP/TCP/UDP<br/>放入 socket 接收缓冲区<br/>代码: NET_RX_SOFTIRQ"]
-    D["内核事件层: socket 事件通知<br/>检查 socket 等待队列<br/>调用 wake_up 唤醒进程<br/>触发 ep_poll_callback<br/>加入 eventpoll 就绪列表"]
-    E["系统调用层: epoll_wait 返回<br/>检查 eventpoll 就绪列表<br/>复制事件到用户空间<br/>返回就绪事件数量"]
-    F["应用层: 事件处理<br/>从 epoll_wait 返回<br/>遍历就绪事件列表<br/>调用回调函数处理数据"]
+    A["硬件层-网卡接收到数据包<br/>网卡DMA写入内存<br/>产生硬件中断IRQ19"]
+    B["中断处理层-硬件中断处理程序<br/>CPU跳转到中断向量<br/>确认中断、标记软中断<br/>代码-net_rx_action上半部"]
+    C["软中断层-网络接收软中断<br/>从DMA缓冲区读取数据包<br/>解析协议头IP/TCP/UDP<br/>放入socket接收缓冲区<br/>代码-NET_RX_SOFTIRQ"]
+    D["内核事件层-socket事件通知<br/>检查socket等待队列<br/>调用wake_up唤醒进程<br/>触发ep_poll_callback<br/>加入eventpoll就绪列表"]
+    E["系统调用层-epoll_wait返回<br/>检查eventpoll就绪列表<br/>复制事件到用户空间<br/>返回就绪事件数量"]
+    F["应用层-事件处理<br/>从epoll_wait返回<br/>遍历就绪事件列表<br/>调用回调函数处理数据"]
     
     A --> B
     B --> C
@@ -6739,8 +6739,8 @@ flowchart TB
     B["操作系统异步机制<br/>等待队列wait_queue<br/>事件轮询框架eventpoll<br/>软中断/工作队列"]
     C["硬件层异步机制<br/>硬件中断IRQ<br/>硬件定时器中断<br/>硬件异常CPU异常"]
     
-    A -->|最终依赖| B
-    B -->|最终依赖| C
+    A --> B
+    B --> C
 ```
 
 #### 5. 结论
