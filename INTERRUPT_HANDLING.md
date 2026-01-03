@@ -326,5 +326,6 @@ static inline u8 inb(u16 port) {
 **更多详细信息请参考：**
 - [BOOT_FLOW.md](BOOT_FLOW.md) - 完整的启动流程文档
 - [APPENDIX_A_KEYBOARD_INTERRUPT.md](APPENDIX_A_KEYBOARD_INTERRUPT.md) - 键盘中断处理代码分析
-- [APPENDIX_B_EVENT_MECHANISM.md](APPENDIX_B_EVENT_MECHANISM.md) - 应用层事件机制与操作系统实现
+- [APPENDIX_B_EVENT_MECHANISM.md](APPENDIX_B_EVENT_MECHANISM.md) - 应用层事件机制
+- [LINUX_INTERRUPT_HANDLING.md](LINUX_INTERRUPT_HANDLING.md) - Linux 内核中断处理：Top Half 和 Bottom Half
 

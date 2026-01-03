@@ -27,7 +27,7 @@
 ## 附录
 
 - [附录A：键盘中断处理代码分析](APPENDIX_A_KEYBOARD_INTERRUPT.md)
-- [附录B：应用层事件机制与操作系统实现](APPENDIX_B_EVENT_MECHANISM.md)
+- [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
 - [中断处理详解](INTERRUPT_HANDLING.md)
 
 ---
@@ -1985,7 +1985,7 @@ qemu-system-x86_64 -fda disk.img
 ## 附录
 
 - [附录A：键盘中断处理代码分析](APPENDIX_A_KEYBOARD_INTERRUPT.md)
-- [附录B：应用层事件机制与操作系统实现](APPENDIX_B_EVENT_MECHANISM.md)
+- [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
 - [中断处理详解](INTERRUPT_HANDLING.md)
 
 ## Linux 内核接管 BIOS
