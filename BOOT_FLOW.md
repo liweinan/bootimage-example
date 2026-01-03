@@ -29,6 +29,7 @@
 - [附录A：键盘中断处理代码分析](APPENDIX_A_KEYBOARD_INTERRUPT.md)
 - [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
 - [中断处理详解](INTERRUPT_HANDLING.md)
+- [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)
 
 ---
 
@@ -1621,6 +1622,29 @@ grub_relocator32_boot()
    - 引导扇区代码读取活动分区的引导扇区
    - 加载 GRUB Core 到 `0x8000` 或更高地址
    - 跳转到 GRUB Core
+   
+   **实模式下的内存使用分析：**
+   
+   - **1MB 内存是否够用？**
+     - **够用**：在实模式阶段（引导扇区 → GRUB Core），所有代码和数据都在 1MB 范围内：
+       - `0x7C00 - 0x7DFF`：引导扇区（512 字节）
+       - `0x8000 - 0x9FFF`：GRUB Core（约 8KB）
+       - `0xA000 - 0xBFFF`：GRUB 文件系统驱动（可选）
+       - `0xF0000 - 0xFFFFF`：BIOS ROM（只读）
+     - **总计使用**：约 10-20KB，远小于 1MB 的可用空间（约 640KB 常规 RAM）
+   
+   - **地址会不会冲突？**
+     - **不会冲突**：内存布局是精心设计的，各组件使用不同的地址范围：
+       - 引导扇区：`0x7C00 - 0x7DFF`（512 字节）
+       - GRUB Core：`0x8000+`（与引导扇区不重叠）
+       - BIOS ROM：`0xF0000 - 0xFFFFF`（只读，不影响）
+       - 可用空间：`0x0000 - 0x7BFF`、`0x8000 - 0x9FFF` 之间等
+     - **设计原则**：引导扇区选择 `0x7C00` 是为了避免与 BIOS 数据区（`0x0000 - 0x03FF`）和栈空间冲突
+   
+   - **为什么内核加载到 1MB 以上？**
+     - 内核镜像通常较大（几 MB 到几十 MB），无法放入前 1MB
+     - 因此 GRUB Core 需要**先切换到保护模式**，然后才能访问 1MB 以上的内存来加载内核
+     - 这是为什么步骤 3 中需要"切换到保护模式/长模式"的原因
 
 3. **GRUB Core → 内核**：
    - GRUB 初始化文件系统，读取配置文件
@@ -1987,6 +2011,7 @@ qemu-system-x86_64 -fda disk.img
 - [附录A：键盘中断处理代码分析](APPENDIX_A_KEYBOARD_INTERRUPT.md)
 - [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
 - [中断处理详解](INTERRUPT_HANDLING.md)
+- [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)
 
 ## Linux 内核接管 BIOS
 
