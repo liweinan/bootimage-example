@@ -16,6 +16,7 @@
 ## 补充说明文档
 
 - [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)
+- [BIOS 代码布局分析：128KB 映射区域内的代码与保护模式代码](BIOS_CODE_LAYOUT_ANALYSIS.md)
 - [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)
 - [boot.asm 与 GRUB boot.S 对比分析](BOOTSECTOR_COMPARISON.md)
 - [UEFI vs BIOS 引导机制对比](UEFI_VS_BIOS_BOOT.md)
@@ -202,7 +203,7 @@ bios_error:
 
 > **注意**：关于 BIOS 运行模式（实模式/保护模式）、内存布局、地址映射等详细内容，请参见 [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)。  
 > 关于 QEMU 软件实现与真实硬件加载 BIOS 的区别，请参见 [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)。  
-> 关于哪些 BIOS 代码未映射到 128KB 区域且需要保护模式访问的详细分析，请参见 [BIOS 代码布局分析：128KB 映射区域外的保护模式代码](BIOS_CODE_LAYOUT_ANALYSIS.md)。
+> 关于哪些 BIOS 代码映射到 128KB 区域，哪些需要保护模式访问的详细分析，请参见 [BIOS 代码布局分析：128KB 映射区域内的代码与保护模式代码](BIOS_CODE_LAYOUT_ANALYSIS.md)。
 
 ---
 
