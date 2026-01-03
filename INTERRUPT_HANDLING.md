@@ -12,11 +12,11 @@
 
 ---
 
-## 1. BIOS 中断向量表（IVT）初始化
+## BIOS 中断向量表（IVT）初始化
 
 **详细内容请参考：** [boot_flow.md - Section 3.3](boot_flow.md#33-中断向量表ivt初始化)
 
-### 1.1 调用时机
+### 调用时机
 
 `ivt_init()` 在 SeaBIOS POST 初始化流程中被调用，具体调用链如下：
 
@@ -38,7 +38,7 @@ ivt_init()（中断向量表初始化，第 113 行调用）← 这里！
 
 **调用位置：** `seabios/src/post.c:113`（在 `interface_init()` 函数中）
 
-### 1.2 初始化步骤
+### 初始化步骤
 
 `ivt_init()` 为所有 256 个中断向量都设置了条目，采用"先全部初始化，再覆盖特定向量"的策略：
 
@@ -56,11 +56,11 @@ ivt_init()（中断向量表初始化，第 113 行调用）← 这里！
 
 ---
 
-## 2. 硬件中断编号（IRQ）vs 中断向量号
+## 硬件中断编号（IRQ）vs 中断向量号
 
 **详细内容请参考：** [APPENDIX_A_KEYBOARD_INTERRUPT.md - 硬件中断编号（IRQ）vs 中断向量号](APPENDIX_A_KEYBOARD_INTERRUPT.md#硬件中断编号irq-vs-中断向量号ivtidt-索引)
 
-### 2.1 硬件中断编号（IRQ - Interrupt Request）
+### 硬件中断编号（IRQ - Interrupt Request）
 
 **IRQ 是硬件层面的编号，由硬件设备决定：**
 
@@ -80,7 +80,7 @@ ivt_init()（中断向量表初始化，第 113 行调用）← 这里！
 - **PIC 管理**：8259A PIC 管理 16 个 IRQ（IRQ0-15）
 - **可配置性**：虽然 IRQ 编号固定，但可以禁用/启用或重映射到不同的中断向量
 
-### 2.2 中断向量号（IVT/IDT 索引）
+### 中断向量号（IVT/IDT 索引）
 
 **中断向量号是 CPU 层面的编号，用于查找中断处理程序：**
 
@@ -100,7 +100,7 @@ ivt_init()（中断向量表初始化，第 113 行调用）← 这里！
   - 硬件中断向量（0x08-0x0F, 0x70-0x77）：**可配置**，由 PIC 的 ICW2 决定
   - 软件中断向量（0x10+）：**可配置**，由 BIOS/操作系统决定
 
-### 2.3 IRQ 到中断向量号的映射
+### IRQ 到中断向量号的映射
 
 **映射关系（BIOS 默认配置）：**
 
@@ -133,13 +133,13 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 
 ---
 
-## 3. BIOS IVT 与 Kernel IDT 的软件中断服务程序对比
+## BIOS IVT 与 Kernel IDT 的软件中断服务程序对比
 
 **详细内容请参考：** [boot_flow.md - Section 6.5](boot_flow.md#65-bios-ivt-与-kernel-idt-的软件中断服务程序对比)
 
 **重要结论：BIOS 的 IVT 和 Kernel 的 IDT 都不仅设置硬件中断处理程序，还设置软件中断服务程序。**
 
-### 3.1 BIOS IVT 设置的软件中断服务程序
+### BIOS IVT 设置的软件中断服务程序
 
 | 中断向量 | 服务名称 | 功能说明 | 使用场景 |
 |---------|---------|---------|---------|
@@ -152,7 +152,7 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 
 **这些软件中断是 BIOS 提供给引导程序和早期系统软件的标准 API。**
 
-### 3.2 软件中断与硬件中断的关系（以 INT 16h 为例）
+### 软件中断与硬件中断的关系（以 INT 16h 为例）
 
 虽然 INT 16h 是软件中断（由用户程序主动调用），但它确实需要处理键盘对应的硬件中断。它们的关系如下：
 
@@ -164,7 +164,7 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 
 **协作关系：** 硬件中断"生产"数据，软件中断"消费"数据
 
-### 3.3 Kernel IDT 设置的软件中断服务程序
+### Kernel IDT 设置的软件中断服务程序
 
 | 中断向量 | 服务名称 | 功能说明 | 使用场景 |
 |---------|---------|---------|---------|
@@ -172,7 +172,7 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 | **SYSCALL**（64位） | 系统调用 | 用户空间调用内核服务 | 64位应用程序系统调用（使用 MSR，不通过 IDT） |
 | **INT 0x80**（64位兼容） | 系统调用 | 兼容 32位应用程序 | 64位系统运行 32位程序 |
 
-### 3.4 对比总结
+### 对比总结
 
 | 特性 | BIOS IVT | Kernel IDT |
 |------|----------|------------|
@@ -186,13 +186,13 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 
 ---
 
-## 4. UEFI 中断处理机制
+## UEFI 中断处理机制
 
 **详细内容请参考：** [boot_flow.md - Section 6.6](boot_flow.md#66-uefi-中断处理机制)
 
 **重要说明：UEFI 与 BIOS 在中断处理机制上有根本性差异。**
 
-### 4.1 UEFI 中断处理的特点
+### UEFI 中断处理的特点
 
 1. **不使用传统 IVT**：
    - UEFI **不使用**实模式下的中断向量表（IVT）
@@ -214,7 +214,7 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
    - 使用 **EFI 服务**（函数调用接口）替代传统中断服务
    - 通过 `EFI_SYSTEM_TABLE` 访问各种服务
 
-### 4.2 UEFI vs BIOS 中断处理对比
+### UEFI vs BIOS 中断处理对比
 
 | 特性 | BIOS（SeaBIOS） | UEFI |
 |------|----------------|------|
@@ -230,11 +230,11 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 
 ---
 
-## 5. PIC 端口地址与地址解码
+## PIC 端口地址与地址解码
 
 **详细内容请参考：** [APPENDIX_A_KEYBOARD_INTERRUPT.md](APPENDIX_A_KEYBOARD_INTERRUPT.md)
 
-### 5.1 PIC 端口地址（硬件固定）
+### PIC 端口地址（硬件固定）
 
 ```c
 // seabios/src/hw/pic.h:12-15
@@ -251,7 +251,7 @@ outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
 - 这些地址由 **IBM PC/AT 架构标准**决定，是 8259A PIC 芯片的硬件设计
 - 所有兼容 IBM PC/AT 的系统都必须使用这些端口地址
 
-### 5.2 CPU 如何找到这些端口地址？
+### CPU 如何找到这些端口地址？
 
 **x86 CPU 的 I/O 端口寻址机制：**
 

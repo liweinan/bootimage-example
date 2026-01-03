@@ -4,7 +4,7 @@
 
 **答案：是的，应用层的事件机制本质上是异步的。**
 
-#### 1. 应用层事件模型的异步特性
+#### 应用层事件模型的异步特性
 
 **事件驱动编程模型：**
 
@@ -42,7 +42,7 @@ while (1) {
    - 单个线程可以同时等待多个事件源（文件描述符、信号、定时器等）
    - 事件发生时，应用**异步响应**，无需轮询
 
-#### 2. 同步 vs 异步对比
+#### 同步 vs 异步对比
 
 **同步模型（阻塞式）：**
 ```c
@@ -64,7 +64,7 @@ epoll_wait(epoll_fd, events, MAX_EVENTS, -1);  // 异步等待，事件到达时
 
 操作系统通过**多层次的抽象**实现事件机制，从底层硬件中断到上层应用接口。
 
-#### 1. 事件机制的层次架构
+#### 事件机制的层次架构
 
 ```mermaid
 flowchart TB
@@ -80,7 +80,7 @@ flowchart TB
     D --> E
 ```
 
-#### 2. 内核事件机制实现（以 epoll 为例）
+#### 内核事件机制实现（以 epoll 为例）
 
 **核心数据结构：**
 
@@ -156,7 +156,7 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 }
 ```
 
-#### 3. 其他事件机制实现
+#### 其他事件机制实现
 
 **信号（Signal）：**
 - 内核维护进程的信号位图（`task_struct->pending`）
@@ -359,7 +359,7 @@ Bottom Half 执行（开中断，相对安全的环境）
 
 **答案：取决于使用的 Bottom Half 机制。Top Half 不会"创建"新的任务，而是通过不同的方式标记/调度工作：**
 
-##### 1. Softirq 机制：标记位图
+##### Softirq 机制：标记位图
 
 **Softirq 是静态的**，Top Half 只是**标记**需要处理的软中断类型，而不是创建新任务。
 
@@ -410,7 +410,7 @@ void __raise_softirq_irqoff(unsigned int nr)
 - 中断返回时，内核检查位图，调用对应的处理函数
 - **没有创建新任务，只是标记待处理的工作**
 
-##### 2. Tasklet 机制：调度已存在的 Tasklet
+##### Tasklet 机制：调度已存在的 Tasklet
 
 **Tasklet 是预先创建好的**，Top Half 只是**调度**它执行，而不是创建新任务。
 
@@ -477,7 +477,7 @@ void __tasklet_schedule(struct tasklet_struct *t)
 - Top Half 只是将 tasklet **加入 per-CPU 队列**，标记为待处理
 - **没有创建新任务**，只是调度已存在的 tasklet
 
-##### 3. Workqueue 机制：创建 Work 并加入队列
+##### Workqueue 机制：创建 Work 并加入队列
 
 **Workqueue 是唯一真正"创建"工作项的机制**，Top Half 可以动态创建 `work_struct` 并加入工作队列。
 
@@ -651,7 +651,7 @@ static void net_rx_action(struct softirq_action *h)
 
 下面以键盘驱动为例，展示如何设计 Top Half 和 Bottom Half 代码。键盘使用 IRQ1，当用户按下按键时，键盘控制器会产生硬件中断。
 
-#### 1. 键盘驱动数据结构设计
+#### 键盘驱动数据结构设计
 
 ```c
 #include <linux/interrupt.h>
@@ -674,7 +674,7 @@ struct keyboard_device {
 };
 ```
 
-#### 2. Top Half：快速响应硬件中断
+#### Top Half：快速响应硬件中断
 
 **设计原则：**
 - 执行时间极短（微秒级）
@@ -737,7 +737,7 @@ static irqreturn_t keyboard_interrupt_handler(int irq, void *dev_id)
 - ✅ **立即返回**：不进行任何耗时操作（如扫描码转换、内存分配）
 - ✅ **触发 Bottom Half**：通过 `schedule_work()` 调度后续处理
 
-#### 3. Bottom Half：处理扫描码转换和输入事件
+#### Bottom Half：处理扫描码转换和输入事件
 
 **设计原则：**
 - 在进程上下文中执行，可以睡眠
@@ -835,7 +835,7 @@ static int scan_code_to_keycode(u8 scan_code)
 - ✅ **耗时操作**：扫描码转换、输入事件生成都在这里完成
 - ✅ **安全操作**：可以访问用户空间、执行文件 I/O 等
 
-#### 4. 驱动初始化和清理
+#### 驱动初始化和清理
 
 ```c
 // 驱动初始化
@@ -919,7 +919,7 @@ static int keyboard_driver_remove(struct platform_device *pdev)
 }
 ```
 
-#### 5. 完整执行流程
+#### 完整执行流程
 
 ```
 用户按下键盘按键 'A'
@@ -955,7 +955,7 @@ CPU 跳转到中断向量（如 0x21）
 应用层通过 /dev/input/eventX 读取按键事件
 ```
 
-#### 6. 设计要点总结
+#### 设计要点总结
 
 - **执行上下文**
   - **Top Half**: 中断上下文
@@ -981,13 +981,13 @@ CPU 跳转到中断向量（如 0x21）
   - **Top Half**: 硬件中断
   - **Bottom Half**: Workqueue（推荐）或 Tasklet
 
-#### 7. 错误实践：将 Bottom Half 逻辑放到 Top Half 的后果
+#### 错误实践：将 Bottom Half 逻辑放到 Top Half 的后果
 
 **问题：如果我在实现驱动程序的时候把本该放在 bottom half 的一些逻辑放到了 top half 会产生什么后果？**
 
 **答案：会产生严重的系统问题，包括系统响应性下降、中断丢失、系统不稳定等。**
 
-##### 7.1 具体后果分析
+##### 具体后果分析
 
 **后果 1：阻塞其他中断，导致中断丢失**
 
@@ -1118,7 +1118,7 @@ irqreturn_t realtime_interrupt_handler(int irq, void *dev_id)
 - Top Half 执行时间过长会导致**实时任务延迟**
 - 可能违反实时性要求
 
-##### 7.2 实际案例：网络驱动性能问题
+##### 实际案例：网络驱动性能问题
 
 **错误实现：**
 
@@ -1172,7 +1172,7 @@ static void net_rx_action(struct softirq_action *h)
 }
 ```
 
-##### 7.3 如何避免这些错误
+##### 如何避免这些错误
 
 **检查清单：**
 
@@ -1197,7 +1197,7 @@ static void net_rx_action(struct softirq_action *h)
    - ✅ 协议栈处理
    - ✅ 文件 I/O
 
-##### 7.4 总结
+##### 总结
 
 **将 Bottom Half 逻辑放到 Top Half 的后果：**
 
@@ -1243,7 +1243,7 @@ static void net_rx_action(struct softirq_action *h)
 
 硬件中断的发生和进入处理程序的时机主要由 **CPU 和中断控制器硬件** 决定，内核只能在有限范围内影响或延迟这个"立即性"。
 
-#### 1. 硬件中断的发生时机（完全由硬件决定）
+#### 硬件中断的发生时机（完全由硬件决定）
 
 - 外部设备（如网卡、键盘、定时器）产生中断请求信号 → 发送到中断控制器（I/O APIC 或 legacy PIC）。
 - 中断控制器根据配置将信号转发到某个 CPU 的 Local APIC。
@@ -1251,7 +1251,7 @@ static void net_rx_action(struct softirq_action *h)
 
 **这个过程完全是硬件行为，内核无法干预。**
 
-#### 2. CPU 何时真正"立即"响应中断（硬件主导，内核可部分影响）
+#### CPU 何时真正"立即"响应中断（硬件主导，内核可部分影响）
 
 CPU 只在**特定时机点**检查并接受中断：
 
@@ -1276,7 +1276,7 @@ CPU 只在**特定时机点**检查并接受中断：
   - **谁控制**: 硬件 + 内核配置
   - **说明**: 高优先级中断可以抢占低优先级中断（中断嵌套）。内核决定是否允许嵌套。
 
-#### 3. 内核实际能控制的范围（有限延迟或禁止）
+#### 内核实际能控制的范围（有限延迟或禁止）
 
 内核**不能让中断"提前"执行**，但可以做到：
 
@@ -1289,7 +1289,7 @@ CPU 只在**特定时机点**检查并接受中断：
   - 在 `request_irq()` 时指定 `IRQF_DISABLED`（已废弃）或手动屏蔽。
   - 卸载驱动时 `free_irq`，解除中断绑定。
 
-#### 4. 典型执行流程（结合硬件和内核）
+#### 典型执行流程（结合硬件和内核）
 
 ```
 硬件设备产生中断请求
@@ -1307,7 +1307,7 @@ CPU 在指令边界检查：
                               内核注册的 Top Half 处理函数立即执行
 ```
 
-#### 5. 总结：内核对"立即执行"的控制程度
+#### 总结：内核对"立即执行"的控制程度
 
 - **不能控制中断何时产生**（完全硬件异步）。
 - **不能强制中断立刻打断正在执行的指令**（CPU 硬件只在指令边界检查）。

@@ -1,19 +1,19 @@
 # VNC Server 配置指南 - 使用 fvwm
 
-## 1. 安装 TigerVNC Server
+## 安装 TigerVNC Server
 
 ```bash
 sudo apt update
 sudo apt install tigervnc-standalone-server tigervnc-common
 ```
 
-## 2. 安装 fvwm 窗口管理器
+## 安装 fvwm 窗口管理器
 
 ```bash
 sudo apt install fvwm
 ```
 
-## 3. 安装 xterm 终端
+## 安装 xterm 终端
 
 ```bash
 sudo apt install xterm
@@ -21,7 +21,7 @@ sudo apt install xterm
 
 xterm 是一个轻量级的 X11 终端模拟器，适合在 VNC 环境中使用。
 
-## 4. 首次启动 VNC Server（设置密码）
+## 首次启动 VNC Server（设置密码）
 
 ```bash
 vncserver :1
@@ -29,13 +29,13 @@ vncserver :1
 
 首次运行时会提示设置 VNC 密码（用于远程连接）。
 
-## 5. 停止 VNC Server（如果正在运行）
+## 停止 VNC Server（如果正在运行）
 
 ```bash
 vncserver -kill :1
 ```
 
-## 6. 配置 xterm 主题（可选）
+## 配置 xterm 主题（可选）
 
 ### 创建 X 资源文件
 
@@ -138,7 +138,7 @@ xrdb ~/.Xresources
 xterm -bg "#002b36" -fg "#839496" -fn "xft:DejaVu Sans Mono:size=12" &
 ```
 
-## 7. 配置 VNC 使用 fvwm
+## 配置 VNC 使用 fvwm
 
 编辑 `~/.vnc/xstartup` 文件：
 
@@ -183,7 +183,7 @@ exec fvwm
 chmod +x ~/.vnc/xstartup
 ```
 
-## 8. 启动 VNC Server
+## 启动 VNC Server
 
 ### 基本启动
 ```bash
@@ -213,7 +213,7 @@ vncserver :1 -fg -verbose
 - `-desktop <name>`：设置 VNC 桌面名称
 - `-localhost [yes|no]`：是否只允许本地连接（默认 no）
 
-## 9. 配置 VNC Server 参数（可选）
+## 配置 VNC Server 参数（可选）
 
 编辑 `~/.vnc/config` 文件来设置分辨率等参数：
 
@@ -229,7 +229,7 @@ depth=24
 dpi=96
 ```
 
-## 10. 连接 VNC
+## 连接 VNC
 
 ### 本地连接
 ```bash
@@ -249,7 +249,7 @@ vncviewer <服务器IP>:1
 - macOS: 内置的 Screen Sharing (vnc://服务器IP:5901)
 - Linux: Remmina, TigerVNC Viewer
 
-## 11. 常用命令
+## 常用命令
 
 ```bash
 # 启动 VNC server（显示 :1，端口 5901）
@@ -297,7 +297,7 @@ cat ~/.vnc/*:1.log
 tail -f ~/.vnc/*:1.log
 ```
 
-## 12. 防火墙配置（如果需要远程访问）
+## 防火墙配置（如果需要远程访问）
 
 ```bash
 # Ubuntu UFW
@@ -307,7 +307,7 @@ sudo ufw allow 5901/tcp
 sudo iptables -A INPUT -p tcp --dport 5901 -j ACCEPT
 ```
 
-## 13. 设置开机自启动（可选）
+## 设置开机自启动（可选）
 
 创建 systemd 服务文件：
 

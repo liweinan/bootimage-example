@@ -10,7 +10,7 @@
 
 ## 一、BIOS 中断机制详解
 
-### 1.1 中断向量表（IVT）的工作原理
+### 中断向量表（IVT）的工作原理
 
 在实模式下，BIOS 在内存低地址（0x0000-0x03FF）维护中断向量表：
 
@@ -32,7 +32,7 @@
   地址 0x0043: [段地址高字节]
 ```
 
-### 1.2 `int 0x10` 的完整执行流程
+### `int 0x10` 的完整执行流程
 
 当执行 `int 0x10` 时，CPU 会执行以下步骤：
 
@@ -71,7 +71,7 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 1.3 引导扇区中的 INT 10h 使用示例
+### 引导扇区中的 INT 10h 使用示例
 
 **示例 1：设置显示模式**
 ```nasm
@@ -102,7 +102,7 @@ mov ah, 0x0E        ; 设置功能号
 msg db "Hello from Boot Sector!", 0
 ```
 
-### 1.4 BIOS 固件实现位置
+### BIOS 固件实现位置
 
 BIOS 中断处理程序位于主板 ROM 中：
 
@@ -121,7 +121,7 @@ BIOS 读取寄存器参数 → 操作硬件 → 返回用户程序
 
 ## 二、开源 BIOS 项目学习资源
 
-### 2.1 SeaBIOS（强烈推荐）
+### SeaBIOS（强烈推荐）
 
 **项目信息**：
 - **项目地址**：https://github.com/coreboot/seabios
@@ -142,20 +142,20 @@ BIOS 读取寄存器参数 → 操作硬件 → 返回用户程序
 
 **快速开始**：
 ```bash
-# 1. 克隆仓库
+# 克隆仓库
 git clone https://github.com/coreboot/seabios.git
 cd seabios
 
-# 2. 查找 INT 10h 相关代码
+# 查找 INT 10h 相关代码
 grep -r "int.*0x10\|INT.*10h\|int10" src/ | head -20
 
-# 3. 查看中断向量表初始化
+# 查看中断向量表初始化
 grep -A 20 "int 0x10\|INT 10h" src/interrupts.c
 
-# 4. 查看 VGA 相关实现
+# 查看 VGA 相关实现
 cat src/vgahooks.c | grep -A 30 "handle_int10"
 
-# 5. 查看 VGA BIOS 实现
+# 查看 VGA BIOS 实现
 cat src/vgabios.c | head -100
 ```
 
@@ -164,7 +164,7 @@ cat src/vgabios.c | head -100
 2. `src/vgahooks.c` - 理解 INT 10h 如何被调用和处理
 3. `src/vgabios.c` - 理解如何直接操作 VGA 硬件
 
-### 2.2 Coreboot
+### Coreboot
 
 **项目信息**：
 - **项目地址**：https://github.com/coreboot/coreboot
@@ -183,7 +183,7 @@ cat src/vgabios.c | head -100
 
 ## 三、虚拟机实现源码学习
 
-### 3.1 QEMU 源码
+### QEMU 源码
 
 **项目信息**：
 - **项目地址**：https://github.com/qemu/qemu
@@ -203,17 +203,17 @@ cat src/vgabios.c | head -100
 
 **查看中断模拟代码**：
 ```bash
-# 1. 克隆仓库
+# 克隆仓库
 git clone https://github.com/qemu/qemu.git
 cd qemu
 
-# 2. 查找中断相关代码
+# 查找中断相关代码
 grep -r "int.*0x10\|interrupt.*10" hw/ | head -20
 
-# 3. 查看 VGA 硬件模拟
+# 查看 VGA 硬件模拟
 cat hw/vga/vga.c | grep -A 20 "int.*10"
 
-# 4. 查看显示设备模拟
+# 查看显示设备模拟
 ls hw/display/
 cat hw/display/vga.c | head -100
 ```
@@ -236,7 +236,7 @@ qemu-system-x86_64 -monitor stdio -drive format=raw,file=boot.bin
 2. `target/i386/` - 理解 CPU 如何模拟中断处理
 3. `hw/intc/` - 理解中断控制器的工作原理
 
-### 3.2 DOSBox 源码（推荐初学者）
+### DOSBox 源码（推荐初学者）
 
 **项目信息**：
 - **项目地址**：https://github.com/dosbox-staging/dosbox-staging
@@ -255,17 +255,17 @@ qemu-system-x86_64 -monitor stdio -drive format=raw,file=boot.bin
 
 **查看 INT 10h 实现**：
 ```bash
-# 1. 克隆仓库
+# 克隆仓库
 git clone https://github.com/dosbox-staging/dosbox-staging.git
 cd dosbox-staging
 
-# 2. 查看 INT 10h 实现（代码结构清晰，有详细注释）
+# 查看 INT 10h 实现（代码结构清晰，有详细注释）
 cat src/hardware/int10.cpp
 
-# 3. 查看 VGA 模拟
+# 查看 VGA 模拟
 cat src/hardware/vga.cpp | head -200
 
-# 4. 查找特定功能实现
+# 查找特定功能实现
 grep -n "SetMode\|WriteChar\|TTY" src/hardware/int10.cpp
 ```
 
@@ -282,7 +282,7 @@ grep -n "SetMode\|WriteChar\|TTY" src/hardware/int10.cpp
 
 ## 四、硬件文档资源
 
-### 4.1 VGA 硬件规范
+### VGA 硬件规范
 
 **VGA 寄存器文档**：
 - 《VGA Hardware Programming Guide》
@@ -314,7 +314,7 @@ grep -n "SetMode\|WriteChar\|TTY" src/hardware/int10.cpp
 - **CRTC 寄存器**（0x3D0-0x3DF）：CRT 控制器
 - **图形控制器**（0x3CE-0x3CF）：图形模式控制
 
-### 4.2 Intel CPU 架构手册
+### Intel CPU 架构手册
 
 **文档名称**：
 《Intel® 64 and IA-32 Architectures Software Developer's Manual》
@@ -343,7 +343,7 @@ grep -n "SetMode\|WriteChar\|TTY" src/hardware/int10.cpp
 2. 再阅读 Volume 3, Chapter 9（实模式）
 3. 最后深入 Volume 1（基础概念）
 
-### 4.3 其他硬件文档
+### 其他硬件文档
 
 **PC/AT 技术参考手册**：
 - 《IBM PC/AT Technical Reference Manual》
@@ -355,7 +355,7 @@ grep -n "SetMode\|WriteChar\|TTY" src/hardware/int10.cpp
 
 ## 五、学习路径与实践
 
-### 5.1 阶段 1：理解中断机制（1-2 周）
+### 阶段 1：理解中断机制（1-2 周）
 
 **目标**：理解 BIOS 中断的基本工作原理
 
@@ -391,7 +391,7 @@ start:
     jmp $
 ```
 
-### 5.2 阶段 2：查看具体实现（2-3 周）
+### 阶段 2：查看具体实现（2-3 周）
 
 **目标**：理解 BIOS 中断的具体实现代码
 
@@ -417,7 +417,7 @@ start:
 2. 对比 DOSBox 和 SeaBIOS 的实现差异
 3. 尝试理解 QEMU 如何模拟 VGA 硬件
 
-### 5.3 阶段 3：硬件层面（3-4 周）
+### 阶段 3：硬件层面（3-4 周）
 
 **目标**：理解 VGA 硬件的底层操作
 
@@ -454,7 +454,7 @@ start:
     jmp $
 ```
 
-### 5.4 阶段 4：实践项目（持续）
+### 阶段 4：实践项目（持续）
 
 **项目 1：在 QEMU 中调试中断**
 
@@ -568,7 +568,7 @@ dw 0xAA55
 
 ## 六、实用命令速查
 
-### 6.1 SeaBIOS 源码查看
+### SeaBIOS 源码查看
 
 ```bash
 # 克隆仓库
@@ -588,7 +588,7 @@ cat src/vgahooks.c | grep -A 30 "handle_int10"
 grep -n "handle_int" src/vgahooks.c
 ```
 
-### 6.2 DOSBox 源码查看
+### DOSBox 源码查看
 
 ```bash
 # 克隆仓库
@@ -605,7 +605,7 @@ grep -n "SetMode\|WriteChar\|TTY" src/hardware/int10.cpp
 cat src/hardware/vga.cpp | head -200
 ```
 
-### 6.3 QEMU 源码查看
+### QEMU 源码查看
 
 ```bash
 # 克隆仓库
@@ -622,7 +622,7 @@ cat hw/vga/vga.c | head -100
 grep -r "interrupt" target/i386/ | head -20
 ```
 
-### 6.4 QEMU Monitor 调试命令
+### QEMU Monitor 调试命令
 
 ```bash
 # 启动 QEMU 并进入 monitor 模式
@@ -638,7 +638,7 @@ qemu-system-x86_64 -monitor stdio -drive format=raw,file=boot.bin
 # quit                    # 退出 QEMU
 ```
 
-### 6.5 编译和运行引导扇区
+### 编译和运行引导扇区
 
 ```bash
 # 编译
@@ -656,7 +656,7 @@ qemu-system-x86_64 -monitor stdio -drive format=raw,file=boot.bin
 
 ## 七、推荐阅读顺序总结
 
-### 7.1 初学者路径
+### 初学者路径
 
 1. **第一步**：DOSBox 的 `int10.cpp`
    - 代码结构清晰，注释详细
@@ -678,14 +678,14 @@ qemu-system-x86_64 -monitor stdio -drive format=raw,file=boot.bin
    - Intel CPU 架构手册
    - **预计时间**：持续参考
 
-### 7.2 学习要点
+### 学习要点
 
 - **从简单到复杂**：先看 DOSBox，再看 SeaBIOS，最后看 QEMU
 - **理论与实践结合**：阅读源码的同时编写测试程序
 - **使用调试工具**：QEMU monitor 是理解内存和寄存器的好工具
 - **阅读官方文档**：硬件文档是最准确的参考资料
 
-### 7.3 常见问题
+### 常见问题
 
 **Q: 为什么 BIOS 代码在 ROM 中，但我们能调用它？**
 A: BIOS 在系统启动时会将中断向量表初始化，指向 ROM 中的处理程序。当调用 `int 0x10` 时，CPU 会跳转到 ROM 中的代码执行。
