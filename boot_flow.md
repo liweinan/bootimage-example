@@ -4759,12 +4759,12 @@ epoll_wait(epoll_fd, events, MAX_EVENTS, -1);  // 异步等待，事件到达时
 #### 1. 事件机制的层次架构
 
 ```mermaid
-graph TB
-    A[应用层<br/>epoll/select/poll/kqueue<br/>应用接口]
-    B[系统调用层<br/>sys_epoll_*<br/>系统调用接口]
-    C[内核事件框架<br/>eventpoll/fs/notify<br/>内核事件管理]
-    D[设备驱动层<br/>驱动事件队列<br/>设备事件源]
-    E[中断处理层<br/>IRQ handlers<br/>硬件中断]
+flowchart TB
+    A["应用层<br/>epoll/select/poll/kqueue<br/>应用接口"]
+    B["系统调用层<br/>sys_epoll_*<br/>系统调用接口"]
+    C["内核事件框架<br/>eventpoll/fs/notify<br/>内核事件管理"]
+    D["设备驱动层<br/>驱动事件队列<br/>设备事件源"]
+    E["中断处理层<br/>IRQ handlers<br/>硬件中断"]
     
     A --> B
     B --> C
@@ -6318,12 +6318,12 @@ enum {
 
 ```mermaid
 flowchart TD
-    A[硬件层: 网卡接收到数据包<br/>网卡 DMA 写入内存<br/>产生硬件中断 IRQ 19] 
-    B[中断处理层: 硬件中断处理程序<br/>CPU 跳转到中断向量<br/>确认中断、标记软中断<br/>代码: net_rx_action 上半部]
-    C[软中断层: 网络接收软中断<br/>从 DMA 缓冲区读取数据包<br/>解析协议头 IP/TCP/UDP<br/>放入 socket 接收缓冲区<br/>代码: NET_RX_SOFTIRQ]
-    D[内核事件层: socket 事件通知<br/>检查 socket 等待队列<br/>调用 wake_up 唤醒进程<br/>触发 ep_poll_callback<br/>加入 eventpoll 就绪列表]
-    E[系统调用层: epoll_wait 返回<br/>检查 eventpoll 就绪列表<br/>复制事件到用户空间<br/>返回就绪事件数量]
-    F[应用层: 事件处理<br/>从 epoll_wait 返回<br/>遍历就绪事件列表<br/>调用回调函数处理数据]
+    A["硬件层: 网卡接收到数据包<br/>网卡 DMA 写入内存<br/>产生硬件中断 IRQ 19"]
+    B["中断处理层: 硬件中断处理程序<br/>CPU 跳转到中断向量<br/>确认中断、标记软中断<br/>代码: net_rx_action 上半部"]
+    C["软中断层: 网络接收软中断<br/>从 DMA 缓冲区读取数据包<br/>解析协议头 IP/TCP/UDP<br/>放入 socket 接收缓冲区<br/>代码: NET_RX_SOFTIRQ"]
+    D["内核事件层: socket 事件通知<br/>检查 socket 等待队列<br/>调用 wake_up 唤醒进程<br/>触发 ep_poll_callback<br/>加入 eventpoll 就绪列表"]
+    E["系统调用层: epoll_wait 返回<br/>检查 eventpoll 就绪列表<br/>复制事件到用户空间<br/>返回就绪事件数量"]
+    F["应用层: 事件处理<br/>从 epoll_wait 返回<br/>遍历就绪事件列表<br/>调用回调函数处理数据"]
     
     A --> B
     B --> C
@@ -6734,10 +6734,10 @@ ssize_t n = read(fd, buf, size);
 #### 4. 异步机制的层次分析
 
 ```mermaid
-graph TB
-    A[应用层异步机制<br/>epoll/select/poll 事件循环<br/>异步 I/O aio_read/aio_write<br/>信号处理 signal handlers]
-    B[操作系统异步机制<br/>等待队列 wait_queue<br/>事件轮询框架 eventpoll<br/>软中断/工作队列]
-    C[硬件层异步机制<br/>硬件中断 IRQ<br/>硬件定时器中断<br/>硬件异常 CPU 异常]
+flowchart TB
+    A["应用层异步机制<br/>epoll/select/poll事件循环<br/>异步IO aio_read/aio_write<br/>信号处理signal handlers"]
+    B["操作系统异步机制<br/>等待队列wait_queue<br/>事件轮询框架eventpoll<br/>软中断/工作队列"]
+    C["硬件层异步机制<br/>硬件中断IRQ<br/>硬件定时器中断<br/>硬件异常CPU异常"]
     
     A -->|最终依赖| B
     B -->|最终依赖| C
@@ -7274,27 +7274,32 @@ struct cfs_rq {
 ```mermaid
 flowchart TD
     A[硬件中断发生]
-    B[中断处理程序上半部<br/>快速处理紧急事务<br/>标记软中断 raise_softirq<br/>或调度工作项 schedule_work]
-    C[中断返回路径检查点<br/>检查是否有待处理的软中断<br/>检查是否需要重新调度]
+    B[中断处理程序上半部<br/>Top Half<br/>快速处理紧急事务<br/>标记软中断 raise_softirq<br/>或调度工作项 schedule_work]
+    C[中断返回路径 irq_exit<br/>检查软中断和调度标志]
     D{有软中断待处理?}
-    E{需要重新调度?}
-    F[do_softirq<br/>循环处理软中断]
-    G[schedule<br/>选择下一个进程]
-    H{处理时间过长?}
-    I[唤醒 ksoftirqd]
-    J[ksoftirqd 线程<br/>循环处理剩余软中断]
-    K[上下文切换<br/>新进程开始运行]
+    E[do_softirq<br/>循环处理软中断]
+    F{处理时间过长?}
+    G[唤醒 ksoftirqd 线程]
+    H[ksoftirqd 线程<br/>在后台处理剩余软中断]
+    I{需要重新调度?}
+    J[schedule<br/>选择下一个进程]
+    K[上下文切换<br/>切换到新进程]
+    L[继续执行被中断的代码<br/>或返回用户空间]
     
     A --> B
     B --> C
     C --> D
-    C --> E
-    D -->|是| F
-    E -->|是| G
-    F --> H
-    H -->|是| I
-    I --> J
-    G --> K
+    D -->|是| E
+    D -->|否| I
+    E --> F
+    F -->|是| G
+    F -->|否| I
+    G --> H
+    H --> I
+    I -->|是| J
+    I -->|否| L
+    J --> K
+    K --> L
 ```
 
 #### 6. 关键区别：内核 vs 应用层事件循环
