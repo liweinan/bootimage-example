@@ -7,7 +7,6 @@
 ## 目录
 
 - [QEMU 加载 SeaBIOS](#qemu-加载-seabios)
-- [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)
 - [SeaBIOS 初始化中断服务](#seabios-初始化中断服务)
 - [引导扇区程序：从 SeaBIOS 到用户代码的执行](#引导扇区程序从-seabios-到用户代码的执行)
 - [Linux 内核接管 BIOS](#linux-内核接管-bios)
@@ -16,6 +15,7 @@
 
 ## 补充说明文档
 
+- [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)
 - [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)
 - [boot.asm 与 GRUB boot.S 对比分析](BOOTSECTOR_COMPARISON.md)
 - [UEFI vs BIOS 引导机制对比](UEFI_VS_BIOS_BOOT.md)
@@ -2396,3 +2396,152 @@ void __init idt_setup_apic_and_irq_gates(void)
 1. **硬件中断不再路由到 BIOS**：PIC 被重新编程，中断向量映射到内核的 IDT
 2. **软件中断被内核接管**：所有 `INT` 指令触发的异常由内核的 IDT 处理
 3. **BIOS 代码不再执行**：除了可能的 UEFI Runtime Services，BIOS 固件代码基本不再被调用
+
+---
+
+## 总结：完整流程时间线
+
+以下是从 QEMU 启动到 Linux 内核完全接管系统的完整流程时间线：
+
+```
+QEMU 启动
+    ↓
+加载 SeaBIOS 到内存顶部（0xFFFFFFFF - bios_size）
+    ↓
+CPU 复位，从 0xFFFF0 开始执行 SeaBIOS
+    ↓
+SeaBIOS POST 初始化
+    ├─ 初始化 IVT（中断向量表）
+    ├─ 初始化 PIC（中断控制器）
+    ├─ 初始化硬件设备
+    └─ 调用 startBoot() → INT 19h
+    ↓
+INT 19h 处理程序（handle_19）
+    ├─ 重置引导序列号
+    └─ 调用 do_boot(0)
+    ↓
+do_boot() 选择引导设备
+    ├─ 软盘（0x00）
+    ├─ 硬盘（0x80）← 通常选择这个
+    └─ CD-ROM 等
+    ↓
+boot_disk() 读取引导扇区
+    ├─ 调用 INT 13h（AH=0x02）读取第一个扇区
+    ├─ 加载到内存地址 0x7C00（段:偏移 = 0x07C0:0x0000）
+    ├─ 验证引导扇区签名（0xAA55）
+    └─ 跳转到 0x0000:0x7C00 执行
+    ↓
+引导扇区程序执行（boot.asm 或 GRUB boot.S）
+    ├─ 设置显示模式（INT 10h, AH=0x00, AL=0x03）
+    ├─ 加载 GRUB Core（如果使用 GRUB）
+    └─ 跳转到 GRUB Core 或操作系统加载器
+    ↓
+GRUB Core 执行（如果使用 GRUB）
+    ├─ 解析配置文件
+    ├─ 加载 Linux 内核镜像（bzImage）
+    ├─ 设置内核启动参数（boot_params）
+    └─ 跳转到内核入口点（head_64.S）
+    ↓
+Linux 内核早期初始化（head_64.S）
+    ├─ 设置早期页表
+    ├─ 切换到长模式（64位）
+    └─ 跳转到 x86_64_start_kernel()
+    ↓
+x86_64_start_kernel()
+    ├─ 设置早期 IDT（idt_setup_early_handler）
+    ├─ 初始化微码更新
+    └─ 调用 start_kernel()
+    ↓
+start_kernel()（Linux 内核主初始化）
+    ├─ 初始化中断系统
+    │   ├─ 重新编程 PIC（init_8259A）
+    │   ├─ 设置 APIC 和中断门（idt_setup_apic_and_irq_gates）
+    │   └─ 加载 IDT（load_idt）
+    ├─ 初始化内存管理
+    ├─ 初始化进程管理
+    └─ 启动 init 进程
+    ↓
+Linux 内核完全接管系统
+    ├─ BIOS 的 IVT 被内核的 IDT 取代
+    ├─ BIOS 的 PIC 配置被内核重新编程
+    └─ BIOS 代码基本不再执行
+```
+
+### 关键时间节点
+
+| 阶段 | 关键事件 | 内存地址/中断 |
+|------|---------|--------------|
+| **QEMU 启动** | 加载 SeaBIOS | `0xFFFFFFFF - bios_size` |
+| **CPU 复位** | 开始执行 SeaBIOS | `0xFFFF0` |
+| **SeaBIOS POST** | 初始化 IVT 和 PIC | IVT: `0x0000:0x0000`, PIC: `0x20/0x21` |
+| **INT 19h** | 开始引导流程 | `INT 19h` |
+| **读取引导扇区** | 加载到内存 | `0x7C00` |
+| **引导扇区执行** | 用户代码开始运行 | `0x0000:0x7C00` |
+| **GRUB 加载内核** | 内核镜像加载 | `0x100000` (1MB) |
+| **内核入口** | head_64.S 开始执行 | `head_64.S` |
+| **IDT 接管** | 内核建立自己的 IDT | `load_idt(&idt_descr)` |
+| **PIC 重新编程** | 中断路由到内核 | `init_8259A()` |
+| **完全接管** | BIOS 不再处理中断 | 所有中断由内核处理 |
+
+---
+
+## 关键源代码文件索引
+
+本文档涉及的关键源代码文件位置索引，方便快速查找：
+
+### QEMU 源代码
+
+| 文件路径 | 功能说明 | 相关章节 |
+|---------|---------|---------|
+| `qemu/hw/i386/pc_sysfw.c:215-285` | 系统固件初始化，加载 SeaBIOS | [QEMU 加载 SeaBIOS](#qemu-加载-seabios) |
+| `qemu/hw/i386/x86-common.c:1027-1092` | x86 平台初始化 | [QEMU 加载 SeaBIOS](#qemu-加载-seabios) |
+| `qemu/target/i386/cpu.c:9130-9149` | CPU 复位向量设置（0xFFFF0） | [QEMU 加载 SeaBIOS](#qemu-加载-seabios) |
+
+### SeaBIOS 源代码
+
+| 文件路径 | 功能说明 | 相关章节 |
+|---------|---------|---------|
+| `seabios/src/post.c:302-337` | POST 主入口点 | [SeaBIOS 初始化中断服务](#seabios-初始化中断服务) |
+| `seabios/src/post.c:196-235` | maininit() 主初始化函数 | [SeaBIOS 初始化中断服务](#seabios-初始化中断服务) |
+| `seabios/src/post.c:32-71` | ivt_init() IVT 初始化 | [SeaBIOS 初始化中断服务](#seabios-初始化中断服务) |
+| `seabios/src/hw/pic.c:62-66` | pic_setup() PIC 初始化 | [SeaBIOS 初始化中断服务](#seabios-初始化中断服务) |
+| `seabios/src/post.c:137-158` | interface_init() 接口初始化 | [SeaBIOS 初始化中断服务](#seabios-初始化中断服务) |
+| `seabios/src/post.c:182-193` | startBoot() 启动引导 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `seabios/src/boot.c:1040-1046` | handle_19() INT 19h 处理程序 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `seabios/src/boot.c:882-917` | boot_disk() 读取引导扇区 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `seabios/src/boot.c:987-1025` | do_boot() 引导设备选择 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+
+### GRUB 源代码
+
+| 文件路径 | 功能说明 | 相关章节 |
+|---------|---------|---------|
+| `grub/grub-core/boot/i386/pc/boot.S` | GRUB 引导扇区代码 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `grub/grub-core/boot/i386/pc/diskboot.S:38-341` | 磁盘引导代码 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `grub/grub-core/boot/i386/pc/startup_raw.S:76-104` | 启动代码 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `grub/grub-core/kern/i386/realmode.S:133-195` | 实模式支持代码 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `grub/grub-core/loader/i386/linux.c` | Linux 内核加载器 | [Linux 内核接管 BIOS](#linux-内核接管-bios) |
+
+### Linux 内核源代码
+
+| 文件路径 | 功能说明 | 相关章节 |
+|---------|---------|---------|
+| `linux/arch/x86/boot/compressed/head_64.S` | 内核早期入口点 | [Linux 内核接管 BIOS](#linux-内核接管-bios) |
+| `linux/arch/x86/kernel/head64.c:1932` | x86_64_start_kernel() 入口 | [Linux 内核接管 BIOS](#linux-内核接管-bios) |
+| `linux/arch/x86/kernel/idt.c:216-227` | idt_setup_early_traps() 早期 IDT 设置 | [Linux 内核接管 BIOS](#linux-内核接管-bios) |
+| `linux/arch/x86/kernel/idt.c:281-315` | idt_setup_apic_and_irq_gates() 完成 IDT 设置 | [Linux 内核接管 BIOS](#linux-内核接管-bios) |
+| `linux/arch/x86/kernel/i8259.c:349-399` | init_8259A() PIC 重新编程 | [Linux 内核接管 BIOS](#linux-内核接管-bios) |
+
+### 用户代码示例
+
+| 文件路径 | 功能说明 | 相关章节 |
+|---------|---------|---------|
+| `boot.asm` | 最小化引导扇区程序示例 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+
+### 关键数据结构
+
+| 数据结构 | 位置 | 说明 |
+|---------|------|------|
+| **IVT（中断向量表）** | `0x0000:0x0000` | BIOS 中断向量表，256 个条目，每个 4 字节 |
+| **IDT（中断描述符表）** | 内核内存 | 内核中断描述符表，替代 BIOS IVT |
+| **GDT（全局描述符表）** | 内核内存 | 全局描述符表，用于保护模式 |
+| **boot_params** | 内核内存 | Linux 内核启动参数结构 |
