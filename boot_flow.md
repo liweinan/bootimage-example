@@ -22,7 +22,7 @@
 
 ## QEMU 加载 SeaBIOS
 
-### 1 系统固件初始化入口
+### 系统固件初始化入口
 
 QEMU 在创建 PC 虚拟机时，会调用系统固件初始化函数来加载 BIOS。源代码位置：`qemu/hw/i386/pc_sysfw.c:215-285`
 
@@ -97,7 +97,7 @@ void pc_system_firmware_init(PCMachineState *pcms,
 - 第 228 行或 254 行：如果没有配置 pflash，调用 `x86_bios_rom_init()` 加载默认的 `bios.bin`（SeaBIOS）
 - 第 267 行：如果配置了 pflash，则映射 flash 内存区域
 
-### 2 BIOS ROM 加载实现
+### BIOS ROM 加载实现
 
 源代码位置：`qemu/hw/i386/x86-common.c:1027-1092`
 
@@ -191,11 +191,11 @@ bios_error:
 
 > **注意**：关于 BIOS 运行模式（实模式/保护模式）、内存布局、地址映射等详细内容，请参见 [第 2 章：BIOS 运行模式与内存访问详解](#2-bios-运行模式与内存访问详解)。
 
-### 3 QEMU 软件实现 vs. 真实硬件加载 BIOS 的区别
+### QEMU 软件实现 vs. 真实硬件加载 BIOS 的区别
 
 QEMU 的 `x86_bios_rom_init()` 函数通过软件模拟 BIOS 的加载过程，与真实硬件存在显著差异。理解这些差异有助于更好地理解虚拟化的工作原理。
 
-#### 1 存储介质差异
+#### 存储介质差异
 
 - **存储介质**
   - **真实硬件**: Flash ROM 芯片（如 SPI Flash、EEPROM）
@@ -237,7 +237,7 @@ QEMU 内存管理：memory_region_init_ram()
 客户机 CPU 从模拟内存读取（实际是 QEMU 管理的 RAM）
 ```
 
-#### 2 加载时机和方式
+#### 加载时机和方式
 
 **真实硬件：**
 - **加载时机**：BIOS 代码永久存储在 ROM 芯片中，无需"加载"
@@ -273,7 +273,7 @@ if (sev_enabled() || is_tdx_vm()) {
 }
 ```
 
-#### 3 内存映射机制
+#### 内存映射机制
 
 **真实硬件：**
 - **ROM 芯片**：物理上连接到内存总线，通过**内存映射 I/O（MMIO）**访问
@@ -315,7 +315,7 @@ QEMU MemoryRegion 对象
 客户机 CPU 访问（触发 QEMU 内存访问处理）
 ```
 
-#### 4 复位（Reset）行为
+#### 复位（Reset）行为
 
 **真实硬件：**
 - **ROM 内容不变**：复位时 ROM 芯片内容保持不变
@@ -342,7 +342,7 @@ if (sev_enabled() || is_tdx_vm()) {
 }
 ```
 
-#### 5 性能和开销
+#### 性能和开销
 
 - **访问速度**
   - **真实硬件**: 直接从 ROM 读取（较慢，但稳定）
@@ -360,7 +360,7 @@ if (sev_enabled() || is_tdx_vm()) {
   - **真实硬件**: 需要专用工具刷写 ROM
   - **QEMU 实现**: 直接修改文件即可（但需要重启 QEMU）
 
-#### 6 可配置性和灵活性
+#### 可配置性和灵活性
 
 **真实硬件：**
 - **固定内容**：BIOS 内容在制造时或用户刷写时确定
@@ -377,7 +377,7 @@ if (sev_enabled() || is_tdx_vm()) {
 qemu-system-x86_64 -bios custom_bios.bin
 ```
 
-#### 7 安全性考虑
+#### 安全性考虑
 
 **真实硬件：**
 - **物理保护**：ROM 芯片物理上只读，难以被恶意软件修改
@@ -395,7 +395,7 @@ if (is_tdx_vm()) {
 }
 ```
 
-#### 8 总结对比表
+#### 总结对比表
 
 - **存储**
   - **真实硬件**: Flash ROM 芯片
@@ -442,7 +442,7 @@ if (is_tdx_vm()) {
 
 ## SeaBIOS 初始化中断服务
 
-### 1 POST 入口点
+### POST 入口点
 
 CPU 复位后，从 `0xFFFF0` 跳转到 SeaBIOS 的 POST（Power-On Self-Test）入口。源代码位置：`seabios/src/post.c:302-337`
 
@@ -489,7 +489,7 @@ handle_post(void)
 }
 ```
 
-### 2 主初始化流程
+### 主初始化流程
 
 源代码位置：`seabios/src/post.c:196-235`
 
@@ -557,7 +557,7 @@ maininit(void)
 2. **第 203 行**：调用 `platform_hardware_setup()` 设置平台硬件（包括 PIC）
 3. **第 234 行**：调用 `startBoot()` 启动引导过程
 
-### 3 中断向量表（IVT）初始化
+### 中断向量表（IVT）初始化
 
 **调用时机：** `ivt_init()` 在 SeaBIOS POST 初始化流程中被调用，具体调用链如下：
 
@@ -946,7 +946,7 @@ SET_IVT(0x10, FUNC16(entry_10));
   - **运行阶段**（保护模式/长模式）：切换到 IDT，位置由 UEFI 固件或操作系统指定
   - **中断向量号约定**：软件中断向量号（如 `0x10`, `0x13`）在 UEFI 中通常不使用，因为 UEFI 使用函数调用而非中断服务
 
-### 4 平台硬件设置（PIC 初始化）
+### 平台硬件设置（PIC 初始化）
 
 **调用时机：** `platform_hardware_setup()` 在 `maininit()` 的"阶段 2"中被调用，位于 IVT 初始化之后、引导流程之前。
 
@@ -1251,11 +1251,11 @@ platform_hardware_setup() 被调用
 - `pic_setup()` 初始化中断控制器，后续中断相关初始化都依赖它
 - `timer_setup()` 和 `clock_setup()` 必须按顺序执行，时钟中断依赖定时器
 
-### 5 BIOS 加载内核的完整流程
+### BIOS 加载内核的完整流程
 
 SeaBIOS 完成初始化后，通过 INT 19h 引导加载服务启动引导过程，最终加载操作系统内核。本节详细说明从 BIOS 到内核加载的完整流程。
 
-#### 1 引导流程概述
+#### 引导流程概述
 
 ```
 SeaBIOS POST 完成
@@ -1277,7 +1277,7 @@ Bootloader 加载内核镜像
 跳转到内核入口点
 ```
 
-#### 2 INT 19h 引导加载服务
+#### INT 19h 引导加载服务
 
 **源代码位置：`seabios/src/post.c:182-193`**
 
@@ -1310,7 +1310,7 @@ handle_19(void)
 }
 ```
 
-#### 3 引导设备选择和扇区读取
+#### 引导设备选择和扇区读取
 
 **源代码位置：`seabios/src/boot.c:882-917`**
 
@@ -1355,7 +1355,7 @@ boot_disk(u8 bootdrv, int checksig)
 }
 ```
 
-#### 4 BIOS 如何加载 Bootloader
+#### BIOS 如何加载 Bootloader
 
 引导扇区程序（512 字节）通常太小，无法直接加载内核，因此采用多阶段引导。本节详细说明 BIOS 如何加载 bootloader（以 GRUB 为例）。
 
@@ -2076,11 +2076,11 @@ grub_relocator32_boot()
 
 ## 引导扇区程序：从 SeaBIOS 到用户代码的执行
 
-### 1 引导扇区程序概述
+### 引导扇区程序概述
 
 引导扇区（Boot Sector）是存储在磁盘第一个扇区（512 字节）的特殊程序。BIOS 完成初始化后，会调用 INT 19h 服务加载并执行引导扇区程序。本节通过一个最小化的引导扇区程序，详细说明 QEMU 和 SeaBIOS 如何协作完成引导过程。
 
-### 2 最小引导扇区程序代码
+### 最小引导扇区程序代码
 
 ```asm
 ; boot.asm - 最小引导扇区程序
@@ -2187,9 +2187,9 @@ dw 0xAA55          ; 引导扇区标志
 ; 注意：x86 是小端序，所以 0x55 在低地址，0xAA 在高地址
 ```
 
-### 3 SeaBIOS 如何加载引导扇区
+### SeaBIOS 如何加载引导扇区
 
-#### 3.1 INT 19h 引导加载服务
+#### INT 19h 引导加载服务
 
 当 SeaBIOS 完成 POST 初始化后，会调用 `startBoot()` 函数触发 INT 19h，开始引导过程。
 
@@ -2211,7 +2211,7 @@ startBoot(void)
 }
 ```
 
-#### 3.2 INT 19h 处理程序
+#### INT 19h 处理程序
 
 **源代码位置：`seabios/src/boot.c:1040-1046`**
 
@@ -2226,7 +2226,7 @@ handle_19(void)
 }
 ```
 
-#### 3.3 引导设备选择
+#### 引导设备选择
 
 **源代码位置：`seabios/src/boot.c:987-1025`**
 
@@ -2266,7 +2266,7 @@ do_boot(int seq_nr)
 }
 ```
 
-#### 3.4 读取引导扇区到内存
+#### 读取引导扇区到内存
 
 **源代码位置：`seabios/src/boot.c:882-917`**
 
@@ -2332,7 +2332,7 @@ boot_disk(u8 bootdrv, int checksig)
    - 检查最后两个字节是否为 `0xAA55`
    - 如果不是，BIOS 认为这不是有效的引导扇区
 
-### 4 完整引导流程
+### 完整引导流程
 
 ```
 QEMU 启动
@@ -2370,7 +2370,7 @@ boot_disk() 读取引导扇区
 （实际引导扇区会加载操作系统或更复杂的 bootloader）
 ```
 
-### 5 关键内存地址和中断服务
+### 关键内存地址和中断服务
 
 | 地址/中断 | 说明 | 用途 |
 |-----------|------|------|
@@ -2380,7 +2380,7 @@ boot_disk() 读取引导扇区
 | `INT 13h` | BIOS 磁盘服务 | 读取/写入磁盘扇区 |
 | `INT 19h` | BIOS 引导加载服务 | 加载并执行引导扇区 |
 
-### 6 在 QEMU 中测试引导扇区
+### 在 QEMU 中测试引导扇区
 
 要测试这个引导扇区程序，可以按以下步骤操作：
 
@@ -2404,7 +2404,7 @@ qemu-system-x86_64 -fda disk.img
    - QEMU 窗口显示 "Hello from Boot Sector!"
    - 程序进入无限循环，等待用户操作
 
-### 7 总结
+### 总结
 
 本节通过一个最小化的引导扇区程序，详细说明了：
 
@@ -2421,7 +2421,7 @@ qemu-system-x86_64 -fda disk.img
 
 通过对比本文档中的最小引导扇区程序（`boot.asm`）和 GRUB 的引导扇区代码（`boot.S`），可以发现它们在结构和实现上有很多相似之处，这反映了引导扇区程序的通用设计模式。
 
-### 1 基本结构相似性
+### 基本结构相似性
 
 | 特性 | boot.asm | GRUB boot.S | 说明 |
 |------|----------|-------------|------|
@@ -2431,7 +2431,7 @@ qemu-system-x86_64 -fda disk.img
 | **引导签名** | `dw 0xAA55` | `.word GRUB_BOOT_MACHINE_SIGNATURE` | 最后 2 字节必须是 `0xAA55` |
 | **入口标签** | `start:` | `_start:` / `start:` | 程序的入口点 |
 
-### 2 初始化流程相似性
+### 初始化流程相似性
 
 **boot.asm 的初始化：**
 ```asm
@@ -2460,7 +2460,7 @@ real_start:
 2. **都使用 BIOS 中断服务**：boot.asm 使用 INT 10h 显示文本，GRUB 使用 INT 13h 读取磁盘
 3. **都从固定地址开始执行**：BIOS 将两者都加载到 `0x7C00`
 
-### 3 BIOS 服务调用模式
+### BIOS 服务调用模式
 
 **boot.asm 使用 INT 10h：**
 ```asm
@@ -2485,7 +2485,7 @@ int $0x13           ; 读取磁盘扇区
 2. **都通过 INT 指令调用 BIOS 服务**：这是实模式下访问 BIOS 服务的标准方式
 3. **都依赖 BIOS 提供的底层硬件抽象**：视频输出和磁盘访问都通过 BIOS 完成
 
-### 4 内存布局相似性
+### 内存布局相似性
 
 | 地址范围 | boot.asm | GRUB boot.S | 用途 |
 |----------|----------|-------------|------|
@@ -2500,7 +2500,7 @@ int $0x13           ; 读取磁盘扇区
 2. **都占用 512 字节**：一个扇区的大小
 3. **都在最后 2 字节存储 `0xAA55`**：BIOS 验证引导扇区的标志
 
-### 5 代码组织模式
+### 代码组织模式
 
 **boot.asm 的结构：**
 ```asm
@@ -2536,7 +2536,7 @@ LOCAL(kernel_address): .word ...  ; 数据定义
 3. **都使用填充确保大小**：boot.asm 使用 `times`，GRUB 使用 `.org` 对齐
 4. **都在最后存储引导签名**：`0xAA55`
 
-### 6 关键差异
+### 关键差异
 
 虽然两者有很多相似之处，但 GRUB boot.S 比 boot.asm 更复杂：
 
@@ -2549,7 +2549,7 @@ LOCAL(kernel_address): .word ...  ; 数据定义
 | **BIOS 兼容性** | 基本 | 处理各种 BIOS bug 和变体 |
 | **下一阶段** | 无（无限循环） | 加载并跳转到 GRUB Core |
 
-### 7 设计模式总结
+### 设计模式总结
 
 通过对比可以发现，引导扇区程序遵循以下通用设计模式：
 
@@ -2562,7 +2562,7 @@ LOCAL(kernel_address): .word ...  ; 数据定义
 
 这些相似之处反映了引导扇区程序作为系统启动链中第一个用户代码的通用需求和约束。无论是简单的演示程序还是复杂的 bootloader，都必须遵循这些基本规则。
 
-### 8 UEFI 与 BIOS 在引导机制上的根本差异
+### UEFI 与 BIOS 在引导机制上的根本差异
 
 **重要说明：** 上述设计模式（固定大小、固定地址、实模式等）**仅适用于 BIOS 模式**。UEFI 采用了完全不同的引导机制，从根本上避免了这些限制。
 
@@ -2655,13 +2655,13 @@ LOCAL(kernel_address): .word ...  ; 数据定义
 
 ## Linux 内核接管 BIOS
 
-### 1 GRUB 如何加载内核到 head_64.S 入口点
+### GRUB 如何加载内核到 head_64.S 入口点
 
 在 GRUB 跳转到内核之前，需要完成以下步骤：
 
 **源代码位置：`grub/grub-core/loader/i386/linux.c`**
 
-#### 1.1 内核镜像结构
+#### 内核镜像结构
 
 Linux 内核镜像（bzImage）包含两部分：
 
@@ -2674,7 +2674,7 @@ Linux 内核镜像（bzImage）包含两部分：
    - 格式：gzip 压缩的 vmlinux
    - 加载地址：`0x100000`（1MB）或内核指定的地址
 
-#### 1.2 GRUB 加载内核的完整流程
+#### GRUB 加载内核的完整流程
 
 **步骤 1：读取内核文件头部**
 
@@ -2790,7 +2790,7 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
 - **实际入口地址**：`prot_mode_target + code32_start - 0x100000`
 - **对于 64 位内核**：入口点通常是 `startup_32`（32 位保护模式代码），然后切换到长模式，最终跳转到 `startup_64`
 
-#### 1.3 内核启动参数传递
+#### 内核启动参数传递
 
 GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数：
 
@@ -2801,7 +2801,7 @@ GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数�
 - **`e820_map`**：系统内存映射表
 - **`esi` 寄存器**：包含 `boot_params` 的地址（内核通过 `%esi` 访问）
 
-### 2 内核早期启动（64 位）
+### 内核早期启动（64 位）
 
 **说明**：内核从 GRUB 跳转后，首先执行的是内核镜像中的 setup 代码（实模式），然后切换到保护模式，最终到达 `startup_64`。GRUB 跳转的地址是 `code32_start`，这是 setup 代码的入口点。
 
@@ -2858,7 +2858,7 @@ SYM_CODE_START_NOALIGN(startup_64)
 - **第 74 行**：调用 `__pi_startup_64_setup_gdt_idt` 设置 GDT 和早期 IDT
 - 此时内核已切换到 64 位长模式
 
-### 3 早期 IDT 设置
+### 早期 IDT 设置
 
 源代码位置：`linux/arch/x86/kernel/head64.c:276-292`
 
@@ -2918,9 +2918,9 @@ void __init idt_setup_early_traps(void)
 - 内核建立自己的 IDT（中断描述符表），取代 BIOS 的 IVT
 - 早期陷阱处理程序用于处理 CPU 异常（如页故障、除零等）
 
-### 4 中断控制器接管
+### 中断控制器接管
 
-#### 4.1 8259A PIC 重新编程
+#### 8259A PIC 重新编程
 
 源代码位置：`linux/arch/x86/kernel/i8259.c:349-399`
 
@@ -2995,7 +2995,7 @@ static void init_8259A(int auto_eoi)
 - **第 378 行**：将从 PIC 的 IRQ8-15 重映射到 `ISA_IRQ_VECTOR(8)`（通常是 0x28-0x2F）
 - 这**完全覆盖了 BIOS 的 PIC 配置**，硬件中断不再路由到 BIOS 代码
 
-#### 4.2 APIC 和中断门设置
+#### APIC 和中断门设置
 
 源代码位置：`linux/arch/x86/kernel/idt.c:281-315`
 
@@ -3053,7 +3053,7 @@ void __init idt_setup_apic_and_irq_gates(void)
 - **第 291-294 行**：为外部中断（IRQ）设置中断门，指向 `irq_entries_start`
 - **第 309 行**：加载新的 IDT（`load_idt(&idt_descr)`），**此时 BIOS 的 IVT 被完全取代**
 
-### 5 BIOS IVT 与 Kernel IDT 的软件中断服务程序对比
+### BIOS IVT 与 Kernel IDT 的软件中断服务程序对比
 
 **重要结论：BIOS 的 IVT 和 Kernel 的 IDT 都不仅设置硬件中断处理程序，还设置软件中断服务程序。**
 
@@ -3161,7 +3161,7 @@ void __init idt_setup_apic_and_irq_gates(void)
   - 32位 INT 0x80：`linux/arch/x86/entry/entry_32.S`
   - 64位 syscall：`linux/arch/x86/entry/entry_64.S`（使用 MSR，不通过 IDT）
 
-### 6 UEFI 中断处理机制
+### UEFI 中断处理机制
 
 **重要说明：UEFI 与 BIOS 在中断处理机制上有根本性差异。**
 
@@ -3289,7 +3289,7 @@ MyDriverInterruptHandler (
 
 UEFI 的设计更加现代化，提供了更好的抽象和模块化，但不再提供传统的软件中断服务（如 INT 10h, INT 13h）。
 
-### 7 接管完成标志
+### 接管完成标志
 
 从内核加载 IDT 并重新编程 PIC 的那一刻起：
 1. **硬件中断不再路由到 BIOS**：PIC 被重新编程，中断向量映射到内核的 IDT
