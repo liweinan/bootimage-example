@@ -2014,3 +2014,242 @@ if (bios_size <= 0 ||
 > **详细说明**：关于 QEMU 软件实现与真实硬件加载 BIOS 的详细对比（存储介质、加载方式、内存映射机制、复位行为等），请参见 [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)。
 
 ---
+
+## Q&A：常见问题解答
+
+### Q: Bootloader 是运行在保护模式下吗？它被加载到内存的什么位置？
+
+**A: Bootloader（以 GRUB 为例）采用混合模式：初始阶段在实模式下运行，后续阶段切换到保护模式。加载位置取决于阶段：引导扇区在 `0x7C00`，GRUB Core 在 `0x8000`，内核在 `0x100000`（1MB）。**
+
+#### Bootloader 的运行模式
+
+**GRUB Bootloader 的运行模式切换：**
+
+1. **引导扇区阶段（实模式）**
+   - **位置**：`0x7C00`（BIOS 加载）
+   - **运行模式**：实模式（Real Mode）
+   - **代码**：`grub/grub-core/boot/i386/pc/boot.S`
+   - **功能**：读取 GRUB Core 的第一个扇区到 `0x8000`
+
+2. **GRUB Core 初始阶段（实模式）**
+   - **位置**：`0x8000`（引导扇区加载）
+   - **运行模式**：实模式（Real Mode）
+   - **代码**：`grub/grub-core/boot/i386/pc/diskboot.S`
+   - **功能**：加载 GRUB Core 的剩余部分
+
+3. **GRUB Core 后续阶段（切换到保护模式）**
+   - **位置**：`0x8200+`（GRUB Core 的 C 代码部分）
+   - **运行模式**：保护模式（Protected Mode）
+   - **切换代码**：`grub/grub-core/kern/i386/realmode.S:real_to_prot()`
+   - **切换时机**：在 `startup_raw.S` 中调用 `real_to_prot()`
+   - **功能**：访问 1MB 以上的内存，加载内核镜像
+
+#### 源代码分析
+
+**GRUB Core 从实模式切换到保护模式：**
+
+```asm
+// grub/grub-core/boot/i386/pc/startup_raw.S:76-104
+LOCAL (codestart):
+    cli     // 禁用中断，准备模式切换
+    
+    // 设置实模式段寄存器
+    xorw    %ax, %ax
+    movw    %ax, %ds
+    movw    %ax, %ss
+    movw    %ax, %es
+    
+    // 设置实模式栈
+    movl    $GRUB_MEMORY_MACHINE_REAL_STACK, %ebp
+    movl    %ebp, %esp
+    
+    sti     // 重新启用中断
+    
+    // 保存启动驱动器号
+    movb    %dl, LOCAL(boot_drive)
+    
+    // 重置磁盘系统
+    int     $0x13
+    
+    // 关键步骤：从实模式切换到保护模式
+    calll   real_to_prot
+    
+    // 切换到保护模式代码（.code32）
+    .code32
+    
+    // 启用 A20 地址线（访问 1MB 以上内存）
+    cld
+    call    grub_gate_a20
+```
+
+**模式切换函数（real_to_prot）：**
+
+```asm
+// grub/grub-core/kern/i386/realmode.S:133-195
+real_to_prot:
+    .code16
+    cli     // 禁用中断
+    
+    // 步骤 1: 加载全局描述符表（GDT）
+    xorw    %ax, %ax
+    movw    %ax, %ds
+    lgdtl   gdtdesc  // 加载 GDT 描述符
+    
+    // 步骤 2: 设置 CR0 的 PE 位（Protected Mode Enable）
+    movl    %cr0, %eax
+    orl     $GRUB_MEMORY_CPU_CR0_PE_ON, %eax  // 设置 PE 位
+    movl    %eax, %cr0
+    
+    // 步骤 3: 跳转到保护模式代码段，刷新预取队列
+    ljmpl   $GRUB_MEMORY_MACHINE_PROT_MODE_CSEG, $protcseg
+    
+    .code32
+protcseg:
+    // 步骤 4: 重新加载所有段寄存器（使用保护模式段选择子）
+    movw    $GRUB_MEMORY_MACHINE_PROT_MODE_DSEG, %ax
+    movw    %ax, %ds
+    movw    %ax, %es
+    movw    %ax, %fs
+    movw    %ax, %gs
+    movw    %ax, %ss
+    
+    // 步骤 5: 切换到保护模式栈
+    movl    (%esp), %eax
+    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK
+    
+    movl    protstack, %eax
+    movl    %eax, %esp
+    movl    %eax, %ebp
+    
+    // 步骤 6: 保存实模式 IDT，加载保护模式 IDT（空）
+    sidt    LOCAL(realidt)  // 保存实模式 IDT
+    lidt    protidt         // 加载保护模式 IDT（空）
+    
+    ret     // 返回，现在在保护模式下
+```
+
+#### Bootloader 的加载位置
+
+**内存布局（GRUB 为例）：**
+
+| 组件 | 加载地址 | 运行模式 | 说明 |
+|------|---------|---------|------|
+| **引导扇区（boot.S）** | `0x7C00` | 实模式 | BIOS 通过 INT 13h 加载 |
+| **GRUB Core（diskboot.S）** | `0x8000` | 实模式 | 引导扇区加载的第一个 512 字节 |
+| **GRUB Core（C 代码）** | `0x8200+` | 保护模式 | 切换到保护模式后执行 |
+| **内核镜像（bzImage）** | `0x100000`（1MB） | 保护模式 | 需要保护模式访问 |
+
+**详细加载流程：**
+
+```
+1. BIOS 加载引导扇区
+   ↓
+   位置：0x7C00
+   模式：实模式
+   代码：boot.S（GRUB 引导扇区）
+   ↓
+2. 引导扇区加载 GRUB Core 第一个扇区
+   ↓
+   位置：0x8000
+   模式：实模式
+   代码：diskboot.S（加载剩余扇区）
+   ↓
+3. diskboot.S 加载 GRUB Core 剩余部分
+   ↓
+   位置：0x8200+
+   模式：实模式（初始）→ 保护模式（切换后）
+   代码：startup_raw.S → real_to_prot() → C 代码
+   ↓
+4. GRUB Core 切换到保护模式
+   ↓
+   调用：real_to_prot()
+   设置：GDT、CR0.PE 位
+   结果：进入保护模式
+   ↓
+5. GRUB Core 在保护模式下加载内核
+   ↓
+   位置：0x100000（1MB）
+   模式：保护模式
+   原因：内核镜像通常很大（几 MB 到几十 MB），需要访问 1MB 以上内存
+```
+
+#### 为什么需要切换到保护模式？
+
+1. **访问 1MB 以上内存**
+   - 实模式只能访问前 1MB（`0x000000 - 0xFFFFF`）
+   - 内核镜像通常加载到 `0x100000`（1MB）或更高地址
+   - 保护模式可以访问完整的 4GB 地址空间
+
+2. **内核镜像大小限制**
+   - 现代 Linux 内核镜像（bzImage）通常为几 MB 到几十 MB
+   - 无法放入前 1MB 的实模式地址空间
+   - 必须使用保护模式访问更大的内存
+
+3. **内存布局设计**
+   ```
+   实模式可访问（前 1MB）：
+   - 0x000000 - 0x09FFFF：常规 RAM（640KB）
+   - 0x0A0000 - 0x0BFFFF：视频 RAM（128KB）
+   - 0x0C0000 - 0x0DFFFF：扩展 ROM（128KB）
+   - 0x0E0000 - 0xFFFFF：BIOS ROM 映射（128KB）
+   
+   保护模式可访问（1MB 以上）：
+   - 0x100000 - 0xFFFFFFFF：内核镜像、initramfs 等
+   ```
+
+#### 内存地址总结
+
+**关键内存地址：**
+
+| 地址 | 用途 | 访问模式 | 说明 |
+|------|------|---------|------|
+| `0x7C00` | 引导扇区（MBR） | 实模式 | BIOS 加载，512 字节 |
+| `0x8000` | GRUB Core 初始部分 | 实模式 | 引导扇区加载，第一个 512 字节 |
+| `0x8200+` | GRUB Core 完整代码 | 保护模式 | 切换到保护模式后执行 |
+| `0x100000` | 内核镜像（bzImage） | 保护模式 | 1MB 边界，需要保护模式访问 |
+
+**地址空间布局：**
+
+```
+0x000000 - 0x09FFFF (640KB)
+└─ 常规 RAM
+   ├─ 0x0000 - 0x03FF：IVT
+   ├─ 0x0400 - 0x04FF：BDA
+   └─ 0x7C00 - 0x7DFF：引导扇区
+
+0x0A0000 - 0x0BFFFF (128KB)
+└─ 视频 RAM
+
+0x0C0000 - 0x0DFFFF (128KB)
+└─ 扩展 ROM
+
+0x0E0000 - 0xFFFFF (128KB)
+└─ BIOS ROM 映射
+
+0x8000 - 0x9FFF (约 8KB)
+└─ GRUB Core（实模式阶段）
+
+0x100000 - ... (1MB 以上)
+└─ 内核镜像（保护模式访问）
+```
+
+#### 总结
+
+1. **Bootloader 运行模式**：
+   - **初始阶段**：实模式（引导扇区、GRUB Core 初始部分）
+   - **后续阶段**：保护模式（GRUB Core 加载内核时）
+   - **切换时机**：在 `startup_raw.S` 中调用 `real_to_prot()` 切换到保护模式
+
+2. **加载位置**：
+   - **引导扇区**：`0x7C00`（实模式可访问）
+   - **GRUB Core**：`0x8000`（实模式可访问，初始阶段）
+   - **内核镜像**：`0x100000`（1MB，需要保护模式访问）
+
+3. **为什么需要保护模式**：
+   - 内核镜像通常很大（几 MB 到几十 MB），无法放入前 1MB
+   - 保护模式可以访问完整的 4GB 地址空间
+   - 必须切换到保护模式才能加载内核到 1MB 以上的内存
+
+> **详细说明**：关于 GRUB bootloader 的完整加载流程和模式切换机制，请参见 [BOOT_FLOW.md - 引导扇区程序](BOOT_FLOW.md#引导扇区程序从-seabios-到用户代码的执行) 章节。
+
+---
