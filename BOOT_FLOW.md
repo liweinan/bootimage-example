@@ -24,6 +24,7 @@
 - [A20 地址线技术详解](A20_ADDRESS_LINE.md)
 - [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md)
 - [UEFI 中断处理机制](UEFI_INTERRUPT_HANDLING.md)
+- [SeaBIOS entry_13_official 实现详细分析](SEABIOS_ENTRY_13_ANALYSIS.md)
 
 ## 附录
 
@@ -396,6 +397,7 @@ ivt_init(void)
     SET_IVT(0x11, FUNC16(entry_11));        // INT 11h: 获取设备列表
     SET_IVT(0x12, FUNC16(entry_12));        // INT 12h: 获取内存大小
     SET_IVT(0x13, FUNC16(entry_13_official)); // INT 13h: 磁盘服务（读/写扇区）
+    // 详细实现分析：参见 [SeaBIOS entry_13_official 实现详细分析](SEABIOS_ENTRY_13_ANALYSIS.md)
     SET_IVT(0x14, FUNC16(entry_14));        // INT 14h: 串口服务
     SET_IVT(0x15, FUNC16(entry_15_official)); // INT 15h: 系统服务（APM、内存等）
     SET_IVT(0x16, FUNC16(entry_16));        // INT 16h: 键盘服务（读取按键）
