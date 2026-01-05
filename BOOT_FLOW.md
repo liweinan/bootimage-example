@@ -30,6 +30,8 @@
 - [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
 - [中断处理详解](INTERRUPT_HANDLING.md)
 - [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)
+- [BOOT_FLOW 技术细节说明](BOOT_FLOW_NOTES.md)
+- [BOOT_FLOW 常见问题解答](BOOT_FLOW_QA.md)
 
 ---
 
@@ -479,13 +481,13 @@ ivt_init(void)
   - `INT 19h`：引导加载服务
   - 等等
 
-> **详细说明**：关于 IVT 初始化的详细技术说明（包括初始化策略、默认处理程序、替换时机等），请参见 [技术细节说明 - Note 1: IVT 初始化详细说明](#note-1-ivt-初始化详细说明)。
+> **详细说明**：关于 IVT 初始化的详细技术说明（包括初始化策略、默认处理程序、替换时机等），请参见 [技术细节说明 - Note 1: IVT 初始化详细说明](BOOT_FLOW_NOTES.md#note-1-ivt-初始化详细说明)。
 
 **中断向量号 vs 内存地址：**
 
 这些数字（如 `0x02`, `0x10`, `0x13`）是**中断向量号**（中断向量表的索引），不是内存地址。中断向量号对应的 IVT 条目地址计算公式为：`IVT 条目内存地址 = 0x0000:0000 + (中断向量号 × 4)`。
 
-> **详细说明**：关于中断向量号与内存地址的详细解释（包括计算公式、示例、IVT 条目 vs 中断服务代码、内存布局示意等），请参见 [技术细节说明 - Note 2: 中断向量号 vs 内存地址详解](#note-2-中断向量号-vs-内存地址详解)。
+> **详细说明**：关于中断向量号与内存地址的详细解释（包括计算公式、示例、IVT 条目 vs 中断服务代码、内存布局示意等），请参见 [技术细节说明 - Note 2: 中断向量号 vs 内存地址详解](BOOT_FLOW_NOTES.md#note-2-中断向量号-vs-内存地址详解)。
 
 ### 平台硬件设置（PIC 初始化）
 
@@ -497,7 +499,7 @@ ivt_init(void)
 
 IVT（中断向量表）和 PIC（可编程中断控制器）之间存在依赖关系，必须按正确顺序初始化：IVT 是中断处理的基础设施，PIC 初始化过程中可能触发中断，因此 IVT 必须先初始化。8259A PIC 只处理硬件中断（IRQ0-15），映射到向量 0x08-0x0F 和 0x70-0x77，而 CPU 有 256 个中断向量，其他中断（CPU 异常、软件中断、NMI 等）不经过 PIC。
 
-> **详细说明**：关于 IVT 与 PIC 关系的详细解释（包括初始化顺序、协作关系、8259A PIC 覆盖范围、代码证据等），请参见 [技术细节说明 - Note 3: IVT 与 PIC 的关系详解](#note-3-ivt-与-pic-的关系详解)。
+> **详细说明**：关于 IVT 与 PIC 关系的详细解释（包括初始化顺序、协作关系、8259A PIC 覆盖范围、代码证据等），请参见 [技术细节说明 - Note 3: IVT 与 PIC 的关系详解](BOOT_FLOW_NOTES.md#note-3-ivt-与-pic-的关系详解)。
 
 源代码位置：`seabios/src/post.c:137-158`
 
@@ -528,7 +530,7 @@ platform_hardware_setup(void)
 }
 ```
 
-> **详细说明**：关于 `platform_hardware_setup()` 的详细执行流程和函数调用顺序，请参见 [技术细节说明 - Note 4: platform_hardware_setup() 执行流程详解](#note-4-platform_hardware_setup-执行流程详解)。
+> **详细说明**：关于 `platform_hardware_setup()` 的详细执行流程和函数调用顺序，请参见 [技术细节说明 - Note 4: platform_hardware_setup() 执行流程详解](BOOT_FLOW_NOTES.md#note-4-platform_hardware_setup-执行流程详解)。
 
 **关键依赖关系：**
 - `clock_setup()` **依赖** `timer_setup()` 和 `pic_setup()`（需要定时器和中断控制器已就绪）
@@ -1218,7 +1220,7 @@ times 510-($-$$) db 0   ; 填充到 510 字节
 dw 0xAA55               ; 引导扇区标志
 ```
 
-> **详细说明**：关于 `boot.asm` 的完整代码注释和逐行解释，请参见 [技术细节说明 - Note 5: boot.asm 完整代码注释](#note-5-bootasm-完整代码注释)。
+> **详细说明**：关于 `boot.asm` 的完整代码注释和逐行解释，请参见 [技术细节说明 - Note 5: boot.asm 完整代码注释](BOOT_FLOW_NOTES.md#note-5-bootasm-完整代码注释)。
 
 ### 关键内存地址和中断服务
 
@@ -1230,7 +1232,7 @@ dw 0xAA55               ; 引导扇区标志
 | `INT 13h` | BIOS 磁盘服务 | 读取/写入磁盘扇区 |
 | `INT 19h` | BIOS 引导加载服务 | 加载并执行引导扇区 |
 
-> **详细说明**：关于在 QEMU 中测试引导扇区的方法，请参见 [技术细节说明 - Note 6: 在 QEMU 中测试引导扇区](#note-6-在-qemu-中测试引导扇区)。
+> **详细说明**：关于在 QEMU 中测试引导扇区的方法，请参见 [技术细节说明 - Note 6: 在 QEMU 中测试引导扇区](BOOT_FLOW_NOTES.md#note-6-在-qemu-中测试引导扇区)。
 
 ---
 
