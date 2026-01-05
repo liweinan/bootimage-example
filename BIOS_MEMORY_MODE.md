@@ -237,19 +237,70 @@
    
    **重要澄清：映射 vs 复制**
    
-   **关键问题：映射到前1MB的128KB BIOS代码，是被复制到DRAM里面的1MB了吗？**
+   **关键问题1：映射到前1MB的128KB BIOS代码，是被复制到DRAM里面的1MB了吗？**
    
    **答案：不是复制，而是映射。真实硬件是硬件地址映射，QEMU是内存别名。**
+   
+   **关键问题2：4GB顶部的完整BIOS（0xFFFF80000-0xFFFFFFFF），是映射地址还是拷贝到RAM？**
+   
+   **答案：也是映射，不是拷贝。无论是128KB映射部分还是4GB顶部的完整BIOS，都是硬件地址映射，BIOS代码始终存储在Flash ROM芯片中，没有复制到DRAM。**
    
    **真实硬件（硬件地址映射）：**
    
    - **不是复制**：BIOS代码仍然存储在Flash ROM芯片中
    - **硬件映射**：通过内存控制器（Chipset）的地址解码器实现
-   - **访问机制**：CPU访问地址`0xE0000-0xFFFFF`时，硬件自动路由到Flash ROM芯片
+   - **访问机制**：CPU访问地址`0xE0000-0xFFFFF`或`0xFFFF80000-0xFFFFFFFF`时，硬件自动路由到Flash ROM芯片
    - **物理位置**：BIOS代码**不在DRAM中**，仍然在Flash ROM芯片中
    - **双重映射**：同一块Flash ROM内容通过硬件地址解码映射到两个地址范围：
-     - `0xFFFF80000 - 0xFFFFFFFF`（4GB顶部，完整BIOS）
-     - `0xE0000 - 0xFFFFF`（前1MB，最后128KB）
+     - `0xFFFF80000 - 0xFFFFFFFF`（4GB顶部，完整BIOS）← **也是映射，不是拷贝**
+     - `0xE0000 - 0xFFFFF`（前1MB，最后128KB）← **也是映射，不是拷贝**
+   
+   **4GB顶部完整BIOS的映射机制：**
+   
+   ```
+   真实硬件（Flash ROM芯片）：
+   
+   Flash ROM芯片（物理存储设备）
+   ├─ 完整BIOS代码（512KB）
+   │  ├─ 前384KB
+   │  └─ 最后128KB
+   │
+   内存控制器（地址解码器）
+   ├─ 地址 0xFFFF80000-0xFFFFFFFF → 硬件映射到Flash ROM（完整512KB）
+   │  └─ 这是映射，不是拷贝！CPU访问时直接从Flash ROM读取
+   └─ 地址 0xE0000-0xFFFFF → 硬件映射到Flash ROM（最后128KB）
+      └─ 这也是映射，不是拷贝！CPU访问时直接从Flash ROM读取
+   
+   CPU访问 0xFFFF80000（4GB顶部）
+   ↓
+   硬件地址解码器识别地址范围
+   ↓
+   硬件自动路由到Flash ROM芯片
+   ↓
+   直接从Flash ROM读取（不是从DRAM）
+   ```
+   
+   **关键点：**
+   
+   1. **4GB顶部的完整BIOS也是映射**：
+      - CPU访问`0xFFFF80000-0xFFFFFFFF`时，硬件地址解码器将这个地址范围路由到Flash ROM芯片
+      - BIOS代码**没有复制到DRAM**，仍然在Flash ROM芯片中
+      - 这是硬件层面的地址映射（MMIO - Memory Mapped I/O）
+   
+   2. **128KB映射部分也是映射**：
+      - CPU访问`0xE0000-0xFFFFF`时，硬件地址解码器将这个地址范围路由到Flash ROM芯片的最后128KB
+      - 同样**没有复制到DRAM**，直接从Flash ROM读取
+   
+   3. **双重映射的含义**：
+      - 同一块Flash ROM芯片的内容通过硬件地址解码器映射到两个不同的地址范围
+      - 两个地址范围都指向**同一个物理设备**（Flash ROM芯片）
+      - 访问任一地址范围，都是从Flash ROM读取，不是从DRAM
+   
+   4. **为什么不是拷贝？**
+      - **节省DRAM空间**：如果拷贝到DRAM，会占用512KB的RAM空间
+      - **只读特性**：Flash ROM是只读的，拷贝到DRAM没有意义
+      - **硬件设计**：通过地址映射访问ROM是标准做法，不需要拷贝
+      - **性能考虑**：直接从ROM读取虽然较慢，但避免了拷贝开销
    
    **硬件地址映射示意图：**
    ```
@@ -291,6 +342,295 @@
    0xC0000 - 0xDFFFF      →  扩展ROM（可选ROM，128KB）
    0xE0000 - 0xFFFFF      →  BIOS ROM映射（128KB）
    0x100000 - ...         →  DRAM（超过1MB的RAM）
+   ```
+   
+   **内存控制器地址映射的硬件实现原理：**
+   
+   **关键问题：内存控制器是如何通过硬件电路实现对BIOS ROM的地址映射的？**
+   
+   **答案：通过地址解码器（Address Decoder）硬件电路实现。地址解码器根据CPU发出的地址信号，通过组合逻辑电路判断地址范围，然后生成设备选择信号，将访问路由到相应的设备（DRAM、ROM、I/O设备等）。**
+   
+   **1. 地址解码器的基本结构**
+   
+   ```
+   地址解码器（Address Decoder）硬件结构：
+   
+   CPU地址总线（32位或更多）
+   ├─ A[31:0]：地址信号线
+   │
+   地址解码器（组合逻辑电路）
+   ├─ 地址范围检测电路
+   │  ├─ 检测 0x000000 - 0x9FFFF → DRAM选择信号
+   │  ├─ 检测 0xA0000 - 0xBFFFF → VGA选择信号
+   │  ├─ 检测 0xC0000 - 0xDFFFF → 扩展ROM选择信号
+   │  ├─ 检测 0xE0000 - 0xFFFFF → BIOS ROM选择信号（前1MB映射）
+   │  └─ 检测 0xFFFF80000 - 0xFFFFFFFF → BIOS ROM选择信号（4GB顶部）
+   │
+   设备选择信号
+   ├─ DRAM_CS（DRAM片选信号）
+   ├─ VGA_CS（VGA片选信号）
+   ├─ EXTROM_CS（扩展ROM片选信号）
+   └─ BIOS_CS（BIOS ROM片选信号）
+   ```
+   
+   **2. 地址范围检测的硬件实现**
+   
+   **示例：检测地址是否在0xE0000-0xFFFFF范围内（BIOS ROM映射）**
+   
+   ```
+   地址范围：0xE0000 - 0xFFFFF（前1MB的BIOS ROM映射）
+   
+   二进制表示：
+   - 0xE0000 = 0b1110_0000_0000_0000_0000（20位地址）
+   - 0xFFFFF = 0b1111_1111_1111_1111_1111（20位地址）
+   
+   地址解码逻辑（硬件电路）：
+   
+   A[19:16] = 0b1110 或 0b1111  →  高4位为0xE或0xF
+   A[15:0] = 任意值              →  低16位任意
+   
+   硬件实现（组合逻辑）：
+   BIOS_ROM_LOW_CS = (A[19:16] == 0b1110) OR (A[19:16] == 0b1111)
+                      AND (A[19:0] >= 0xE0000)
+                      AND (A[19:0] <= 0xFFFFF)
+   
+   简化逻辑（硬件优化）：
+   BIOS_ROM_LOW_CS = A[19] AND A[18] AND (A[17] OR A[16])
+                     当A[19:16] >= 0xE时，A[19]=1, A[18]=1
+   ```
+   
+   **示例：检测地址是否在0xFFFF80000-0xFFFFFFFF范围内（4GB顶部BIOS）**
+   
+   ```
+   地址范围：0xFFFF80000 - 0xFFFFFFFF（4GB顶部的完整BIOS）
+   
+   二进制表示（32位地址）：
+   - 0xFFFF80000 = 0b1111_1111_1111_1000_0000_0000_0000_0000
+   - 0xFFFFFFFF = 0b1111_1111_1111_1111_1111_1111_1111_1111
+   
+   地址解码逻辑（硬件电路）：
+   
+   A[31:23] = 0b1111_1111_1 →  高9位必须全为1
+   A[22:19] >= 0b1000       →  A[22:19] >= 0x8（当A[31:23]全为1时）
+   
+   硬件实现（组合逻辑）：
+   BIOS_ROM_HIGH_CS = (A[31:23] == 0b1111_1111_1)
+                       AND (A[22:19] >= 0b1000)
+                       AND (A[31:0] >= 0xFFFF80000)
+                       AND (A[31:0] <= 0xFFFFFFFF)
+   
+   简化逻辑（硬件优化）：
+   BIOS_ROM_HIGH_CS = A[31] AND A[30] AND ... AND A[23]
+                       AND (A[22] OR (A[21] AND A[20] AND A[19]))
+   ```
+   
+   **3. 双重映射的硬件实现**
+   
+   **关键问题：如何实现同一块Flash ROM芯片映射到两个不同的地址范围？**
+   
+   **答案：通过地址解码器生成两个片选信号，但都连接到同一个Flash ROM芯片。**
+   
+   ```
+   双重映射的硬件实现：
+   
+   CPU地址总线 A[31:0]
+   ↓
+   地址解码器
+   ├─ 检测 0xE0000-0xFFFFF → BIOS_ROM_LOW_CS（低地址映射片选）
+   └─ 检测 0xFFFF80000-0xFFFFFFFF → BIOS_ROM_HIGH_CS（高地址映射片选）
+   ↓
+   片选信号组合逻辑
+   BIOS_ROM_CS = BIOS_ROM_LOW_CS OR BIOS_ROM_HIGH_CS
+   ↓
+   Flash ROM芯片
+   ├─ 片选信号：BIOS_ROM_CS
+   ├─ 地址总线：A[18:0]（对于0xE0000-0xFFFFF映射，使用低19位）
+   │            A[18:0]（对于0xFFFF80000-0xFFFFFFFF映射，使用低19位）
+   └─ 数据总线：D[7:0]或D[15:0]（取决于ROM数据宽度）
+   
+   地址转换逻辑：
+   - 访问 0xE0000-0xFFFFF：
+     ROM内部地址 = A[18:0] - 0xE0000（偏移量）
+   - 访问 0xFFFF80000-0xFFFFFFFF：
+     ROM内部地址 = A[18:0] - 0xFFFF80000（偏移量，但实际使用低19位）
+   ```
+   
+   **4. 地址到ROM内部地址的转换**
+   
+   ```
+   Flash ROM芯片内部地址计算：
+   
+   情况1：访问0xE0000-0xFFFFF（前1MB映射，最后128KB）
+   CPU地址：0xE0000 - 0xFFFFF
+   ROM内部地址：0x00000 - 0x1FFFF（128KB = 0x20000字节）
+   
+   地址转换：
+   ROM_addr[18:0] = CPU_addr[18:0] - 0xE0000
+                  = CPU_addr[18:0] - 0b1110_0000_0000_0000_0000
+   
+   示例：
+   CPU访问 0xFFFF0 → ROM内部地址 = 0xFFFF0 - 0xE0000 = 0x1FFF0
+   
+   情况2：访问0xFFFF80000-0xFFFFFFFF（4GB顶部，完整512KB）
+   CPU地址：0xFFFF80000 - 0xFFFFFFFF
+   ROM内部地址：0x00000 - 0x7FFFF（512KB = 0x80000字节）
+   
+   地址转换：
+   ROM_addr[18:0] = CPU_addr[18:0] - 0xFFFF80000
+                  = CPU_addr[18:0]（因为0xFFFF80000的低19位为0）
+   
+   示例：
+   CPU访问 0xFFFFFFF0 → ROM内部地址 = 0xFFFFFFF0 - 0xFFFF80000 = 0x7FFF0
+   ```
+   
+   **5. 完整的地址映射流程**
+   
+   ```
+   CPU访问BIOS ROM的完整硬件流程：
+   
+   步骤1：CPU发出内存读取请求
+   ├─ 地址：0xFFFFFFF0（BIOS入口点）
+   ├─ 控制信号：MEM_RD（内存读）
+   └─ 数据总线：等待数据
+   
+   步骤2：地址解码器解码地址
+   ├─ 输入：A[31:0] = 0xFFFFFFF0
+   ├─ 检测：A[31:23] = 0b1111_1111_1（全为1）
+   ├─ 检测：A[22:19] >= 0b1000
+   └─ 输出：BIOS_ROM_HIGH_CS = 1（激活BIOS ROM片选）
+   
+   步骤3：地址转换
+   ├─ CPU地址：0xFFFFFFF0
+   ├─ ROM基址：0xFFFF80000
+   └─ ROM内部地址：0xFFFFFFF0 - 0xFFFF80000 = 0x7FFF0
+   
+   步骤4：Flash ROM芯片响应
+   ├─ 片选信号：BIOS_ROM_CS = 1（激活）
+   ├─ 地址信号：ROM_addr[18:0] = 0x7FFF0
+   ├─ 控制信号：OE（输出使能）= 1
+   └─ 数据输出：ROM_data[15:0] = BIOS代码（16位数据）
+   
+   步骤5：数据返回CPU
+   ├─ 数据总线：D[15:0] = BIOS代码
+   └─ CPU接收：执行BIOS指令
+   ```
+   
+   **6. 硬件电路实现细节**
+   
+   **地址解码器的Verilog示例（简化）：**
+   
+   ```verilog
+   // 地址解码器硬件实现示例（简化版）
+   module address_decoder (
+       input [31:0] cpu_addr,      // CPU地址总线
+       input mem_rd,              // 内存读信号
+       input mem_wr,              // 内存写信号
+       
+       output dram_cs,            // DRAM片选
+       output vga_cs,             // VGA片选
+       output extrom_cs,          // 扩展ROM片选
+       output bios_rom_low_cs,   // BIOS ROM低地址映射片选（0xE0000-0xFFFFF）
+       output bios_rom_high_cs   // BIOS ROM高地址映射片选（0xFFFF80000-0xFFFFFFFF）
+   );
+       
+       // 检测0xE0000-0xFFFFF（前1MB的BIOS ROM映射）
+       assign bios_rom_low_cs = (cpu_addr[19:16] >= 4'hE) && 
+                                (cpu_addr[19:0] >= 20'hE0000) &&
+                                (cpu_addr[19:0] <= 20'hFFFFF) &&
+                                (mem_rd || mem_wr);
+       
+       // 检测0xFFFF80000-0xFFFFFFFF（4GB顶部的BIOS ROM）
+       assign bios_rom_high_cs = (cpu_addr[31:23] == 9'b111111111) &&
+                                 (cpu_addr[22:19] >= 4'h8) &&
+                                 (cpu_addr[31:0] >= 32'hFFFF80000) &&
+                                 (cpu_addr[31:0] <= 32'hFFFFFFFF) &&
+                                 (mem_rd || mem_wr);
+       
+       // BIOS ROM总片选信号（双重映射）
+       assign bios_rom_cs = bios_rom_low_cs || bios_rom_high_cs;
+       
+       // 其他设备片选信号...
+       assign dram_cs = (cpu_addr[19:0] < 20'hA0000) && (mem_rd || mem_wr);
+       assign vga_cs = (cpu_addr[19:16] == 4'hA || cpu_addr[19:16] == 4'hB) && 
+                       (mem_rd || mem_wr);
+       // ...
+   endmodule
+   ```
+   
+   **7. 内存控制器的完整架构**
+   
+   ```
+   内存控制器（Memory Controller）完整架构：
+   
+   CPU
+   ├─ 地址总线：A[31:0]
+   ├─ 数据总线：D[31:0]
+   └─ 控制信号：MEM_RD, MEM_WR, M/IO#
+   
+   ↓
+   
+   内存控制器（Chipset）
+   ├─ 地址解码器（Address Decoder）
+   │  ├─ 地址范围检测逻辑
+   │  ├─ 设备选择信号生成
+   │  └─ 地址转换逻辑
+   │
+   ├─ 总线仲裁器（Bus Arbiter）
+   │  └─ 管理多个设备的访问优先级
+   │
+   ├─ 时序控制器（Timing Controller）
+   │  ├─ DRAM时序控制
+   │  ├─ ROM时序控制
+   │  └─ 等待状态生成
+   │
+   └─ 设备接口
+       ├─ DRAM接口
+       │  └─ 连接到DRAM芯片
+       ├─ VGA接口
+       │  └─ 连接到显卡
+       ├─ 扩展ROM接口
+       │  └─ 连接到扩展卡ROM
+       └─ BIOS ROM接口（SPI Flash接口）
+           ├─ SPI总线控制器
+           ├─ 片选信号：BIOS_ROM_CS
+           └─ 连接到Flash ROM芯片
+   ```
+   
+   **8. SPI Flash接口的地址映射**
+   
+   **现代主板通常使用SPI Flash存储BIOS，通过SPI总线访问：**
+   
+   ```
+   SPI Flash接口的地址映射：
+   
+   CPU地址：0xFFFFFFF0
+   ↓
+   地址解码器：识别为BIOS ROM地址
+   ↓
+   SPI总线控制器：
+   ├─ 地址转换：CPU地址 → SPI Flash内部地址
+   │  └─ SPI_addr = CPU_addr - 0xFFFF80000
+   ├─ SPI命令：READ（读取命令）
+   ├─ SPI地址：发送Flash内部地址
+   └─ SPI数据：接收Flash数据
+   ↓
+   Flash ROM芯片（SPI Flash）
+   ├─ 片选信号：CS#（低电平有效）
+   ├─ 时钟信号：SCK
+   ├─ 数据输入：MOSI（主出从入）
+   └─ 数据输出：MISO（主入从出）
+   ```
+   
+   **SPI Flash读取时序：**
+   
+   ```
+   SPI Flash读取操作时序：
+   
+   1. 地址解码器激活BIOS_ROM_CS
+   2. SPI控制器发送READ命令（0x03）
+   3. SPI控制器发送24位地址（Flash内部地址）
+   4. Flash芯片返回数据（逐字节）
+   5. 数据通过数据总线返回CPU
    ```
    
    **关键点：**
@@ -654,15 +994,178 @@
    
    **总结：**
    
-   1. **真实硬件**：BIOS代码**没有复制到DRAM**，仍然在Flash ROM芯片中。通过硬件地址解码器实现双重映射，CPU访问`0xE0000-0xFFFFF`时直接从Flash ROM读取。
+   1. **真实硬件**：
+      - BIOS代码**没有复制到DRAM**，仍然在Flash ROM芯片中
+      - **4GB顶部的完整BIOS（0xFFFF80000-0xFFFFFFFF）**：硬件地址映射，不是拷贝
+      - **前1MB的128KB映射（0xE0000-0xFFFFF）**：硬件地址映射，不是拷贝
+      - 通过硬件地址解码器实现双重映射，CPU访问任一地址范围时直接从Flash ROM读取
    
-   2. **QEMU**：BIOS内容存储在QEMU管理的RAM中，通过`memory_region_init_alias()`创建内存别名，两个地址范围指向**同一块内存**，不是复制。
+   2. **QEMU**：
+      - BIOS内容存储在QEMU管理的RAM中，通过`memory_region_init_alias()`创建内存别名
+      - **4GB顶部的完整BIOS**：内存别名，不是复制
+      - **前1MB的128KB映射**：内存别名，不是复制
+      - 两个地址范围指向**同一块内存**，不是复制
    
    3. **关键区别**：
       - **真实硬件**：硬件地址映射（MMIO），BIOS在Flash ROM中
       - **QEMU**：内存别名（软件），BIOS在RAM中（但模拟ROM行为）
    
-   4. **共同点**：两者都实现了双重映射，允许通过两个不同的地址范围访问同一块BIOS内容，但实现方式不同。
+   4. **共同点**：
+      - 两者都实现了双重映射，允许通过两个不同的地址范围访问同一块BIOS内容
+      - **无论是4GB顶部的完整BIOS还是128KB映射部分，都是映射，不是拷贝**
+      - 实现方式不同（硬件映射 vs 软件别名），但功能等效
+   
+   **UEFI固件的映射机制：**
+   
+   **关键问题：UEFI固件是映射还是拷贝到RAM？**
+   
+   **答案：UEFI固件也是映射，不是拷贝。但UEFI的实现方式与传统BIOS有重要区别。**
+   
+   **UEFI固件的存储和映射：**
+   
+   1. **存储位置（与传统BIOS相同）**
+      - UEFI固件存储在主板上的**Flash ROM芯片**中（如SPI Flash）
+      - 物理位置：Flash ROM芯片（独立存储设备）
+      - 地址映射：映射到地址空间顶部（如`0xFFFFFFF0`附近，具体位置取决于实现）
+   
+   2. **映射机制（与传统BIOS相同）**
+      - **硬件地址映射**：通过内存控制器（Chipset）的地址解码器实现
+      - **不是拷贝**：UEFI固件代码**没有复制到DRAM**，仍然在Flash ROM芯片中
+      - **访问机制**：CPU访问UEFI固件地址时，硬件自动路由到Flash ROM芯片
+      - **只读特性**：Flash ROM是只读的，CPU无法直接修改
+   
+   3. **UEFI vs 传统BIOS的区别**
+   
+   | 特性 | 传统BIOS | UEFI |
+   |------|---------|------|
+   | **存储位置** | Flash ROM芯片（映射到4GB顶部） | Flash ROM芯片（映射到地址空间顶部） |
+   | **映射方式** | 硬件地址映射（MMIO） | 硬件地址映射（MMIO） |
+   | **是否拷贝到RAM** | ❌ 不是拷贝，是映射 | ❌ 不是拷贝，是映射 |
+   | **固件大小** | 64KB - 512KB | 2MB - 16MB+ |
+   | **运行模式** | 主要在实模式 | 主要在保护模式/长模式 |
+   | **内存访问** | 实模式限制（1MB） | 保护模式/长模式（4GB+） |
+   | **代码执行** | 直接从ROM执行 | **可能拷贝到RAM执行**（见下文） |
+   
+   **UEFI的特殊情况：代码可能拷贝到RAM执行**
+   
+   **重要区别：虽然UEFI固件本身是映射的，但UEFI可能会将部分代码拷贝到RAM中执行，以提高性能。**
+   
+   **UEFI的执行流程：**
+   
+   ```
+   1. CPU复位 → 实模式 → 从0xFFFFFFF0开始执行（映射的UEFI固件）
+      ↓
+   2. SEC阶段（Security Phase）
+      - 从Flash ROM读取并执行（映射访问）
+      - 基础硬件初始化
+      - **可能将部分代码拷贝到RAM**（取决于实现）
+      ↓
+   3. PEI阶段（Pre-EFI Initialization）
+      - **通常将代码拷贝到RAM执行**（提高性能）
+      - 初始化内存控制器、CPU等
+      - 准备DXE阶段的环境
+      ↓
+   4. DXE阶段（Driver Execution Environment）
+      - **代码在RAM中执行**（已从ROM拷贝）
+      - 加载和执行UEFI驱动程序
+      - 初始化EFI Boot Services
+      ↓
+   5. BDS阶段（Boot Device Selection）
+      - **代码在RAM中执行**
+      - 选择引导设备
+      - 加载操作系统
+   ```
+   
+   **UEFI代码拷贝到RAM的原因：**
+   
+   1. **性能考虑**
+      - Flash ROM读取速度较慢（通常比RAM慢得多）
+      - 将代码拷贝到RAM可以提高执行速度
+      - 特别是对于大型UEFI固件（2MB-16MB+），拷贝到RAM执行更高效
+   
+   2. **内存充足**
+      - UEFI运行在保护模式/长模式下，可以访问大量内存
+      - 现代系统通常有足够的RAM来存储UEFI代码
+      - 拷贝到RAM不会造成内存压力
+   
+   3. **代码组织**
+      - UEFI固件通常分为多个阶段（SEC、PEI、DXE、BDS）
+      - 每个阶段可以独立拷贝到RAM执行
+      - 不需要一次性拷贝整个固件
+   
+   **UEFI映射 vs 拷贝的对比：**
+   
+   | 阶段 | 存储方式 | 执行方式 | 说明 |
+   |------|---------|---------|------|
+   | **初始启动（SEC阶段）** | Flash ROM映射 | 从ROM直接执行 | 类似传统BIOS |
+   | **PEI阶段** | Flash ROM映射 | **拷贝到RAM执行** | 提高性能 |
+   | **DXE阶段** | Flash ROM映射 | **拷贝到RAM执行** | 提高性能 |
+   | **BDS阶段** | Flash ROM映射 | **拷贝到RAM执行** | 提高性能 |
+   
+   **关键点总结：**
+   
+   1. **UEFI固件存储**：与传统BIOS相同，存储在Flash ROM芯片中，通过硬件地址映射访问
+   
+   2. **UEFI固件映射**：与传统BIOS相同，是映射，不是拷贝。固件代码始终在Flash ROM芯片中
+   
+   3. **UEFI代码执行**：与传统BIOS不同，UEFI可能会将部分代码拷贝到RAM中执行，以提高性能
+   
+   4. **实现差异**：
+      - **传统BIOS**：主要从ROM直接执行（映射访问）
+      - **UEFI**：初始阶段从ROM执行，后续阶段拷贝到RAM执行
+   
+   5. **设计权衡**：
+      - **传统BIOS**：固件较小（512KB），从ROM执行足够快
+      - **UEFI**：固件较大（2MB-16MB+），拷贝到RAM执行更高效
+   
+   **实际硬件示例（UEFI）：**
+   
+   ```
+   64位系统，UEFI固件（4MB）：
+   
+   物理地址空间：0x0000000000000000 - 0x000000FFFFFFFFFF (1TB)
+   
+   Flash ROM芯片（物理存储）：
+   ├─ UEFI固件（4MB）
+   │  ├─ SEC阶段代码
+   │  ├─ PEI阶段代码
+   │  ├─ DXE阶段代码
+   │  └─ BDS阶段代码
+   │
+   内存控制器（地址解码器）：
+   ├─ 地址 0xFFFFFFF0附近 → 硬件映射到Flash ROM（UEFI固件）
+   │  └─ 这是映射，不是拷贝！固件代码在Flash ROM中
+   │
+   CPU访问流程：
+   1. CPU复位 → 从0xFFFFFFF0开始执行（映射的UEFI固件）
+   2. SEC阶段 → 从Flash ROM读取并执行（映射访问）
+   3. PEI阶段 → 将代码拷贝到RAM（如0x80000000），从RAM执行
+   4. DXE阶段 → 将代码拷贝到RAM（如0x90000000），从RAM执行
+   5. BDS阶段 → 将代码拷贝到RAM（如0xA0000000），从RAM执行
+   ```
+   
+   **总结对比：**
+   
+   | 方面 | 传统BIOS | UEFI |
+   |------|---------|------|
+   | **固件存储** | Flash ROM芯片（映射） | Flash ROM芯片（映射） |
+   | **固件映射** | 硬件地址映射（MMIO） | 硬件地址映射（MMIO） |
+   | **是否拷贝到RAM** | ❌ 不是拷贝，是映射 | ❌ 固件本身是映射 |
+   | **代码执行** | 主要从ROM直接执行 | **可能拷贝到RAM执行** |
+   | **拷贝原因** | 不需要（固件小） | 提高性能（固件大） |
+   | **运行模式** | 主要在实模式 | 主要在保护模式/长模式 |
+   
+   **关键结论：**
+   
+   1. **传统BIOS和UEFI的固件存储都是映射，不是拷贝**：固件代码始终在Flash ROM芯片中，通过硬件地址映射访问
+   
+   2. **传统BIOS主要从ROM执行**：固件较小，从ROM直接执行足够快
+   
+   3. **UEFI可能拷贝到RAM执行**：固件较大，拷贝到RAM执行更高效，但固件本身仍然是映射的
+   
+   4. **映射 vs 拷贝的区别**：
+      - **映射**：固件代码在Flash ROM中，CPU通过地址映射访问
+      - **拷贝**：将代码从ROM复制到RAM，然后从RAM执行（UEFI的优化策略）
    
    **QEMU源代码实现：**
    
