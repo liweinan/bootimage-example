@@ -174,7 +174,7 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 - 实现位置：`linux/kernel/time/`
 
 > **相关文档**：关于 Linux 内核中断处理机制（Top Half 和 Bottom Half）的详细说明，请参见 [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)。  
-> 关于中断向量号的详细说明，请参见 [中断处理详解](INTERRUPT_HANDLING.md#中断向量号ivtidt-索引)。
+> 关于中断向量号的详细说明，请参见 [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md#4-硬件中断编号irq-vs-中断向量号)。
 
 ## 中断向量号（IVT/IDT 索引）
 

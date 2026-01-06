@@ -138,5 +138,5 @@ Demo completed!
 ## 相关文档
 
 - 查看 `GUIDE.md` 了解中断机制的完整说明
-- 查看 `BIOS_INTERRUPT_STUDY.md` 了解 BIOS 中断的学习资源
+- 查看 [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md) 了解 BIOS 中断的完整说明和学习资源
 

@@ -379,7 +379,7 @@ mov bx, 0x09 * 4    ; INT 09h 向量地址 = 0x0024
 
 ### 中断向量号（IVT/IDT 索引）
 
-> **相关文档**：关于中断向量号的详细说明，请参见 [中断处理详解](INTERRUPT_HANDLING.md#中断向量号ivtidt-索引)。
+> **相关文档**：关于中断向量号的详细说明，请参见 [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md#4-硬件中断编号irq-vs-中断向量号)。
 
 ### IRQ 到中断向量号的映射
 
@@ -544,5 +544,5 @@ outb_pic(ISA_IRQ_VECTOR(0), PIC_MASTER_IMR);
 
 ---
 
-**注意**：关于 PIC 端口地址、地址解码电路等更详细的内容，请参考 [中断处理详解](INTERRUPT_HANDLING.md) 文档。
+**注意**：关于 PIC 端口地址、地址解码电路等更详细的内容，请参考 [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md#9-pic-端口地址与地址解码) 文档。
 

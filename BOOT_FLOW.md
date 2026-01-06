@@ -25,12 +25,13 @@
 - [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md)
 - [UEFI 中断处理机制](UEFI_INTERRUPT_HANDLING.md)
 - [SeaBIOS entry_13_official 实现详细分析](SEABIOS_ENTRY_13_ANALYSIS.md)
+- [SeaBIOS handle_post 入口地址定义机制分析](SEABIOS_HANDLE_POST_ENTRY.md)
 
 ## 附录
 
 - [附录A：键盘中断处理代码分析](APPENDIX_A_KEYBOARD_INTERRUPT.md)
 - [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
-- [中断处理详解](INTERRUPT_HANDLING.md)
+- [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md) - 整合了所有中断相关内容的完整文档
 - [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)
 - [BOOT_FLOW 技术细节说明](BOOT_FLOW_NOTES.md)
 - [BOOT_FLOW 常见问题解答](BOOT_FLOW_QA.md)
@@ -218,6 +219,8 @@ bios_error:
 ### POST 入口点
 
 CPU 复位后，从 `0xFFFF0` 跳转到 SeaBIOS 的 POST（Power-On Self-Test）入口。源代码位置：`seabios/src/post.c:302-337`
+
+> **详细说明**：关于 `handle_post` 如何被定义到固定入口地址 `0xe05b`、CPU 启动流程、地址映射机制等详细内容，请参见 [SeaBIOS handle_post 入口地址定义机制分析](SEABIOS_HANDLE_POST_ENTRY.md)。
 
 ```c
 // POST 初始化：代码重定位和初始化
@@ -484,13 +487,13 @@ ivt_init(void)
   - `INT 19h`：引导加载服务
   - 等等
 
-> **详细说明**：关于 IVT 初始化的详细技术说明（包括初始化策略、默认处理程序、替换时机等），请参见 [技术细节说明 - Note 1: IVT 初始化详细说明](BOOT_FLOW_NOTES.md#note-1-ivt-初始化详细说明)。
+> **详细说明**：关于 IVT 初始化的详细技术说明（包括初始化策略、默认处理程序、替换时机等），请参见 [BIOS 中断处理完整详解 - IVT 初始化详细说明](BIOS_INTERRUPT_COMPLETE.md#3-bios-中断向量表ivt初始化)。
 
 **中断向量号 vs 内存地址：**
 
 这些数字（如 `0x02`, `0x10`, `0x13`）是**中断向量号**（中断向量表的索引），不是内存地址。中断向量号对应的 IVT 条目地址计算公式为：`IVT 条目内存地址 = 0x0000:0000 + (中断向量号 × 4)`。
 
-> **详细说明**：关于中断向量号与内存地址的详细解释（包括计算公式、示例、IVT 条目 vs 中断服务代码、内存布局示意等），请参见 [技术细节说明 - Note 2: 中断向量号 vs 内存地址详解](BOOT_FLOW_NOTES.md#note-2-中断向量号-vs-内存地址详解)。
+> **详细说明**：关于中断向量号与内存地址的详细解释（包括计算公式、示例、IVT 条目 vs 中断服务代码、内存布局示意等），请参见 [BIOS 中断处理完整详解 - 中断向量号 vs 内存地址详解](BIOS_INTERRUPT_COMPLETE.md#5-中断向量号-vs-内存地址详解)。
 
 ### 平台硬件设置（PIC 初始化）
 
@@ -502,7 +505,7 @@ ivt_init(void)
 
 IVT（中断向量表）和 PIC（可编程中断控制器）之间存在依赖关系，必须按正确顺序初始化：IVT 是中断处理的基础设施，PIC 初始化过程中可能触发中断，因此 IVT 必须先初始化。8259A PIC 只处理硬件中断（IRQ0-15），映射到向量 0x08-0x0F 和 0x70-0x77，而 CPU 有 256 个中断向量，其他中断（CPU 异常、软件中断、NMI 等）不经过 PIC。
 
-> **详细说明**：关于 IVT 与 PIC 关系的详细解释（包括初始化顺序、协作关系、8259A PIC 覆盖范围、代码证据等），请参见 [技术细节说明 - Note 3: IVT 与 PIC 的关系详解](BOOT_FLOW_NOTES.md#note-3-ivt-与-pic-的关系详解)。
+> **详细说明**：关于 IVT 与 PIC 关系的详细解释（包括初始化顺序、协作关系、8259A PIC 覆盖范围、代码证据等），请参见 [BIOS 中断处理完整详解 - IVT 与 PIC 的关系详解](BIOS_INTERRUPT_COMPLETE.md#6-ivt-与-pic-的关系详解)。
 
 源代码位置：`seabios/src/post.c:137-158`
 
@@ -1255,7 +1258,7 @@ dw 0xAA55               ; 引导扇区标志
 
 - [附录A：键盘中断处理代码分析](APPENDIX_A_KEYBOARD_INTERRUPT.md)
 - [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
-- [中断处理详解](INTERRUPT_HANDLING.md)
+- [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md) - 整合了所有中断相关内容的完整文档
 - [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)
 
 ## Linux 内核接管 BIOS
