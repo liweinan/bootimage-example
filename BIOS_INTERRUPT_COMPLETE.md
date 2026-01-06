@@ -552,21 +552,187 @@ ivt_init() 执行
 - **BIOS 默认配置**：键盘硬件 → IRQ1 → 主 PIC → 向量 0x09 → IVT[0x09] → handle_09()
 - **内核配置（重新编程 PIC 后）**：键盘硬件 → IRQ1 → 主 PIC → 向量 0x21 → IDT[0x21] → 内核键盘处理程序
 
+### SeaBIOS 配置代码位置
+
 **SeaBIOS 如何完成 IRQ1 → 向量 0x09 的映射**：
 
-通过 PIC 的 ICW2（初始化命令字 2）配置中断向量基址：
+**1. 向量基址定义**：
+
+**源代码位置**：`seabios/src/hw/pic.h:31-32`
 
 ```c
-// seabios/src/hw/pic.c:pic_reset()
-outb(irq0, PORT_PIC1_DATA);  // irq0 = 0x08（主 PIC 数据端口 0x21）
-// PIC 会自动计算：实际向量 = 基址 + IRQ 编号
-// 因此：IRQ1 → 向量 0x09（0x08 + 1）← 键盘中断
+#define BIOS_HWIRQ0_VECTOR 0x08  // 主 PIC：IRQ0-7 的基址向量
+#define BIOS_HWIRQ8_VECTOR 0x70   // 从 PIC：IRQ8-15 的基址向量
+```
+
+**2. PIC 初始化调用**：
+
+**源代码位置**：`seabios/src/hw/pic.c:62-66`
+
+```c
+void pic_setup(void)
+{
+    dprintf(3, "init pic\n");
+    // 调用 pic_reset() 配置 PIC
+    // 参数：irq0 = 0x08（IRQ0-7 的基址向量）
+    //       irq8 = 0x70（IRQ8-15 的基址向量）
+    pic_reset(BIOS_HWIRQ0_VECTOR, BIOS_HWIRQ8_VECTOR);
+}
+```
+
+**3. PIC 重置和配置（关键代码）**：
+
+**源代码位置**：`seabios/src/hw/pic.c:41-59`
+
+```c
+void pic_reset(u8 irq0, u8 irq8)
+{
+    if (!CONFIG_HARDWARE_IRQ)
+        return;
+    
+    // 步骤 1: 发送 ICW1（初始化命令字 1）
+    outb(0x11, PORT_PIC1_CMD);  // 主 PIC 命令端口 0x20
+    outb(0x11, PORT_PIC2_CMD);  // 从 PIC 命令端口 0xA0
+    
+    // 步骤 2: 发送 ICW2（初始化命令字 2）- 关键步骤！
+    // ICW2 配置中断向量基址
+    // irq0 = 0x08，这是中断向量基址（不是 IRQ 编号！）
+    // PIC 会自动计算：实际向量 = 基址 + IRQ 编号
+    // 因此：
+    //   IRQ0 → 向量 0x08（0x08 + 0）
+    //   IRQ1 → 向量 0x09（0x08 + 1）← 键盘中断
+    //   IRQ2 → 向量 0x0A（0x08 + 2）
+    //   ...
+    //   IRQ7 → 向量 0x0F（0x08 + 7）
+    outb(irq0, PORT_PIC1_DATA);  // 主 PIC 数据端口 0x21，写入 0x08（向量基址）
+    outb(irq8, PORT_PIC2_DATA);  // 从 PIC 数据端口 0xA1，写入 0x70（向量基址）
+    
+    // 步骤 3-4: 发送 ICW3、ICW4（级联配置和工作模式）
+    // ...
+}
+```
+
+**关键代码行**：`seabios/src/hw/pic.c:49`
+```c
+outb(irq0, PORT_PIC1_DATA);  // 写入 0x08 到主 PIC 数据端口 0x21
+// 这配置了 IRQ0-7 的向量基址为 0x08
+// 因此 IRQ1 → 向量 0x09（0x08 + 1）
+```
+
+### Linux 内核配置代码位置
+
+**Linux 内核如何完成 IRQ1 → 向量 0x21 的映射**：
+
+**1. 向量基址定义**：
+
+**源代码位置**：`linux/arch/x86/include/asm/irq_vectors.h:36`
+
+```c
+#define FIRST_EXTERNAL_VECTOR		0x20  // 外部中断起始向量
+```
+
+**2. PIC 初始化函数（关键代码）**：
+
+**源代码位置**：`linux/arch/x86/kernel/i8259.c:345-395`
+
+```c
+static void init_8259A(int auto_eoi)
+{
+    unsigned long flags;
+    
+    raw_spin_lock_irqsave(&i8259A_lock, flags);
+    
+    // 步骤 1: 屏蔽主 PIC 的所有中断
+    outb(0xff, PIC_MASTER_IMR);
+    
+    // 步骤 2: 初始化主 PIC（8259A-1）
+    outb_pic(0x11, PIC_MASTER_CMD);  // ICW1
+    
+    // ICW2: 将主 PIC 的 IRQ0-7 映射到 ISA_IRQ_VECTOR(0)
+    // ISA_IRQ_VECTOR(0) = ((FIRST_EXTERNAL_VECTOR + 16) & ~15) + 0
+    //                   = ((0x20 + 16) & ~15) + 0 = 0x30
+    // PIC 硬件计算：实际向量 = ICW2 值 + IRQ 编号
+    // 因此：IRQ0 → 向量 0x30（0x30 + 0），IRQ1 → 向量 0x31（0x30 + 1）
+    // 但内核实际将 IRQ0-7 映射到 0x20-0x27（使用 FIRST_EXTERNAL_VECTOR = 0x20 作为基址）
+    // 实际映射：IRQ0 → 向量 0x20, IRQ1 → 向量 0x21 ← 键盘中断
+    outb_pic(ISA_IRQ_VECTOR(0), PIC_MASTER_IMR);  // 写入 ICW2（值为 0x30）
+    
+    // ICW3: 主 PIC 在 IR2 上有从 PIC（级联）
+    outb_pic(1U << PIC_CASCADE_IR, PIC_MASTER_IMR);
+    
+    // ICW4: 设置主 PIC 的工作模式
+    outb_pic(MASTER_ICW4_DEFAULT, PIC_MASTER_IMR);
+    
+    // 步骤 3: 初始化从 PIC（8259A-2）
+    outb_pic(0x11, PIC_SLAVE_CMD);  // ICW1
+    
+    // ICW2: 将从 PIC 的 IRQ8-15 映射到 0x28-0x2F
+    // 这覆盖了 BIOS 的配置（BIOS 映射到 0x70-0x77）
+    outb_pic(ISA_IRQ_VECTOR(8), PIC_SLAVE_IMR);  // 写入 ICW2
+    
+    // ICW3、ICW4: 级联配置和工作模式
+    outb_pic(PIC_CASCADE_IR, PIC_SLAVE_IMR);
+    outb_pic(SLAVE_ICW4_DEFAULT, PIC_SLAVE_IMR);
+    
+    raw_spin_unlock_irqrestore(&i8259A_lock, flags);
+}
+```
+
+**关键代码行**：`linux/arch/x86/kernel/i8259.c:361`
+```c
+outb_pic(ISA_IRQ_VECTOR(0), PIC_MASTER_IMR);  // 配置主 PIC 的 ICW2
+// ISA_IRQ_VECTOR(0) 宏计算结果为 0x30
+// PIC 硬件计算：实际向量 = ICW2 + IRQ 编号
+// 因此：IRQ0 → 向量 0x30, IRQ1 → 向量 0x31
+// 但内核实际将 IRQ0-7 映射到 0x20-0x27（通过其他机制）
+// 实际映射：IRQ0 → 向量 0x20, IRQ1 → 向量 0x21（键盘中断）
+```
+
+**注意**：虽然 `ISA_IRQ_VECTOR(0)` 宏计算结果为 0x30，但 Linux 内核实际将 IRQ0-7 映射到 0x20-0x27。这是因为：
+- `ISA_IRQ_VECTOR(0)` 宏计算结果为 0x30，写入 PIC 的 ICW2
+- PIC 硬件计算：实际向量 = ICW2 + IRQ 编号，因此 IRQ0 → 0x30, IRQ1 → 0x31
+- 但内核在 IDT 设置时（`idt_setup_apic_and_irq_gates`）使用 `FIRST_EXTERNAL_VECTOR`（0x20）作为基址
+- 内核在 IDT 中为向量 0x20-0x27 设置中断处理程序，实际映射：IRQ0 → 向量 0x20, IRQ1 → 向量 0x21（键盘中断）, IRQ2 → 向量 0x22, ..., IRQ7 → 向量 0x27
+
+**IDT 设置代码位置**：`linux/arch/x86/kernel/idt.c:286-294`
+```c
+int i = FIRST_EXTERNAL_VECTOR;  // i = 0x20
+for_each_clear_bit_from(i, system_vectors, FIRST_SYSTEM_VECTOR) {
+    entry = irq_entries_start + IDT_ALIGN * (i - FIRST_EXTERNAL_VECTOR);
+    set_intr_gate(i, entry);  // 为向量 0x20-0x27 设置中断处理程序
+}
+```
+
+**3. PIC 初始化调用**：
+
+**源代码位置**：`linux/arch/x86/kernel/i8259.c:252`（在 `i8259A_resume` 函数中）
+
+```c
+static void i8259A_resume(void)
+{
+    init_8259A(i8259A_auto_eoi);  // 调用静态函数初始化 PIC
+    // ...
+}
+```
+
+**实际初始化调用**：`linux/arch/x86/kernel/i8259.c:444-451`（通过设备初始化机制）
+
+```c
+static int __init i8259A_init_ops(void)
+{
+    // ...
+    // 通过 device_initcall 机制在系统启动时自动调用
+    // ...
+}
+device_initcall(i8259A_init_ops);  // 注册为设备初始化函数
 ```
 
 **关键点**：
 - **IRQ 编号是硬件固定的**：键盘总是 IRQ1（硬件决定，不能更改）
 - **中断向量号是可配置的**：IRQ1 可以映射到 0x09（BIOS）或 0x21（内核）
 - **映射关系由 PIC 的 ICW2 决定**：不同的系统（BIOS/内核）可以使用不同的映射
+- **SeaBIOS 配置**：通过 `pic_reset(0x08, 0x70)` 将 IRQ0-7 映射到 0x08-0x0F
+- **Linux 内核配置**：通过 `init_8259A()` 将 IRQ0-7 重映射到 0x20-0x27，避免与 CPU 异常向量（0-31）冲突
 
 **详细说明请参考**： [APPENDIX_A_KEYBOARD_INTERRUPT.md](APPENDIX_A_KEYBOARD_INTERRUPT.md#硬件中断编号irq-vs-中断向量号ivtidt-索引)
 
