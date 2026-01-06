@@ -16,7 +16,7 @@
 
 ## 补充说明文档
 
-- [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)
+- [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)（已拆分为：[x86 CPU 运行模式详解](X86_CPU_MODES.md)、[BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)、[BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)）
 - [BIOS 代码布局分析：128KB 映射区域内的代码与保护模式代码](BIOS_CODE_LAYOUT_ANALYSIS.md)
 - [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)
 - [boot.asm 与 GRUB boot.S 对比分析](BOOTSECTOR_COMPARISON.md)
@@ -33,6 +33,7 @@
 - [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
 - [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md) - 整合了所有中断相关内容的完整文档
 - [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)
+- [Linux 用户空间内存模型详解](LINUX_USERSPACE_MEMORY.md) - Linux 用户空间内存模型、内存管理和汇编内存访问
 - [BOOT_FLOW 技术细节说明](BOOT_FLOW_NOTES.md)
 - [BOOT_FLOW 常见问题解答](BOOT_FLOW_QA.md)
 
@@ -207,7 +208,7 @@ bios_error:
 - 最后 128KB 同时映射到 ISA 空间 `0xE0000-0xFFFFF`
 - CPU 复位后从 `0xFFFF0`（BIOS 入口点）开始执行
 
-> **注意**：关于 BIOS 运行模式（实模式/保护模式）、内存布局、地址映射等详细内容，请参见 [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)。  
+> **注意**：关于 BIOS 运行模式（实模式/保护模式）、内存布局、地址映射等详细内容，请参见 [x86 CPU 运行模式详解](X86_CPU_MODES.md)、[BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md) 和 [BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)。  
 > 关于 QEMU 软件实现与真实硬件加载 BIOS 的区别，请参见 [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)。  
 > 关于哪些 BIOS 代码映射到 128KB 区域，哪些需要保护模式访问的详细分析，请参见 [BIOS 代码布局分析：128KB 映射区域内的代码与保护模式代码](BIOS_CODE_LAYOUT_ANALYSIS.md)。
 
@@ -1862,7 +1863,7 @@ Linux 内核完全接管系统
            = 0x7C00
    
    地址范围：0x7C00 - 0x7DFF（512 字节 = 0x200 字节）
-   ```
+   ``
    
    **INT 13h AH=0x02 的寄存器要求：**
    

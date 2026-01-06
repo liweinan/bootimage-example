@@ -16,6 +16,7 @@
 10. [PIC 端口地址与地址解码](#10-pic-端口地址与地址解码)
 11. [中断使用示例](#11-中断使用示例)
 12. [学习资源与参考](#12-学习资源与参考)
+13. [键盘硬件中断处理实现详解](#13-键盘硬件中断处理实现详解)
 
 ---
 
@@ -1448,4 +1449,470 @@ qemu-system-x86_64 -monitor stdio -drive format=raw,file=boot.bin
 - [APPENDIX_B_EVENT_MECHANISM.md](APPENDIX_B_EVENT_MECHANISM.md) - 应用层事件机制
 - [LINUX_INTERRUPT_HANDLING.md](LINUX_INTERRUPT_HANDLING.md) - Linux 内核中断处理：Top Half 和 Bottom Half
 - [SeaBIOS entry_13_official 实现详细分析](SEABIOS_ENTRY_13_ANALYSIS.md) - INT 13h 磁盘服务的完整实现分析
+
+---
+
+## 13. 键盘硬件中断处理实现详解
+
+### 键盘中断处理的完整流程
+
+SeaBIOS 的键盘处理采用**"生产者-消费者"模式**：
+- **硬件中断（IRQ1，向量 0x09）**：作为"生产者"，接收键盘扫描码并存储到缓冲区
+- **软件中断（INT 16h）**：作为"消费者"，从缓冲区读取按键码并返回给程序
+
+### 硬件中断处理（IRQ1 → 向量 0x09）
+
+#### 1. 中断入口点设置
+
+**源代码位置**：`seabios/src/hw/ps2port.c:531-547`
+
+```c
+void
+ps2port_setup(void)
+{
+    // ... 检查 PS/2 键盘是否存在 ...
+    
+    // 设置键盘中断（IRQ1）的处理程序
+    enable_hwirq(1, FUNC16(entry_09));  // IRQ1 → entry_09 → handle_09()
+    
+    // 设置鼠标中断（IRQ12）的处理程序
+    enable_hwirq(12, FUNC16(entry_74));  // IRQ12 → entry_74 → handle_74()
+    
+    run_thread(ps2_keyboard_setup, NULL);
+}
+```
+
+**关键点**：
+- `enable_hwirq(1, FUNC16(entry_09))` 将 IVT[0x09] 设置为 `entry_09`
+- `entry_09` 在 `romlayout.S` 中定义（固定地址 `0xe987`）
+- `entry_09` 调用 `handle_09()` 处理键盘中断
+
+#### 2. 硬件中断处理函数（handle_09）
+
+**源代码位置**：`seabios/src/hw/ps2port.c:389-417`
+
+```c
+// INT09h : Keyboard Hardware Service Entry Point
+void VISIBLE16
+handle_09(void)
+{
+    if (! CONFIG_PS2PORT)
+        return;
+
+    debug_isr(DEBUG_ISR_09);
+
+    // 读取键盘控制器状态
+    u8 v = inb(PORT_PS2_STATUS);
+    if (v & I8042_STR_AUXDATA) {
+        dprintf(1, "ps2 keyboard irq but found mouse data?!\n");
+        goto done;
+    }
+    
+    // 从键盘控制器读取扫描码
+    // 详细说明：键盘控制器通过 I/O 端口（0x60）访问，不是内存映射
+    // 详见：[键盘控制器 I/O 端口映射与汇编实现](KEYBOARD_CONTROLLER_IO.md)
+    v = inb(PORT_PS2_DATA);
+
+    if (!(GET_LOW(Ps2ctr) & I8042_CTR_KBDINT))
+        // 中断未启用
+        goto done;
+
+    // 处理扫描码（转换为按键码并存储到缓冲区）
+    process_key(v);
+
+    // 某些旧程序期望 ISR 重新启用键盘
+    i8042_command(I8042_CMD_KBD_ENABLE, NULL);
+
+done:
+    pic_eoi1();  // 发送 EOI 给 PIC
+}
+```
+
+**处理步骤**：
+1. **读取状态**：`inb(PORT_PS2_STATUS)` 读取键盘控制器状态
+2. **验证数据**：检查是否为键盘数据（而非鼠标数据）
+3. **读取扫描码**：`inb(PORT_PS2_DATA)` 从键盘控制器读取扫描码
+4. **处理扫描码**：调用 `process_key(v)` 处理扫描码
+5. **发送 EOI**：`pic_eoi1()` 通知 PIC 中断处理完成
+
+#### 3. 扫描码处理（process_key → __process_key）
+
+**源代码位置**：`seabios/src/kbd.c:582-599` 和 `seabios/src/kbd.c:456-579`
+
+```c
+void
+process_key(u8 key)
+{
+    if (!CONFIG_KEYBOARD)
+        return;
+
+    // 允许键盘拦截（INT 15h/AH=4Fh）
+    if (CONFIG_KBD_CALL_INT15_4F) {
+        struct bregs br;
+        memset(&br, 0, sizeof(br));
+        br.eax = (0x4f << 8) | key;
+        br.flags = F_IF|F_CF;
+        call16_int(0x15, &br);
+        if (!(br.flags & F_CF))
+            return;  // 被拦截，不处理
+        key = br.eax;
+    }
+    
+    __process_key(key);  // 处理扫描码
+}
+
+static void
+__process_key(u8 scancode)
+{
+    // 1. 处理多字节扫描码序列（如 E0、E1）
+    u8 flags1 = GET_BDA(kbd_flag1);
+    if (scancode == 0xe0 || scancode == 0xe1) {
+        // 扩展键序列的开始
+        u8 eflag = scancode == 0xe0 ? KF1_LAST_E0 : KF1_LAST_E1;
+        SET_BDA(kbd_flag1, flags1 | eflag);
+        return;
+    }
+    
+    // 2. 处理按键释放（扫描码 & 0x80）
+    int key_release = scancode & 0x80;
+    scancode &= ~0x80;
+    
+    // 3. 处理特殊键（Caps Lock、Shift、Ctrl、Alt 等）
+    switch (scancode) {
+    case 0x3a: /* Caps Lock */
+        kbd_set_flag(key_release, KF0_CAPS, 0, KF0_CAPSACTIVE);
+        return;
+    case 0x2a: /* L Shift */
+        kbd_set_flag(key_release, KF0_LSHIFT, 0, 0);
+        return;
+    // ... 其他特殊键 ...
+    }
+    
+    // 4. 扫描码 → 按键码转换
+    if (key_release)
+        return;  // 忽略按键释放
+    
+    struct scaninfo *info = &scan_to_keycode[scancode];
+    u16 flags0 = GET_BDA(kbd_flag0);
+    u16 keycode;
+    
+    // 根据修饰键（Shift、Ctrl、Alt）选择按键码
+    if (flags0 & KF0_ALTACTIVE) {
+        keycode = GET_GLOBAL(info->alt);
+    } else if (flags0 & KF0_CTRLACTIVE) {
+        keycode = GET_GLOBAL(info->control);
+    } else {
+        u8 useshift = flags0 & (KF0_RSHIFT|KF0_LSHIFT) ? 1 : 0;
+        // ... 处理 Shift 组合 ...
+        if (useshift)
+            keycode = GET_GLOBAL(info->shift);
+        else
+            keycode = GET_GLOBAL(info->normal);
+    }
+    
+    // 5. 存储到缓冲区
+    if (keycode)
+        enqueue_key(keycode);
+}
+```
+
+**处理流程**：
+1. **多字节序列处理**：处理扩展键序列（E0、E1）
+2. **按键释放检测**：扫描码最高位为 1 表示按键释放
+3. **特殊键处理**：Caps Lock、Shift、Ctrl、Alt 等修饰键
+4. **扫描码转换**：使用 `scan_to_keycode[]` 表将扫描码转换为按键码
+5. **修饰键组合**：根据 Shift、Ctrl、Alt 状态选择对应的按键码
+6. **存储到缓冲区**：调用 `enqueue_key(keycode)` 存储
+
+#### 4. 存储到缓冲区（enqueue_key）
+
+**源代码位置**：`seabios/src/kbd.c:32-52`
+
+```c
+u8
+enqueue_key(u16 keycode)
+{
+    u16 buffer_start = GET_BDA(kbd_buf_start_offset);
+    u16 buffer_end   = GET_BDA(kbd_buf_end_offset);
+    u16 buffer_head = GET_BDA(kbd_buf_head);
+    u16 buffer_tail = GET_BDA(kbd_buf_tail);
+
+    u16 temp_tail = buffer_tail;
+    buffer_tail += 2;  // 每个按键码占 2 字节
+    if (buffer_tail >= buffer_end)
+        buffer_tail = buffer_start;  // 循环缓冲区
+
+    if (buffer_tail == buffer_head)
+        return 0;  // 缓冲区满
+
+    // 存储按键码到 BDA 的键盘缓冲区
+    SET_FARVAR(SEG_BDA, *(u16*)(temp_tail+0), keycode);
+    SET_BDA(kbd_buf_tail, buffer_tail);
+    return 1;
+}
+```
+
+**缓冲区结构**：
+- **位置**：BDA（BIOS Data Area）中的 `kbd_buf` 字段
+- **类型**：循环缓冲区（Ring Buffer）
+- **大小**：32 字节（16 个按键码，每个 2 字节）
+- **管理**：使用 `kbd_buf_head` 和 `kbd_buf_tail` 指针管理
+
+### 软件中断服务（INT 16h）
+
+#### 1. 中断入口点设置
+
+**源代码位置**：`seabios/src/post.c:57`
+
+```c
+SET_IVT(0x16, FUNC16(entry_16));  // INT 16h → entry_16 → handle_16()
+```
+
+#### 2. 软件中断处理函数（handle_16）
+
+**源代码位置**：`seabios/src/kbd.c:244-270`
+
+```c
+// INT 16h Keyboard Service Entry Point
+void VISIBLE16
+handle_16(struct bregs *regs)
+{
+    debug_enter(regs, DEBUG_HDL_16);
+    if (! CONFIG_KEYBOARD)
+        return;
+
+    // 设置键盘 LED（Caps Lock、Num Lock、Scroll Lock）
+    set_leds();
+
+    // 根据功能号（AH）调用相应的处理函数
+    switch (regs->ah) {
+    case 0x00: handle_1600(regs); break;  // 读取按键（等待）
+    case 0x01: handle_1601(regs); break;  // 检查按键状态（非阻塞）
+    case 0x02: handle_1602(regs); break;  // 获取 Shift 标志状态
+    case 0x05: handle_1605(regs); break;  // 存储按键到缓冲区
+    case 0x09: handle_1609(regs); break;  // 获取键盘功能
+    case 0x0a: handle_160a(regs); break;  // 获取键盘 ID
+    case 0x10: handle_1610(regs); break;  // 读取扩展按键（等待）
+    case 0x11: handle_1611(regs); break;  // 检查扩展按键状态（非阻塞）
+    case 0x12: handle_1612(regs); break;  // 获取扩展键盘状态
+    // ... 其他功能 ...
+    default:   handle_16XX(regs); break;
+    }
+}
+```
+
+**主要功能**：
+- **AH=0x00**：读取按键（阻塞，等待按键）
+- **AH=0x01**：检查按键状态（非阻塞）
+- **AH=0x02**：获取 Shift 标志状态
+- **AH=0x05**：存储按键到缓冲区
+- **AH=0x10-0x12**：扩展键盘功能
+
+#### 3. 从缓冲区读取按键（dequeue_key）
+
+**源代码位置**：`seabios/src/kbd.c:54-105`
+
+```c
+static void
+dequeue_key(struct bregs *regs, int incr, int extended)
+{
+    yield();
+    u16 buffer_head;
+    u16 buffer_tail;
+    for (;;) {
+        buffer_head = GET_BDA(kbd_buf_head);
+        buffer_tail = GET_BDA(kbd_buf_tail);
+
+        if (buffer_head != buffer_tail)
+            break;  // 缓冲区有数据
+        
+        if (!incr) {
+            // 非阻塞模式：设置 ZF 标志表示无按键
+            regs->flags |= F_ZF;
+            return;
+        }
+        // 阻塞模式：等待按键（yield_toirq 允许硬件中断）
+        yield_toirq();
+    }
+
+    // 从缓冲区读取按键码
+    u16 keycode = GET_FARVAR(SEG_BDA, *(u16*)(buffer_head+0));
+    
+    // 处理扩展键转换
+    // ...
+    
+    regs->ax = keycode;  // 返回按键码
+
+    if (!incr) {
+        regs->flags &= ~F_ZF;  // 清除 ZF 标志
+        return;
+    }
+    
+    // 更新缓冲区头指针
+    buffer_head += 2;
+    if (buffer_head >= buffer_end)
+        buffer_head = buffer_start;
+    SET_BDA(kbd_buf_head, buffer_head);
+}
+```
+
+**处理模式**：
+- **阻塞模式**（`incr=1`）：如果缓冲区为空，调用 `yield_toirq()` 等待硬件中断
+- **非阻塞模式**（`incr=0`）：如果缓冲区为空，设置 ZF 标志并返回
+
+### 完整的键盘处理流程
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 1. 用户按下键盘                                          │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 2. 键盘控制器产生 IRQ1 硬件中断                           │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 3. PIC 将 IRQ1 映射到向量 0x09                           │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 4. CPU 查找 IVT[0x09] → entry_09                        │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 5. entry_09 → irqentry_extrastack → handle_09()         │
+│    - inb(PORT_PS2_STATUS)  ; 读取状态                    │
+│    - inb(PORT_PS2_DATA)    ; 读取扫描码                  │
+│    - process_key(scancode) ; 处理扫描码                  │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 6. process_key() → __process_key()                      │
+│    - 处理多字节序列（E0、E1）                             │
+│    - 处理按键释放（扫描码 & 0x80）                       │
+│    - 处理特殊键（Caps Lock、Shift 等）                   │
+│    - 扫描码 → 按键码转换（scan_to_keycode[]）           │
+│    - 处理修饰键组合（Shift、Ctrl、Alt）                  │
+│    - enqueue_key(keycode)  ; 存储到缓冲区                │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 7. enqueue_key()                                         │
+│    - 存储按键码到 BDA 的键盘缓冲区（循环缓冲区）          │
+│    - 更新 kbd_buf_tail                                   │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 8. handle_09() 继续                                      │
+│    - pic_eoi1()  ; 发送 EOI                              │
+│    - return  ; 中断返回                                  │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 9. 用户程序调用 INT 16h（软件中断）                       │
+│    mov ah, 0x00  ; 功能：读取按键                        │
+│    int 0x16      ; 调用键盘服务                           │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 10. CPU 查找 IVT[0x16] → entry_16 → handle_16()        │
+│     - set_leds()  ; 设置键盘 LED                         │
+│     - switch (ah)  ; 根据功能号分发                       │
+│     - handle_1600()  ; 读取按键（阻塞）                  │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 11. handle_1600() → dequeue_key(regs, 1, 0)            │
+│     - 检查缓冲区是否有数据                               │
+│     - 如果为空，yield_toirq() 等待硬件中断                │
+│     - 从缓冲区读取按键码                                 │
+│     - 更新 kbd_buf_head                                  │
+│     - regs->ax = keycode  ; 返回按键码                   │
+└─────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────┐
+│ 12. 用户程序获得按键码（AX 寄存器）                       │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 关键设计要点
+
+#### 1. 硬件中断与软件中断的协作
+
+**硬件中断（IRQ1，向量 0x09）**：
+- **角色**：生产者
+- **功能**：接收键盘扫描码，转换为按键码，存储到缓冲区
+- **特点**：异步、由硬件触发
+
+**软件中断（INT 16h，向量 0x16）**：
+- **角色**：消费者
+- **功能**：从缓冲区读取按键码，返回给程序
+- **特点**：同步、由程序主动调用
+
+**协作关系**：
+- 硬件中断"生产"数据（写入缓冲区）
+- 软件中断"消费"数据（从缓冲区读取）
+- 通过 BDA 的键盘缓冲区进行数据交换
+
+#### 2. 缓冲区管理
+
+**缓冲区位置**：BDA（BIOS Data Area）中的 `kbd_buf` 字段
+
+**缓冲区结构**：
+```c
+struct bios_data_area_s {
+    // ...
+    u16 kbd_buf_head;        // 缓冲区头指针（读取位置）
+    u16 kbd_buf_tail;         // 缓冲区尾指针（写入位置）
+    u16 kbd_buf_start_offset; // 缓冲区起始偏移
+    u16 kbd_buf_end_offset;   // 缓冲区结束偏移
+    u16 kbd_buf[16];          // 键盘缓冲区（16 个按键码，每个 2 字节）
+    // ...
+};
+```
+
+**循环缓冲区**：
+- 当 `buffer_tail` 到达 `buffer_end` 时，回绕到 `buffer_start`
+- 当 `buffer_tail == buffer_head` 时，缓冲区满
+- 当 `buffer_head == buffer_tail` 时，缓冲区空
+
+#### 3. 是否需要配合其他软中断？
+
+**答案：不需要配合其他软中断，但可以配合 INT 15h 进行键盘拦截**
+
+**INT 15h/AH=4Fh（键盘拦截）**：
+- **功能**：允许程序拦截键盘输入
+- **实现**：在 `process_key()` 中调用 `INT 15h/AH=4Fh`
+- **用途**：某些程序（如 TSR、病毒扫描）可以拦截键盘输入
+
+**代码位置**：`seabios/src/kbd.c:587-597`
+
+```c
+if (CONFIG_KBD_CALL_INT15_4F) {
+    struct bregs br;
+    memset(&br, 0, sizeof(br));
+    br.eax = (0x4f << 8) | key;
+    br.flags = F_IF|F_CF;
+    call16_int(0x15, &br);
+    if (!(br.flags & F_CF))
+        return;  // 被拦截，不处理
+    key = br.eax;
+}
+```
+
+**总结**：
+- **硬件中断（IRQ1）**：处理键盘输入，存储到缓冲区
+- **软件中断（INT 16h）**：从缓冲区读取按键，返回给程序
+- **可选配合（INT 15h）**：键盘拦截功能
+- **不需要其他软中断**：键盘处理是自包含的，硬件中断和软件中断通过缓冲区协作
+
+### 相关源代码文件
+
+- **硬件中断处理**：`seabios/src/hw/ps2port.c:389-417`（`handle_09`）
+- **扫描码处理**：`seabios/src/kbd.c:456-599`（`__process_key`、`process_key`）
+- **缓冲区管理**：`seabios/src/kbd.c:32-105`（`enqueue_key`、`dequeue_key`）
+- **软件中断服务**：`seabios/src/kbd.c:244-270`（`handle_16`）
+- **中断入口点设置**：`seabios/src/hw/ps2port.c:531-547`（`ps2port_setup`）
+- **IVT 设置**：`seabios/src/post.c:57`（`SET_IVT(0x16, FUNC16(entry_16))`）
+- **I/O 端口访问**：详见 [键盘控制器 I/O 端口映射与汇编实现](KEYBOARD_CONTROLLER_IO.md)
 
