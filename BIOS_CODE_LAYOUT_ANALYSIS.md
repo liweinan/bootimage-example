@@ -4,7 +4,7 @@
 1. **哪些 BIOS 代码映射到 128KB（0xE0000-0xFFFFF）区域**（实模式可访问）
 2. **哪些 BIOS 代码没有映射到 128KB 区域**（需要保护模式访问）
 
-> **相关文档**：关于 BIOS 运行模式、内存布局、地址映射等基础概念，请参见 [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)。
+> **相关文档**：关于 BIOS 运行模式、内存布局、地址映射等基础概念，请参见 [x86 CPU 运行模式详解](X86_CPU_MODES.md)、[BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md) 和 [BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)。
 
 ## 概述
 
@@ -37,7 +37,7 @@ void x86_isa_bios_init(MemoryRegion *isa_bios, MemoryRegion *isa_memory,
 }
 ```
 
-> **详细说明**：关于 QEMU BIOS 映射机制的完整解释（包括映射 vs 复制、真实硬件对比等），请参见 [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md) 中的"BIOS ROM的特殊映射"和"QEMU 软件实现 vs. 真实硬件加载 BIOS 的区别"章节。
+> **详细说明**：关于 QEMU BIOS 映射机制的完整解释（包括映射 vs 复制、真实硬件对比等），请参见 [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md) 和 [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)。
 
 **重要说明：4GB 顶部 vs 物理内存前 1MB**
 
@@ -54,7 +54,7 @@ void x86_isa_bios_init(MemoryRegion *isa_bios, MemoryRegion *isa_memory,
 - BIOS → Flash ROM 芯片（独立存储设备）
 - IVT 等 → DRAM 芯片（系统 RAM）
 
-> **详细说明**：关于 4GB 顶部与物理内存前 1MB 的区别，请参见 [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md) 中的"问题 2：为什么 BIOS 存储在 4GB 地址空间顶部？"章节。
+> **详细说明**：关于 4GB 顶部与物理内存前 1MB 的区别，请参见 [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md) 中的"问题 2：为什么 BIOS 存储在 4GB 地址空间顶部？"章节。
 
 ### SeaBIOS 的代码段组织
 
@@ -67,7 +67,7 @@ SeaBIOS 使用特殊的宏标记来组织代码段，将代码分为不同的段
 - **VAR16**：实模式可访问的数据（`.data16` 段）
 - **VARFSEG**：实模式可访问的数据（`.varfseg` 段）
 
-> **详细说明**：关于 SeaBIOS 代码段组织的完整解释（包括运行时代码 vs 初始化代码、内存访问宏等），请参见 [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md) 中的"BIOS代码的分段组织"章节。
+> **详细说明**：关于 SeaBIOS 代码段组织的完整解释（包括运行时代码 vs 初始化代码、内存访问宏等），请参见 [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md) 中的"BIOS代码的分段组织"章节。
 
 ## 映射到 128KB 区域的代码
 
@@ -570,7 +570,7 @@ reloc_preinit(void *f, void *arg)
 - SeaBIOS 使用 `call32()` 和 `call16()` 函数在实模式和保护模式之间切换
 - 实模式中断处理程序可以通过 `call16_int()` 调用保护模式代码
 
-> **详细说明**：关于完整 BIOS 执行流程和模式切换机制的详细解释，请参见 [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md) 中的"完整的BIOS执行流程"和"模式切换机制"章节。
+> **详细说明**：关于完整 BIOS 执行流程和模式切换机制的详细解释，请参见 [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md) 中的"完整的BIOS执行流程"和"模式切换机制"章节，以及 [x86 CPU 运行模式详解](X86_CPU_MODES.md) 中的模式切换说明。
 
 ## 总结
 
@@ -602,7 +602,7 @@ reloc_preinit(void *f, void *arg)
 
 ### 相关文档
 
-- [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)
+- [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)（已拆分为：[x86 CPU 运行模式详解](X86_CPU_MODES.md)、[BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)、[BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)）
 - [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)
 - [BIOS 启动流程详解](BOOT_FLOW.md)
 
