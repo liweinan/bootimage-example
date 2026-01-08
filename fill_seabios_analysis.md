@@ -409,10 +409,150 @@ static inline u32 virt_to_phys(void *v) {
 
 ---
 
+## SeaBIOS ROM 大小与 0xFF 填充
+
+### 1. SeaBIOS 实际使用的 ROM 大小
+
+**答案：硬件支持映射完整的128KB（0xE0000-0xFFFFF），但最小要求是高64KB（0xF0000-0xFFFFF）必须有效。**
+
+**详细说明：**
+
+1. **BIOS ROM 映射区域（硬件能力）**：
+   - **硬件支持**：`0xE0000 - 0xFFFFF`（128KB）
+   - **最小要求**：`0xF0000 - 0xFFFFF`（64KB）必须包含有效的 BIOS 代码
+   - CPU 复位后从 `0xFFFF0` 开始执行（位于高64KB区域内）
+   - **重要纠正**：❌ 错误说法"硬件限制只允许映射64KB" → ✅ 正确：硬件支持完整的128KB映射
+
+2. **BIOS 文件大小**：
+   - 文件可能是 128KB（包含两个 64KB 块）
+   - 第一个 64KB 块（文件偏移 0x0000-0xFFFF）：主要是元数据（符号表、重定位表）
+   - 第二个 64KB 块（文件偏移 0x10000-0x1FFFF）：实际 BIOS ROM 代码
+   - **对于128KB文件，理论上应该映射完整的128KB**：
+     - 第一个64KB块 → 物理地址 `0xE0000-0xEFFFF`（但主要是元数据）
+     - 第二个64KB块 → 物理地址 `0xF0000-0xFFFFF`（包含可执行代码）
+
+3. **为什么文件是 128KB？**
+   - **硬件能力**：x86 架构支持映射完整的128KB ROM区域
+   - **历史演变**：早期 IBM PC/XT 只有64KB，但硬件地址线支持128KB
+   - **现代实现**：如果 BIOS 文件是128KB，通常映射完整的128KB
+   - **文件格式**：QEMU 的 BIOS 文件格式包含两个 64KB 块
+   - **实际内容**：第一个块主要是元数据，第二个块是可执行代码
+
+**验证方法：**
+```bash
+# 检查文件大小
+stat -f%z /Users/weli/works/qemu/pc-bios/bios.bin
+# 输出: 131072 (128KB)
+
+# 查看第二个 64KB 块（实际 BIOS ROM）
+dd if=/Users/weli/works/qemu/pc-bios/bios.bin bs=1 skip=$((64*1024)) count=16 | hexdump -C
+```
+
+### 2. 0xFF 填充的位置
+
+**0xFF 填充出现在以下位置：**
+
+1. **BIOS ROM 未使用的区域**：
+   - 在固定地址入口点之间的空隙
+   - 例如：`0xE05B` 到 `0xE2C3` 之间可能有填充
+   - 例如：`0xE2C3` 到 `0xE3FE` 之间可能有填充
+
+2. **文件中的填充区域**：
+   - 第一个 64KB 块（文件偏移 0x0000-0xFFFF）：主要是 0x00 填充，少量 0xFF
+   - 第二个 64KB 块中未使用的区域：0xFF 填充
+
+3. **重要说明**：
+   - **硬件支持映射完整的128KB**（0xE0000-0xFFFFF），不是只有64KB
+   - 第一个64KB块可能映射到 0xE0000-0xEFFFF，但内容主要是元数据
+   - 第二个64KB块必须映射到 0xF0000-0xFFFFF（包含复位向量）
+
+4. **如何查看 0xFF 填充**：
+
+**方法 1：使用 hexdump 查看文件**
+```bash
+# 查看文件开头（第一个 64KB 块）
+hexdump -C /Users/weli/works/qemu/pc-bios/bios.bin | head -20
+
+# 查看文件末尾（包含 reset vector）
+hexdump -C /Users/weli/works/qemu/pc-bios/bios.bin | tail -20
+```
+
+**方法 2：使用 Python 脚本查找填充区域**
+```python
+# 使用 verify_bios.py 脚本
+python3 verify_bios.py
+# 脚本会自动查找并报告所有 0xFF 填充区域
+```
+
+**方法 3：使用命令行工具查找**
+```bash
+# 查找连续的 0xFF 区域
+python3 << 'EOF'
+with open('/Users/weli/works/qemu/pc-bios/bios.bin', 'rb') as f:
+    data = f.read()
+    
+# 查找第一个 64KB 块中的 0xFF
+first_block = data[0:64*1024]
+ff_count = sum(1 for b in first_block if b == 0xFF)
+print(f"第一个 64KB 块中 0xFF 字节数: {ff_count} ({ff_count*100//(64*1024)}%)")
+
+# 查找第二个 64KB 块中的 0xFF
+second_block = data[64*1024:128*1024]
+ff_count = sum(1 for b in second_block if b == 0xFF)
+print(f"第二个 64KB 块中 0xFF 字节数: {ff_count} ({ff_count*100//(64*1024)}%)")
+EOF
+```
+
+**方法 4：使用 od 查看特定区域**
+```bash
+# 查看文件开头 256 字节（可能包含 0xFF 填充）
+od -An -tx1 -N 256 /Users/weli/works/qemu/pc-bios/bios.bin
+
+# 查看两个固定地址之间的区域（可能有填充）
+# 例如：查看 0xE05B 到 0xE2C3 之间的内容
+python3 << 'EOF'
+BIOS_BASE = 0xF0000
+def phys_to_file_offset(phys_addr):
+    rom_offset = phys_addr - BIOS_BASE
+    return 64 * 1024 + rom_offset
+
+start = phys_to_file_offset(0xFE05B)
+end = phys_to_file_offset(0xFE2C3)
+
+with open('/Users/weli/works/qemu/pc-bios/bios.bin', 'rb') as f:
+    f.seek(start)
+    data = f.read(end - start)
+    
+# 检查是否包含 0xFF 填充
+ff_count = sum(1 for b in data if b == 0xFF)
+print(f"0xFE05B 到 0xFE2C3 之间:")
+print(f"  总长度: {len(data)} 字节")
+print(f"  0xFF 字节数: {ff_count} ({ff_count*100//len(data) if len(data) > 0 else 0}%)")
+EOF
+```
+
+**为什么使用 0xFF 填充？**
+
+1. **Flash ROM 特性**：
+   - Flash ROM 擦除后的默认值是 0xFF（全 1）
+   - 未编程的区域保持为 0xFF
+
+2. **链接器行为**：
+   - 链接器在生成 ROM 镜像时，未使用的区域填充为 0xFF
+   - 这符合 Flash ROM 的默认状态
+
+3. **兼容性**：
+   - 某些 BIOS 验证工具可能检查未使用区域是否为 0xFF
+   - 保持 0xFF 填充符合传统 BIOS 的格式
+
+---
+
 ## 参考资料
 
 1. SeaBIOS 源代码：`/Users/weli/works/seabios/`
 2. SeaBIOS 内存模型文档：`docs/Memory_Model.md`
 3. Linux 内核地址转换流程：`fill.txt`
 4. x86 架构手册：Intel 64 and IA-32 Architectures Software Developer's Manual
+5. BIOS 验证报告：`bios_verification_report.md`
+6. BIOS 验证脚本：`verify_bios.py`
 
