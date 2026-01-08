@@ -193,4 +193,3 @@ DISPLAY=:1 make run-gui
 - **[verify_bios.py](verify_bios.py)** - BIOS 验证脚本
 - **[verify_bios_mapping.py](verify_bios_mapping.py)** - BIOS 映射验证脚本
 - **[analyze_bios_structure.py](analyze_bios_structure.py)** - BIOS 结构分析脚本
-

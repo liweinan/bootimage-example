@@ -661,10 +661,65 @@ boot_disk(u8 bootdrv, int checksig)
 
 **MBR 概述：**
 
-- **位置**：MBR（Master Boot Record，主引导记录）存储在磁盘的第一个扇区（扇区0，LBA地址0）
+- **位置**：MBR（Master Boot Record，主引导记录）存储在存储设备的第一个扇区（扇区0，LBA地址0）
 - **大小**：512 字节（1 个扇区）
-- **加载地址**：BIOS 通过 INT 13h 磁盘服务将 MBR 从磁盘读取到内存地址 `0x7C00`
-- **加载方式**：这是**从磁盘到内存的拷贝过程**，不是映射
+- **加载地址**：BIOS 通过 INT 13h 磁盘服务将引导扇区从存储设备读取到内存地址 `0x7C00`
+- **加载方式**：这是**从存储设备到内存的拷贝过程**，不是映射
+
+**不同存储设备的引导逻辑：**
+
+| 存储设备类型 | 引导函数 | 加载地址 | 说明 |
+|------------|---------|---------|------|
+| **硬盘（Hard Disk）** | `boot_disk(0x80, 1)` | `0x7C00` | 固定地址，使用 INT 13h AH=0x02 |
+| **软盘（Floppy）** | `boot_disk(0x00, CheckFloppySig)` | `0x7C00` | 固定地址，使用 INT 13h AH=0x02 |
+| **USB 闪存（USB Flash Drive）** | `boot_disk(drive, 1)` | `0x7C00` | 被识别为可移动磁盘，逻辑与硬盘相同 |
+| **光驱（CD-ROM）** | `boot_cdrom(drive)` | `CDEmu.load_segment`（通常是 `0x7C00`） | 使用 El Torito 标准，加载地址由标准指定 |
+
+**关键点：**
+
+1. **硬盘、软盘、USB 闪存**：
+   - 都使用 `boot_disk()` 函数
+   - 固定加载到 `0x7C00`
+   - 使用 INT 13h AH=0x02（读扇区）从扇区 0 读取 512 字节
+   - 这是**从存储设备到内存的拷贝过程**
+
+2. **光驱（CD-ROM）**：
+   - 使用 `boot_cdrom()` 函数
+   - 遵循 El Torito 标准
+   - 加载地址由 El Torito 引导记录中的 `load_segment` 字段指定
+   - 通常也是 `0x7C00`，但可能不同（由光盘制作时指定）
+   - 同样是从光盘到内存的拷贝过程
+
+**SeaBIOS 源代码证据：**
+
+```c
+// SeaBIOS 源代码：src/boot.c:do_boot()
+static void
+do_boot(int seq_nr)
+{
+    struct bev_s *ie = &BEV[seq_nr];
+    switch (ie->type) {
+    case IPL_TYPE_FLOPPY:
+        boot_disk(0x00, CheckFloppySig);  // 软盘：固定 0x7C00
+        break;
+    case IPL_TYPE_HARDDISK:
+        boot_disk(0x80, 1);               // 硬盘：固定 0x7C00
+        break;
+    case IPL_TYPE_CDROM:
+        boot_cdrom((void*)ie->vector);    // 光驱：由 El Torito 指定
+        break;
+    }
+}
+
+// 光驱引导：src/boot.c:boot_cdrom()
+static void
+boot_cdrom(struct drive_s *drive)
+{
+    cdrom_boot(drive);  // 读取 El Torito 引导记录
+    u16 bootseg = CDEmu.load_segment;  // 加载地址由 El Torito 指定
+    // ... 跳转到 bootseg:0x0000
+}
+```
 
 > **详细说明**：关于 MBR 的位置、拷贝机制、目标地址设置的具体代码等详细内容，请参见 [Q&A：MBR在什么位置？BIOS读取MBR的过程是否把程序从磁盘copy到了内存？](#q-mbr在什么位置bios读取mbr的过程是否把程序从磁盘copy到了内存)
 
@@ -1763,7 +1818,8 @@ Linux 内核完全接管系统
 
 ## 技术细节说明
 
-> **详细说明**：本文档主线的详细技术说明和补充信息，请参见 [BOOT_FLOW 技术细节说明](BOOT_FLOW_NOTES.md)。
+> **详细说明**：本文档主线的详细技术说明和补充信息，请参见 [BOOT_FLOW 技术细节说明](BOOT_FLOW_NOTES.md)。  
+> 关于 BIOS 128KB 内存映射的硬件实现（地址解码器、内存控制器），请参见 [技术细节说明 - Note 7: BIOS 128KB 内存映射的硬件实现](BOOT_FLOW_NOTES.md#note-7-bios-128kb-内存映射的硬件实现)。
 
 ---
 

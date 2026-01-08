@@ -4,6 +4,7 @@ ASM = nasm
 ASMFLAGS = -f bin
 QEMU = qemu-system-x86_64
 QEMUFLAGS = -drive format=raw,file=boot.bin
+PYTHON = uv run python
 
 BOOT_BIN = boot.bin
 BOOT_ASM = boot.asm
@@ -101,6 +102,19 @@ keyboard-demo-term: $(KEYBOARD_DEMO_BIN)
 	@echo "      按任意键会显示：'x' was pressed!"
 	$(QEMU) -display curses -drive format=raw,file=$(KEYBOARD_DEMO_BIN)
 
+# 验证和反汇编
+verify: $(BOOT_BIN)
+	@echo "验证引导扇区文件..."
+	@$(PYTHON) verify_boot_sector.py
+
+disasm: $(BOOT_BIN)
+	@echo "生成 Intel 格式反汇编..."
+	@./disassemble_boot.sh $(BOOT_BIN)
+
+disasm-intel: $(BOOT_BIN)
+	@echo "Intel 格式反汇编 (objdump):"
+	@objdump -D -b binary -m i8086 -M intel $(BOOT_BIN)
+
 help:
 	@echo "可用目标:"
 	@echo "  make build           - 编译 boot.asm 生成 boot.bin"
@@ -122,6 +136,11 @@ help:
 	@echo "  make keyboard-demo      - 编译 keyboard_demo.asm"
 	@echo "  make keyboard-demo-gui  - 在图形窗口中运行键盘输入处理示例"
 	@echo "  make keyboard-demo-term - 在终端中运行键盘输入处理示例"
+	@echo ""
+	@echo "验证和分析:"
+	@echo "  make verify          - 验证 boot.bin 文件（Python 脚本）"
+	@echo "  make disasm          - 生成 Intel 格式反汇编（带地址映射）"
+	@echo "  make disasm-intel    - 使用 objdump 生成 Intel 格式反汇编"
 	@echo ""
 	@echo "  make clean           - 删除生成的文件"
 	@echo "  make help            - 显示此帮助信息"
