@@ -114,3 +114,83 @@ DISPLAY=:1 make run-gui
 - 引导扇区必须是 512 字节，最后两个字节必须是 `0xAA55`
 - 程序运行在 16 位实模式下
 
+## 文档目录
+
+本项目包含大量关于 BIOS、中断、内存管理等底层系统编程的详细文档：
+
+### 核心概念文档
+
+- **[GUIDE.md](GUIDE.md)** - 计算机中断机制完全指南：从汇编到硬件实现
+- **[X86_CPU_MODES.md](X86_CPU_MODES.md)** - x86 CPU 运行模式详解（实模式、保护模式、长模式）
+- **[A20_ADDRESS_LINE.md](A20_ADDRESS_LINE.md)** - A20 地址线详解
+
+### BIOS 相关文档
+
+- **[BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md)** - BIOS 内存布局与地址映射详解
+- **[BIOS_MEMORY_MODE.md](BIOS_MEMORY_MODE.md)** - BIOS 内存模式分析
+- **[BIOS_MEMORY_MODE_ANALYSIS.md](BIOS_MEMORY_MODE_ANALYSIS.md)** - BIOS 内存模式详细分析
+- **[BIOS_MEMORY_QA.md](BIOS_MEMORY_QA.md)** - BIOS 内存相关问答
+- **[BIOS_CODE_LAYOUT_ANALYSIS.md](BIOS_CODE_LAYOUT_ANALYSIS.md)** - BIOS 代码布局分析
+- **[BIOS_INTERRUPT_COMPLETE.md](BIOS_INTERRUPT_COMPLETE.md)** - BIOS 中断完整文档
+- **[BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)** - BIOS IVT 与 Linux 内核 IDT 对比
+- **[bios_size.md](bios_size.md)** - BIOS 大小与映射关系详解
+- **[bios_verification_report.md](bios_verification_report.md)** - BIOS 固定地址验证报告
+
+### SeaBIOS 相关文档
+
+- **[fill_seabios_analysis.md](fill_seabios_analysis.md)** - SeaBIOS 与 Linux 内核地址转换机制对比分析
+- **[SEABIOS_PROTECTION_MODE_CODE.md](SEABIOS_PROTECTION_MODE_CODE.md)** - SeaBIOS 保护模式代码的真正用途
+- **[SEABIOS_ENTRY_13_ANALYSIS.md](SEABIOS_ENTRY_13_ANALYSIS.md)** - SeaBIOS INT 13h 入口分析
+- **[SEABIOS_HANDLE_POST_ENTRY.md](SEABIOS_HANDLE_POST_ENTRY.md)** - SeaBIOS handle_post 入口分析
+
+### 启动流程文档
+
+- **[BOOT_FLOW.md](BOOT_FLOW.md)** - 计算机启动流程详解
+- **[BOOT_FLOW_NOTES.md](BOOT_FLOW_NOTES.md)** - 启动流程笔记
+- **[BOOT_FLOW_OPTIMIZATION_ANALYSIS.md](BOOT_FLOW_OPTIMIZATION_ANALYSIS.md)** - 启动流程优化分析
+- **[BOOT_FLOW_QA.md](BOOT_FLOW_QA.md)** - 启动流程问答
+- **[BOOTSECTOR_COMPARISON.md](BOOTSECTOR_COMPARISON.md)** - 引导扇区对比分析
+
+### 中断相关文档
+
+- **[LINUX_INTERRUPT_HANDLING.md](LINUX_INTERRUPT_HANDLING.md)** - Linux 中断处理机制
+- **[UEFI_INTERRUPT_HANDLING.md](UEFI_INTERRUPT_HANDLING.md)** - UEFI 中断处理机制
+- **[APPENDIX_A_KEYBOARD_INTERRUPT.md](APPENDIX_A_KEYBOARD_INTERRUPT.md)** - 附录 A：键盘中断详解
+- **[APPENDIX_B_EVENT_MECHANISM.md](APPENDIX_B_EVENT_MECHANISM.md)** - 附录 B：事件机制详解
+
+### 硬件与 I/O 文档
+
+- **[KEYBOARD_CONTROLLER_IO.md](KEYBOARD_CONTROLLER_IO.md)** - 键盘控制器 I/O 详解
+- **[QEMU_VS_HARDWARE_BIOS.md](QEMU_VS_HARDWARE_BIOS.md)** - QEMU vs 真实硬件 BIOS 加载对比
+
+### 内存管理文档
+
+- **[LINUX_USERSPACE_MEMORY.md](LINUX_USERSPACE_MEMORY.md)** - Linux 用户空间内存管理
+- **[fill.md](fill.md)** - 内存填充相关文档
+
+### UEFI 相关文档
+
+- **[UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md)** - UEFI vs BIOS 启动对比
+
+### 工具与配置文档
+
+- **[VNC_SETUP.md](VNC_SETUP.md)** - VNC 设置指南
+- **[SLEEP.md](SLEEP.md)** - 睡眠/休眠相关文档
+
+### 演示程序文档
+
+- **[EVENT_DEMO_README.md](EVENT_DEMO_README.md)** - 事件演示程序说明
+- **[KEYBOARD_DEMO_README.md](KEYBOARD_DEMO_README.md)** - 键盘演示程序说明
+- **[MANUAL_INT_README.md](MANUAL_INT_README.md)** - 手动中断演示程序说明
+
+### 分析与优化文档
+
+- **[BIOS_DOCS_OPTIMIZATION_ANALYSIS.md](BIOS_DOCS_OPTIMIZATION_ANALYSIS.md)** - BIOS 文档优化分析
+- **[EXTRACTION_ANALYSIS.md](EXTRACTION_ANALYSIS.md)** - 提取分析文档
+
+### 验证脚本
+
+- **[verify_bios.py](verify_bios.py)** - BIOS 验证脚本
+- **[verify_bios_mapping.py](verify_bios_mapping.py)** - BIOS 映射验证脚本
+- **[analyze_bios_structure.py](analyze_bios_structure.py)** - BIOS 结构分析脚本
+
