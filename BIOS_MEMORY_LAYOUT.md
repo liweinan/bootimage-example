@@ -290,7 +290,7 @@
            direction TB
            
            subgraph Low640KB["0x000000 - 0x09FFFF (640KB)"]
-               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>- 用户程序<br/>实模式可访问，真正的物理RAM"]
+               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
            end
            
            subgraph VGARAM["0x0A0000 - 0x0BFFFF (128KB)"]
