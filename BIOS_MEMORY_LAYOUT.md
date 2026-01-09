@@ -290,7 +290,7 @@
            direction TB
            
            subgraph Low640KB["0x000000 - 0x09FFFF (640KB)"]
-               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
+               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
            end
            
            subgraph VGARAM["0x0A0000 - 0x0BFFFF (128KB)"]
@@ -335,6 +335,29 @@
        style BIOSROM fill:#ffcccc
        style BIOSFull fill:#ffcccc
    ```
+
+**DOS 通信区（0x0500-0x05FF）说明：**
+
+DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区，主要用途包括：
+
+1. **引导扇区与 DOS 内核之间的数据传递**
+   - 引导扇区（0x7C00）在加载 IO.SYS 之前，可能需要临时存储数据
+   - 例如：读取根目录时，可能将目录项数据暂存到 0x0500
+
+2. **DOS 启动参数传递**
+   - 引导扇区可以向 DOS 内核传递启动参数
+   - 例如：驱动器号、分区信息等
+
+3. **临时缓冲区**
+   - DOS 启动过程中的临时数据存储
+   - 例如：文件系统读取时的缓冲区
+
+4. **历史兼容性**
+   - 早期 DOS 版本使用这个区域
+   - 不同 DOS 版本可能有不同的使用方式
+   - 某些版本可能不使用这个区域
+
+**注意：** DOS 通信区是"可选"的，不是所有 DOS 版本都使用。某些 DOS 版本可能将 0x0500-0x05FF 作为可用内存的一部分。
 
 3. **引导扇区（bootimage）**
    - **加载位置**：`0x7C00`（实模式地址）
