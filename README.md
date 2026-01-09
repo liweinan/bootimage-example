@@ -150,6 +150,10 @@ DISPLAY=:1 make run-gui
 - **[BOOT_FLOW_OPTIMIZATION_ANALYSIS.md](BOOT_FLOW_OPTIMIZATION_ANALYSIS.md)** - 启动流程优化分析
 - **[BOOT_FLOW_QA.md](BOOT_FLOW_QA.md)** - 启动流程问答
 - **[BOOTSECTOR_COMPARISON.md](BOOTSECTOR_COMPARISON.md)** - 引导扇区对比分析
+- **[SEABIOS_LOAD_BOOT_SECTOR.md](SEABIOS_LOAD_BOOT_SECTOR.md)** - SeaBIOS 如何加载引导扇区到 0x7C00
+- **[DISK_TO_MEMORY_TRANSFER.md](DISK_TO_MEMORY_TRANSFER.md)** - 磁盘数据拷贝到内存的详细过程（PIO/DMA）
+- **[BOOT_SECTOR_ANALYSIS.md](BOOT_SECTOR_ANALYSIS.md)** - 引导扇区代码手工分析指南
+- **[CALL_BOOT_ENTRY_EXPLANATION.md](CALL_BOOT_ENTRY_EXPLANATION.md)** - call_boot_entry 函数详细解释
 
 ### 中断相关文档
 
@@ -183,6 +187,11 @@ DISPLAY=:1 make run-gui
 - **[KEYBOARD_DEMO_README.md](KEYBOARD_DEMO_README.md)** - 键盘演示程序说明
 - **[MANUAL_INT_README.md](MANUAL_INT_README.md)** - 手动中断演示程序说明
 
+
+### DOS 相关文档
+
+- **[DOS_BOOTLOADER.md](DOS_BOOTLOADER.md)** - DOS 的引导加载程序（Bootloader）概念
+- **[DOS_BIOS_INT_USAGE.md](DOS_BIOS_INT_USAGE.md)** - DOS 如何使用 BIOS 的 INT 服务
 ### 分析与优化文档
 
 - **[BIOS_DOCS_OPTIMIZATION_ANALYSIS.md](BIOS_DOCS_OPTIMIZATION_ANALYSIS.md)** - BIOS 文档优化分析
