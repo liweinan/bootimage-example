@@ -39,18 +39,23 @@ DOS 系统就绪
 **位置：** 磁盘第一个扇区（扇区 0）  
 **大小：** 512 字节  
 **加载地址：** 0x7C00（由 BIOS 加载）  
-**作用：** 加载 DOS 引导程序（IO.SYS）到 0x00600
+**作用：** **引导扇区代码负责**将 DOS 引导程序（IO.SYS）加载到 0x00600
 
 **关键点：**
 - **引导扇区本身**：在 0x7C00-0x7DFF（512 字节，临时位置）
 - **IO.SYS 加载位置**：0x00600（与引导扇区不重叠）
 - **地址关系**：0x00600 < 0x7C00，所以 IO.SYS 在引导扇区之前的内存位置
 
-**引导扇区代码功能：**
+**引导扇区代码功能（由引导扇区代码执行）：**
 - 查找活动分区（如果是硬盘）
 - 读取根目录，查找 IO.SYS（MS-DOS）或 IBMBIO.COM（PC-DOS）
-- 从磁盘读取 IO.SYS，加载到内存地址 0x00600（注意：不是 0x7C00）
+- **使用 BIOS INT 13h 从磁盘读取 IO.SYS，加载到内存地址 0x00600**（注意：不是 0x7C00）
 - 跳转到 0x00600 执行 IO.SYS
+
+**关键点：**
+- **谁负责加载？** 引导扇区代码（在 0x7C00 执行的代码）
+- **如何加载？** 使用 BIOS INT 13h 磁盘服务读取 IO.SYS
+- **加载到哪里？** 内存地址 0x00600
 
 **示例代码结构：**
 ```asm
@@ -249,8 +254,11 @@ dw 0xAA55
 
 ### 引导扇区加载 IO.SYS
 
+**关键点：引导扇区代码负责加载 IO.SYS**
+
 ```asm
 ; DOS 引导扇区代码（简化示例）
+; 这段代码在 0x7C00 执行，负责加载 IO.SYS 到 0x00600
 org 0x7C00
 
 start:
@@ -263,24 +271,34 @@ start:
     mov sp, 0x7C00
     sti
     
-    ; 查找 IO.SYS 在根目录
-    mov ax, 0x0201        ; 读取 1 个扇区
-    mov cx, 0x0002        ; 从扇区 2 开始（根目录）
-    mov dx, 0x0080        ; 驱动器 0x80（第一块硬盘）
-    mov bx, 0x0500        ; 读取到 0x0500
-    int 0x13              ; 调用 BIOS 磁盘服务
+    ; 步骤 1: 查找 IO.SYS 在根目录
+    mov ax, 0x0201        ; INT 13h AH=0x02：读扇区，AL=0x01：读 1 个扇区
+    mov cx, 0x0002        ; CH=0x00, CL=0x02：从扇区 2 开始（根目录）
+    mov dx, 0x0080        ; DH=0x00, DL=0x80：驱动器 0x80（第一块硬盘）
+    mov bx, 0x0500        ; ES:BX = 0x0000:0x0500（读取到 0x0500，DOS 通信区）
+    int 0x13              ; 调用 BIOS INT 13h 磁盘服务
     
-    ; 在根目录中查找 "IO      SYS"
+    ; 步骤 2: 在根目录中查找 "IO      SYS"
     mov si, 0x0500        ; 根目录缓冲区
     mov di, io_sys_name   ; "IO      SYS" 文件名
     mov cx, 11            ; 文件名长度（8+3）
     repe cmpsb            ; 比较文件名
     
-    ; 如果找到，加载 IO.SYS
+    ; 步骤 3: 如果找到，加载 IO.SYS 到 0x00600
     jne not_found
+    
     ; 读取 IO.SYS 的第一个簇
-    ; 加载到 0x00600
-    ; 跳转到 0x00600
+    mov ax, 0x0201        ; INT 13h AH=0x02：读扇区，AL=0x01：读 1 个扇区
+    mov cx, [io_sys_cluster]  ; IO.SYS 的起始簇号（从目录项获取）
+    mov dx, 0x0080        ; 驱动器 0x80
+    mov bx, 0x0600        ; ES:BX = 0x0000:0x0600（加载到 0x00600）
+    int 0x13              ; 调用 BIOS INT 13h 读取 IO.SYS 的第一个扇区
+    
+    ; 步骤 4: 继续读取 IO.SYS 的剩余部分（如果需要）
+    ; ...（读取更多扇区）
+    
+    ; 步骤 5: 跳转到 0x00600 执行 IO.SYS
+    jmp 0x0000:0x0600     ; 跳转到 IO.SYS（地址 0x00600）
     
 not_found:
     ; 显示错误信息
@@ -289,11 +307,22 @@ not_found:
     jmp $
 
 io_sys_name db "IO      SYS"
+io_sys_cluster dw 0       ; IO.SYS 的起始簇号（从目录项获取）
 error_msg db "Non-System disk or disk error", 0
 
 times 510-($-$$) db 0
 dw 0xAA55
 ```
+
+**执行流程总结：**
+1. **BIOS** 加载引导扇区到 0x7C00
+2. **引导扇区代码**（在 0x7C00 执行）：
+   - 使用 BIOS INT 13h 读取根目录
+   - 查找 IO.SYS 文件
+   - 使用 BIOS INT 13h 读取 IO.SYS
+   - 将 IO.SYS 加载到 0x00600
+   - 跳转到 0x00600 执行 IO.SYS
+3. **IO.SYS** 在 0x00600 开始执行
 
 ### IO.SYS 加载 MSDOS.SYS
 
