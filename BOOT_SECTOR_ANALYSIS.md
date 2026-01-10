@@ -45,9 +45,51 @@ objdump -D -b binary -m i8086 -M intel boot.bin | head -30
 
 **输出示例（Intel 格式）：**
 ```
+boot.bin:     file format binary
+
+
+Disassembly of section .data:
+
 00000000 <.data>:
-   0:   b8 03 00              mov    ax,0x3
-   3:   cd 10                 int    0x10
+   0:	b8 03 00             	mov    ax,0x3
+   3:	cd 10                	int    0x10
+   5:	be 15 7c             	mov    si,0x7c15
+   8:	b4 0e                	mov    ah,0xe
+   a:	ac                   	lods   al,BYTE PTR ds:[si]
+   b:	84 c0                	test   al,al
+   d:	74 04                	je     0x13
+   f:	cd 10                	int    0x10
+  11:	eb f7                	jmp    0xa
+  13:	eb fe                	jmp    0x13
+  15:	48                   	dec    ax
+  16:	65 6c                	gs ins BYTE PTR es:[di],dx
+  18:	6c                   	ins    BYTE PTR es:[di],dx
+  19:	6f                   	outs   dx,WORD PTR ds:[si]
+  1a:	20 66 72             	and    BYTE PTR [bp+0x72],ah
+  1d:	6f                   	outs   dx,WORD PTR ds:[si]
+  1e:	6d                   	ins    WORD PTR es:[di],dx
+  1f:	20 42 6f             	and    BYTE PTR [bp+si+0x6f],al
+  22:	6f                   	outs   dx,WORD PTR ds:[si]
+  23:	74 20                	je     0x45
+  25:	53                   	push   bx
+  26:	65 63 74 6f          	arpl   WORD PTR gs:[si+0x6f],si
+  2a:	72 21                	jb     0x4d
+	...
+ 1fc:	00 00                	add    BYTE PTR [bx+si],al
+ 1fe:	55                   	push   bp
+ 1ff:	aa                   	stos   BYTE PTR es:[di],al
+```
+
+**说明：**
+- 左侧是文件偏移量（十六进制）
+- 中间是指令的机器码（十六进制字节）
+- 右侧是 Intel 格式的汇编指令
+- **注意**：从偏移 0x15 开始是字符串数据，objdump 将其误解析为指令
+  - `48 65 6c 6c 6f` 实际上是 "Hello" 的 ASCII 码
+  - `20 66 72 6f 6d` 实际上是 " from" 的 ASCII 码
+  - `20 42 6f 6f 74` 实际上是 " Boot" 的 ASCII 码
+  - `20 53 65 63 74 6f 72 21` 实际上是 " Sector!" 的 ASCII 码
+- 最后两个字节 `55 aa` 是引导扇区签名（0xAA55 小端序）
    5:   be 15 7c              mov    si,0x7c15
    8:   b4 0e                 mov    ah,0xe
    a:   ac                    lods   al,BYTE PTR ds:[si]
