@@ -61,46 +61,6 @@ Last 16 bytes offset: 131056 (0x1fff0)
 
 ### 步骤 3: 验证 Reset Vector (0xFFFF0)
 
-**命令**:
-```bash
-tail -c 32 /Users/weli/works/qemu/pc-bios/bios.bin | hexdump -C
-od -An -tx1 -j $((0x1FFF0)) -N 5 /Users/weli/works/qemu/pc-bios/bios.bin
-```
-
-**输出**:
-```
-00000000  80 fa 80 80 d9 00 66 0f  b6 d1 e9 bf c2 cd 1b cb  |......f.........|
-00000010  ea 5b e0 00 f0 30 36 2f  32 33 2f 39 39 00 fc 00  |.[...06/23/99...|
-00000020
-
-           95  c0  08  d0  0f
-```
-
-**注意**: 第一个 `od` 命令输出有误（读取了错误位置），正确的 reset vector 在文件末尾。
-
-**重新验证命令**:
-```bash
-python3 << 'EOF'
-with open('/Users/weli/works/qemu/pc-bios/bios.bin', 'rb') as f:
-    f.seek(0x1FFF0)
-    data = f.read(5)
-    print(' '.join(f'{b:02x}' for b in data))
-    if data[0] == 0xea:
-        offset = data[1] | (data[2] << 8)
-        segment = data[3] | (data[4] << 8)
-        target = segment * 16 + offset
-        print(f'  Far jump: 0x{segment:04x}:0x{offset:04x} = 物理地址 0x{target:05x}')
-        print(f'  应该跳转到 entry_post (0xFE05B): {target == 0xFE05B}')
-EOF
-```
-
-**输出**:
-```
-ea 5b e0 00 f0
-  Far jump: 0xf000:0xe05b = 物理地址 0xfe05b
-  应该跳转到 entry_post (0xFE05B): True
-```
-
 **验证结果**: ✅ Reset vector 正确跳转到 entry_post (0xFE05B)
 
 ---
