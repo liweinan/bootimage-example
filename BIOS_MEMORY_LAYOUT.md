@@ -290,7 +290,7 @@
            direction TB
            
            subgraph Low640KB["0x000000 - 0x09FFFF (640KB)"]
-               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
+               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载，包含GRUB引导扇区代码<br/>- GRUB Core (0x8000-0x9FFF, 8KB)<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 负责加载Linux内核<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
            end
            
            subgraph VGARAM["0x0A0000 - 0x0BFFFF (128KB)"]
@@ -369,6 +369,31 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
    - **结构**：
      - `0x7C00 - 0x7DFD`：引导代码和数据（510 字节）
      - `0x7DFE - 0x7DFF`：引导签名（2 字节：0xAA55）
+   - **功能**：
+     - BIOS 通过 INT 13h 将磁盘第一个扇区加载到此地址
+     - 如果使用 GRUB，引导扇区代码会加载 GRUB Core 到 `0x8000`
+
+4. **GRUB Core（第二阶段 bootloader）**
+   - **加载位置**：`0x8000`（实模式地址）
+   - **内存范围**：`0x8000 - 0x9FFF`（通常 8KB，可能更大）
+   - **大小**：通常 8KB - 32KB（取决于 GRUB 配置）
+   - **对应物理内存**：`0x8000 - 0x9FFF`（物理地址）
+   - **位置**：位于前1MB的常规RAM区域，紧接引导扇区之后
+   - **访问方式**：实模式下直接访问，无需地址转换
+   - **加载方式**：
+     - 由引导扇区（0x7C00）通过 INT 13h 磁盘服务加载
+     - 引导扇区读取 GRUB Core 的第一个扇区到临时缓冲区（0x7000）
+     - 然后复制到最终地址 `0x8000`
+   - **功能**：
+     - 解析 GRUB 配置文件
+     - 加载 Linux 内核镜像到 `0x100000`（1MB）
+     - 加载 initramfs 到更高地址
+     - 切换到保护模式/长模式
+     - 跳转到内核入口点
+   - **关键地址**：
+     - `GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000`：GRUB Core 加载地址
+     - `GRUB_BOOT_MACHINE_BUFFER_SEG = 0x7000`：临时缓冲区段（读取扇区时使用）
+     - `GRUB_BOOT_MACHINE_STACK_SEG = 0x2000`：栈段地址
 
 > **详细说明**：关于实模式地址与物理内存的映射关系，请参见 [X86 CPU 运行模式详解](X86_CPU_MODES.md)。
 
