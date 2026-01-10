@@ -61,6 +61,36 @@ Last 16 bytes offset: 131056 (0x1fff0)
 
 ### 步骤 3: 验证 Reset Vector (0xFFFF0)
 
+**命令**:
+```bash
+python3 << 'EOF'
+with open('/Users/weli/works/qemu/pc-bios/bios.bin', 'rb') as f:
+    f.seek(0x1FFF0)
+    data = f.read(5)
+    print(' '.join(f'{b:02x}' for b in data))
+    if data[0] == 0xea:
+        offset = data[1] | (data[2] << 8)
+        segment = data[3] | (data[4] << 8)
+        target = segment * 16 + offset
+        print(f'  Far jump: 0x{segment:04x}:0x{offset:04x} = 物理地址 0x{target:05x}')
+        print(f'  应该跳转到 entry_post (0xFE05B): {target == 0xFE05B}')
+EOF
+```
+
+**输出**:
+```
+ea 5b e0 00 f0
+  Far jump: 0xf000:0xe05b = 物理地址 0xfe05b
+  应该跳转到 entry_post (0xFE05B): True
+```
+
+**分析**:
+- Reset vector 位于文件偏移 0x1FFF0（对应物理地址 0xFFFF0）
+- 第一个字节 `0xEA` 是 far jump 指令操作码
+- 跳转目标：段地址 0xF000，偏移 0xE05B
+- 物理地址 = 0xF000 × 16 + 0xE05B = 0xFE05B
+- 与 entry_post 地址完全匹配
+
 **验证结果**: ✅ Reset vector 正确跳转到 entry_post (0xFE05B)
 
 ---
