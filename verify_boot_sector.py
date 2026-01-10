@@ -114,13 +114,16 @@ def verify_boot_sector(boot_file):
         print(f"  填充区域: 0x{0x7C00 + padding_start:04X} - 0x{0x7C00 + 509:04X} ({padding_size} 字节)")
         print(f"  签名区域: 0x{0x7C00 + 510:04X} - 0x{0x7C00 + 511:04X} (2 字节)")
     
-    # 尝试简单的指令识别
+    # 尝试简单的指令识别（只识别代码区域，不识别数据区域）
     print("\n" + "="*70)
-    print("指令识别 (前 64 字节):")
+    print("指令识别 (代码区域):")
     print("="*70)
     
+    # 确定代码区域的结束位置（字符串开始之前）
+    code_end = str_pos if str_pos != -1 else min(file_size, 64)
+    
     i = 0
-    while i < min(file_size, 64):
+    while i < code_end:
         addr = 0x7C00 + i
         byte_val = data[i]
         
@@ -141,7 +144,7 @@ def verify_boot_sector(boot_file):
             if i + 2 < file_size:
                 imm16 = data[i+1] | (data[i+2] << 8)
                 print(f"0x{addr:04X}: mov si, 0x{imm16:04X}  (BE {data[i+1]:02X} {data[i+2]:02X})")
-                i += 2
+                i += 3  # 修正：imm16 是 2 字节，总共 3 字节
                 continue
         elif byte_val == 0xB4:  # mov ah, imm8
             if i + 1 < file_size:
@@ -178,6 +181,12 @@ def verify_boot_sector(boot_file):
             print(f"0x{addr:04X}: 未识别: 0x{byte_val:02X}")
         i += 1
     
+    # 如果代码区域之后有数据，显示数据区域信息
+    if str_pos != -1 and str_pos < min(file_size, 64):
+        print(f"\n数据区域 (从 0x{0x7C00 + str_pos:04X} 开始):")
+        print(f"  字符串: \"Hello from Boot Sector!\"")
+        print(f"  注意: 数据区域不应被当作指令解析")
+    
     # 尝试使用 objdump 生成 Intel 格式反汇编
     print("\n" + "="*70)
     print("Intel 格式反汇编 (使用 objdump):")
@@ -193,8 +202,9 @@ def verify_boot_sector(boot_file):
         )
         
         if result.returncode == 0:
-            # 解析输出，添加内存地址映射
+            # 解析输出，添加内存地址映射，并过滤数据区域
             lines = result.stdout.split('\n')
+            in_code_section = True
             for line in lines:
                 if line.strip() and not line.startswith('boot.bin:') and not line.startswith('Disassembly'):
                     # 尝试解析地址并转换为 0x7C00 地址
@@ -203,8 +213,25 @@ def verify_boot_sector(boot_file):
                         try:
                             file_offset = int(parts[0], 16)
                             mem_addr = 0x7C00 + file_offset
+                            
+                            # 如果进入数据区域（字符串开始位置），添加注释
+                            if str_pos != -1 and file_offset == str_pos and in_code_section:
+                                print(f"\n; 数据区域开始 (字符串 \"Hello from Boot Sector!\"):")
+                                in_code_section = False
+                            
                             # 替换文件偏移为内存地址
                             line_with_addr = line.replace(parts[0], f"0x{mem_addr:04X}", 1)
+                            
+                            # 如果是数据区域，添加注释说明
+                            if not in_code_section and file_offset < 510:
+                                # 尝试显示 ASCII 字符
+                                if file_offset < file_size:
+                                    byte_val = data[file_offset]
+                                    if 32 <= byte_val < 127:
+                                        line_with_addr += f"  ; '{chr(byte_val)}' (数据)"
+                                    elif byte_val == 0:
+                                        line_with_addr += f"  ; 字符串结束符 (数据)"
+                            
                             print(line_with_addr)
                         except (ValueError, IndexError):
                             print(line)
