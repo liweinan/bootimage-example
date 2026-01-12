@@ -848,9 +848,7 @@ module address_decoder_64bit(
     input [63:0] address,      // 64位地址总线
     output rom_select_32bit,   // 32位地址空间 ROM 选择（0xE0000-0xFFFFF）
     output rom_select_64bit    // 64位地址空间 ROM 选择（0xFFFF80000-0xFFFFFFFF）
-);
-
-// 32位地址空间映射（实模式兼容）
+);// 32位地址空间映射（实模式兼容）
 assign rom_select_32bit = (address[31:0] >= 32'h000E0000) && 
                           (address[31:0] <= 32'h000FFFFF);
 
