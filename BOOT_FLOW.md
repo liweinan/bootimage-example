@@ -882,11 +882,51 @@ LOCAL(copy_buffer):
     popa
     
     // 步骤 9: 跳转到 GRUB Core
-    jmp     *(LOCAL(kernel_address))  // 跳转到 0x8000（GRUB Core 入口点）
+    // **关键代码：跳转到 0x8000（GRUB Core 入口点）**
+    jmp     *(LOCAL(kernel_address))  // 间接跳转：从 LOCAL(kernel_address) 读取地址并跳转
+                                       // 等价于：jmp 0x8000
+                                       // 此时 GRUB Core 的第一个扇区（diskboot.S）已加载到 0x8000
+                                       //
+                                       // **跳转指令执行过程：**
+                                       // 1. CPU 读取 LOCAL(kernel_address) 标签处的内存值（0x8000）
+                                       //    - LOCAL(kernel_address) 是一个标签，指向内存中的一个位置
+                                       //    - 这个位置存储的值是 GRUB_BOOT_MACHINE_KERNEL_ADDR（0x8000）
+                                       // 2. CPU 跳转到该地址（0x8000）
+                                       // 3. 此时 CS:IP = 0x0000:0x8000（物理地址 0x8000）
+                                       // 4. diskboot.S 代码从 0x8000 开始执行
+                                       //
+                                       // **标签 vs 存储值的区别：**
+                                       // - LOCAL(kernel_address)：标签（内存地址），指向存储值的位置
+                                       // - GRUB_BOOT_MACHINE_KERNEL_ADDR：存储的值（0x8000），是跳转目标地址
+                                       // - jmp *(LOCAL(kernel_address))：间接跳转，从标签指向的位置读取值，然后跳转
 
 // 关键数据定义
 LOCAL(kernel_address):
     .word   GRUB_BOOT_MACHINE_KERNEL_ADDR  // 0x8000：GRUB Core 加载地址
+                                           // **这个值定义了跳转目标地址**
+                                           // GRUB_BOOT_MACHINE_KERNEL_ADDR 宏定义为 0x8000
+                                           // 跳转指令从内存中读取这个值（0x8000），然后跳转到该地址
+                                           //
+                                           // **为什么选择 0x8000 作为 GRUB Core 加载地址？**
+                                           // 1. 避免与引导扇区冲突：
+                                           //    - 引导扇区在 0x7C00-0x7DFF（512 字节）
+                                           //    - 0x8000 紧接引导扇区之后，不重叠
+                                           // 2. 内存布局设计：
+                                           //    - 0x0000-0x7BFF：BIOS 数据区、栈等（已使用）
+                                           //    - 0x7C00-0x7DFF：引导扇区（512 字节）
+                                           //    - 0x8000+：GRUB Core（可用空间）
+                                           // 3. 实模式地址空间限制：
+                                           //    - 实模式只能访问前 1MB（0x000000-0xFFFFF）
+                                           //    - 0x8000 在实模式可访问范围内
+                                           //    - 0x8000-0x9FFF 提供约 8KB 空间，足够 GRUB Core 初始阶段使用
+                                           // 4. 历史约定：
+                                           //    - 这是 x86 BIOS 引导协议的标准约定
+                                           //    - 许多 bootloader 都使用 0x8000 作为第二阶段加载地址
+                                           //
+                                           // **内存布局：**
+                                           // 这个 .word 指令在编译时会在引导扇区中分配 2 字节
+                                           // 存储值 0x8000（小端序：0x00 0x80）
+                                           // 跳转指令读取这 2 字节，得到地址 0x8000，然后跳转
 
 LOCAL(kernel_sector):
     .long   1               // GRUB Core 第一个扇区号（LBA，由 grub-install 写入）
@@ -1014,13 +1054,33 @@ GRUB 引导扇区代码开始执行（0x7C00）
     ├─ 从 kernel_sector 读取 GRUB Core（512 字节）
     │   ├─ 使用 DL 中的驱动器号（LBA 模式）或从栈恢复（CHS 模式）
     │   └─ 先读到临时缓冲区 0x7000:0x0000
-    ├─ 复制到最终地址 0x0000:0x8000
+    ├─ 复制到最终地址 0x0000:0x8000（步骤 8，第 867-882 行）
     └─ 跳转到 0x8000（GRUB Core 入口点）
+        └─ **代码位置：第 886 行 `jmp *(LOCAL(kernel_address))`**
+           └─ 从 LOCAL(kernel_address) 读取值 0x8000，然后跳转到该地址
     ↓
 GRUB Core 开始执行
 ```
 
 **注意：** GRUB 引导扇区只读取第一个 512 字节的 GRUB Core。完整的 GRUB Core 可能跨越多个扇区，后续的加载由 GRUB Core 自身完成。
+
+**boot.S 和 diskboot.S 的区别：**
+
+| 特性 | boot.S（引导扇区） | diskboot.S（GRUB Core 第一个扇区） |
+|------|------------------|----------------------------------|
+| **磁盘位置** | 扇区 0（MBR） | 其他扇区（由 kernel_sector 指定，例如扇区 2048） |
+| **内存位置** | `0x7C00` | `0x8000` |
+| **大小** | 512 字节 | 512 字节 |
+| **功能** | 读取 GRUB Core 第一个扇区 | 加载 GRUB Core 剩余部分 |
+| **代码来源** | `grub/grub-core/boot/i386/pc/boot.S` | `grub/grub-core/boot/i386/pc/diskboot.S` |
+| **加载者** | BIOS（通过 INT 13h） | boot.S（通过 INT 13h） |
+| **包含内容** | 引导代码（约 446 字节）+ 引导签名（2 字节） | diskboot.S 代码（约 400 字节）+ 块列表（12 字节） |
+
+**关键点：**
+- **boot.S 和 diskboot.S 各占 512 字节，但它们是两个不同的扇区**
+- boot.S 存储在磁盘扇区 0（MBR），由 BIOS 加载到 0x7C00
+- diskboot.S 存储在磁盘的其他扇区，由 boot.S 加载到 0x8000
+- boot.S 负责读取 diskboot.S，diskboot.S 负责加载完整的 GRUB Core
 
 **GRUB 如何从 512 字节限制跨越到加载完整 GRUB Core？**
 
@@ -1029,13 +1089,22 @@ GRUB 使用了一个巧妙的设计，通过"块列表"（blocklist）机制实�
 **设计原理：**
 
 1. **引导扇区只读取第一个 512 字节**：
-   - 引导扇区（`boot.S`）读取第一个扇区到 `0x8000`
+   - 引导扇区（`boot.S`）读取 GRUB Core 的第一个扇区到 `0x8000`
    - 这 512 字节包含 `diskboot.S` 的代码（约 400 字节）和块列表数据（12 字节）
+   - **重要：boot.S 和 diskboot.S 是两个不同的 512 字节扇区**
+     - boot.S：存储在磁盘扇区 0（MBR），加载到内存 0x7C00，512 字节
+     - diskboot.S：存储在磁盘的其他扇区（由 kernel_sector 指定），加载到内存 0x8000，512 字节
 
-2. **第一个 512 字节的结构**：
+2. **第一个 512 字节的结构（diskboot.S）**：
    ```
-   0x8000 - 0x81F3: diskboot.S 代码（加载剩余扇区的代码）
-   0x81F4 - 0x81FF: 块列表（blocklist）数据
+   0x8000 - 0x81F3: diskboot.S 代码（加载剩余扇区的代码，约 400 字节）
+   0x81F4 - 0x81FF: 块列表（blocklist）数据（12 字节）
+   ```
+   
+   **boot.S 的结构（引导扇区）**：
+   ```
+   0x7C00 - 0x7DFD: boot.S 代码（引导代码，约 446 字节）
+   0x7DFE - 0x7DFF: 引导签名（2 字节：0xAA55）
    ```
 
 3. **块列表（blocklist）机制**：
