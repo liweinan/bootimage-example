@@ -1067,9 +1067,10 @@ boot.S 并不直接知道 startup_raw.S 的位置，而是通过**间接的两�
      5. 将修改后的 boot.S 写入磁盘第一个扇区（MBR）
      ```
 
-2. **boot.S 读取第一个扇区**：
+2. **boot.S 读取 GRUB Core 的第一个扇区**：
    - boot.S 从 `kernel_sector` 字段读取扇区号（第 813-816 行）
    - 使用 INT 13h 读取这个扇区的 512 字节到内存 `0x8000`
+   - **注意**：这里读取的不是磁盘的第一个扇区（扇区 0 是 boot.S 自己），而是 GRUB Core 的第一个扇区（由 `kernel_sector` 指定，可能是扇区 1 或扇区 2048 等）
    - 这 512 字节包含：
      - `diskboot.S` 代码（约 400 字节）
      - 块列表数据（12 字节，在末尾）
@@ -1077,14 +1078,138 @@ boot.S 并不直接知道 startup_raw.S 的位置，而是通过**间接的两�
 **阶段 2：diskboot.S 使用块列表加载完整的 GRUB Core**
 
 1. **块列表机制**：
-   - 第一个扇区的末尾包含块列表（blocklist）
+   - GRUB Core 第一个扇区的末尾包含块列表（blocklist）
    - 块列表记录了 GRUB Core 镜像所有片段的物理扇区位置
    - 包括 startup_raw.S、C 代码、模块等所有组件的位置
+
+**块列表的实际代码实现：**
+
+**1. 块列表结构定义：**
+
+```c
+// grub/include/grub/offsets.h:151-156
+struct grub_pc_bios_boot_blocklist
+{
+    grub_uint64_t start;    // 起始扇区号（LBA，8 字节）
+    grub_uint16_t len;      // 要读取的扇区数（2 字节）
+    grub_uint16_t segment;  // 目标内存段地址（2 字节）
+} GRUB_PACKED;
+```
+
+**2. 块列表在 diskboot.S 中的汇编定义：**
+
+```asm
+// grub/grub-core/boot/i386/pc/diskboot.S:409-423
+.org 0x200 - GRUB_BOOT_MACHINE_LIST_SIZE  // 定位到扇区末尾（512 - 12 = 500 字节处）
+LOCAL(firstlist):  // 块列表起始位置
+    // 第一个块列表条目的默认值（由 grub-mkimage 在安装时填充）
+blocklist_default_start:
+    .long 2, 0      // start: 低 32 位和高 32 位扇区号（8 字节）
+blocklist_default_len:
+    .word 0         // len: 要读取的扇区数（2 字节）
+blocklist_default_seg:
+    .word (GRUB_BOOT_MACHINE_KERNEL_SEG + 0x20)  // segment: 目标内存段（2 字节）
+    // 后续块列表条目紧接其后，每个条目 12 字节
+    // 最后一个条目 len = 0 表示结束
+```
+
+**3. diskboot.S 读取块列表的代码：**
+
+```asm
+// grub/grub-core/boot/i386/pc/diskboot.S:61-310
+_start:
+    // 设置 %di 指向第一个块列表条目
+    movw    $LOCAL(firstlist), %di
+    
+LOCAL(bootloop):
+    // 检查 len 字段（偏移 8 字节）
+    cmpw    $0, 8(%di)
+    je      LOCAL(bootit)  // 如果 len = 0，跳转到启动代码
+    
+LOCAL(setup_sectors):
+    // 读取 start 字段（偏移 0-7 字节）：起始扇区号
+    movl    (%di), %ebx      // 低 32 位
+    movl    4(%di), %ecx     // 高 32 位
+    
+    // 读取 len 字段（偏移 8 字节）：要读取的扇区数
+    movw    8(%di), %ax      // 读取扇区数
+    
+    // 使用 INT 13h 读取扇区到临时缓冲区（0x7000:0x0000）
+    // ... 读取代码 ...
+    
+LOCAL(copy_buffer):
+    // 读取 segment 字段（偏移 10 字节）：目标内存段
+    movw    10(%di), %es     // 设置目标段地址
+    
+    // 从临时缓冲区（0x7000:0x0000）复制数据到目标地址
+    // ... 复制代码 ...
+    
+    // 检查是否完成当前条目
+    cmpw    $0, 8(%di)
+    jne     LOCAL(setup_sectors)  // 如果还有剩余扇区，继续读取
+    
+    // 移动到下一个块列表条目（向前移动 12 字节）
+    subw    $GRUB_BOOT_MACHINE_LIST_SIZE, %di
+    jmp     LOCAL(bootloop)  // 继续处理下一个条目
+```
+
+**4. 块列表字段的内存布局：**
+
+```
+块列表条目在内存中的布局（12 字节）：
+┌─────────────────────────────────────┐
+│ 偏移 0-3:   start (低 32 位)        │  4 字节
+│ 偏移 4-7:   start (高 32 位)        │  4 字节
+│ 偏移 8-9:   len (扇区数)             │  2 字节
+│ 偏移 10-11: segment (目标段地址)     │  2 字节
+└─────────────────────────────────────┘
+
+访问方式：
+- (%di)      → start 低 32 位
+- 4(%di)     → start 高 32 位
+- 8(%di)     → len
+- 10(%di)    → segment
+```
+
+**5. 块列表的生成代码（grub-install）：**
+
+```c
+// grub/util/setup.c:147-199
+static void
+save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
+                 void *data)
+{
+    struct blocklists *bl = data;
+    struct grub_boot_blocklist *prev = bl->block + 1;
+    
+    // 计算需要读取的扇区数
+    grub_uint64_t seclen = (length + GRUB_DISK_SECTOR_SIZE - 1) >> GRUB_DISK_SECTOR_BITS;
+    
+    // 如果与前一个条目连续，合并它们
+    if (bl->block != bl->first_block
+        && (grub_target_to_host64 (prev->start) + grub_target_to_host16 (prev->len)) == sector)
+    {
+        // 合并到前一个条目
+        prev->len = grub_host_to_target16 (t + seclen);
+    }
+    else
+    {
+        // 创建新的块列表条目
+        bl->block->start = grub_host_to_target64 (sector);
+        bl->block->len = grub_host_to_target16 (seclen);
+        bl->block->segment = grub_host_to_target16 (bl->current_segment);
+        bl->block--;  // 移动到下一个条目位置
+    }
+    
+    // 更新目标段地址（每个扇区 = 32 个段单位，因为 512 字节 = 32 * 16 字节）
+    bl->current_segment += seclen << (GRUB_DISK_SECTOR_BITS - 4);
+}
+```
 
 2. **diskboot.S 加载流程**：
    ```
    diskboot.S 执行流程：
-   1. 读取块列表（从第一个扇区的末尾）
+   1. 读取块列表（从 GRUB Core 第一个扇区的末尾）
    2. 循环处理每个块列表条目：
       - 读取条目指定的扇区（使用 INT 13h）
       - 复制到目标内存地址（由 segment 字段指定）
@@ -1107,8 +1232,8 @@ boot.S 并不直接知道 startup_raw.S 的位置，而是通过**间接的两�
    - 片段2：扇区 2056-2071（startup_raw.S 代码）
    - 片段3：扇区 2072-2103（C 代码）
    - ...
-4. 将块列表写入第一个扇区的末尾
-5. 将第一个扇区号（2048）写入 boot.S 的 kernel_sector 字段
+4. 将块列表写入 GRUB Core 第一个扇区的末尾
+5. 将 GRUB Core 第一个扇区号（2048）写入 boot.S 的 kernel_sector 字段
 6. 将 boot.S 写入磁盘第一个扇区（MBR）
 
 启动时（boot.S）：
@@ -1128,8 +1253,8 @@ boot.S 并不直接知道 startup_raw.S 的位置，而是通过**间接的两�
 
 **关键点总结：**
 
-- **boot.S 只知道第一个扇区的位置**：通过 `kernel_sector` 字段（由 grub-install 写入）
-- **第一个扇区包含块列表**：记录了完整的 GRUB Core 位置（包括 startup_raw.S）
+- **boot.S 只知道 GRUB Core 第一个扇区的位置**：通过 `kernel_sector` 字段（由 grub-install 写入）
+- **GRUB Core 第一个扇区包含块列表**：记录了完整的 GRUB Core 位置（包括 startup_raw.S）
 - **diskboot.S 使用块列表**：加载完整的 GRUB Core，包括 startup_raw.S
 - **这是两阶段机制**：boot.S → diskboot.S → startup_raw.S，每个阶段知道下一阶段的位置
 
@@ -1205,87 +1330,13 @@ GRUB 使用了一个巧妙的设计，通过"块列表"（blocklist）机制实�
      - `len`（2 字节）：要读取的扇区数
      - `segment`（2 字节）：目标内存段地址
    - 由 `grub-mkimage` 在安装时写入，记录了 GRUB Core 的所有扇区位置
+   - **详细说明**：关于块列表的结构定义、内存布局和实际代码实现，请参见上面的 [块列表的实际代码实现](#块列表的实际代码实现) 部分
 
 4. **diskboot.S 加载剩余扇区**：
    - `diskboot.S` 读取块列表，知道需要读取哪些扇区
    - 循环读取每个块列表条目指定的扇区
    - 将读取的扇区复制到目标内存地址
-
-**源代码位置：`grub/grub-core/boot/i386/pc/diskboot.S:38-341`**
-
-```asm
-// diskboot.S - GRUB Core 的第一个 512 字节，负责加载剩余的扇区
-start:
-_start:
-    // 这个代码被加载到 0x8000，是 GRUB Core 的第一个 512 字节
-    
-    // 步骤 1: 保存驱动器号
-    pushw   %dx
-    
-    // 步骤 2: 显示 "loading" 消息
-    MSG(notification_string)  // 显示 "loading"
-    
-    // 步骤 3: 设置块列表指针
-    movw    $LOCAL(firstlist), %di  // 指向第一个块列表条目
-    
-    // 步骤 4: 循环读取块列表中的每个扇区块
-LOCAL(bootloop):
-    // 检查是否还有扇区要读取
-    cmpw    $0, 8(%di)  // 检查 len 字段（偏移 8）
-    je      LOCAL(bootit)  // 如果为 0，跳转到启动代码
-    
-LOCAL(setup_sectors):
-    // 检测使用 LBA 还是 CHS 模式
-    cmpb    $0, -1(%si)
-    je      LOCAL(chs_mode)
-    
-    // LBA 模式：使用 INT 13h 扩展读（AH=0x42）
-LOCAL(lba_mode):
-    // 从块列表读取扇区信息
-    movl    (%di), %ebx      // start 低 32 位（偏移 0）
-    movl    4(%di), %ecx     // start 高 32 位（偏移 4）
-    movw    8(%di), %ax      // len（偏移 8）
-    
-    // 准备磁盘地址包（DAP）
-    movw    $0x0010, (%si)   // DAP 大小 = 16 字节
-    movw    %ax, 2(%si)      // 扇区数
-    movl    %ebx, 8(%si)     // 起始扇区（低 32 位）
-    movl    %ecx, 12(%si)    // 起始扇区（高 32 位）
-    movw    $GRUB_BOOT_MACHINE_BUFFER_SEG, 6(%si)  // 缓冲区段 = 0x7000
-    
-    // 调用 INT 13h 扩展读
-    movb    $0x42, %ah
-    int     $0x13
-    
-    jc      LOCAL(read_error)
-    
-    // 步骤 5: 将读取的扇区复制到目标地址
-LOCAL(copy_buffer):
-    // 从临时缓冲区（0x7000:0x0000）复制到目标段（块列表中的 segment）
-    movw    10(%di), %es     // 目标段（偏移 10）
-    // ... 复制代码 ...
-    
-    // 步骤 6: 更新块列表指针，继续下一个块
-    subw    $GRUB_BOOT_MACHINE_LIST_SIZE, %di  // 移动到下一个块列表条目
-    jmp     LOCAL(bootloop)   // 继续循环
-    
-LOCAL(bootit):
-    // 所有扇区加载完成，跳转到 GRUB Core 的 C 代码入口点
-    ljmp    $0, $(GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
-    // ↑ 跳转到 0x8200（0x8000 + 0x200），这是 startup_raw.S 的入口点
-```
-
-**块列表结构：**
-
-```c
-// grub/include/grub/offsets.h:151-156
-struct grub_pc_bios_boot_blocklist
-{
-    grub_uint64_t start;    // 起始扇区号（LBA，8 字节）
-    grub_uint16_t len;      // 要读取的扇区数（2 字节）
-    grub_uint16_t segment;  // 目标内存段地址（2 字节）
-} GRUB_PACKED;
-```
+   - **详细代码**：关于 diskboot.S 的完整代码实现，请参见上面的 [块列表的实际代码实现](#块列表的实际代码实现) 部分
 
 **块列表中读取的扇区对应什么数据？**
 
@@ -1305,35 +1356,7 @@ struct grub_pc_bios_boot_blocklist
    - 由于文件系统碎片，镜像可能分散在多个不连续的扇区中
    - 块列表记录了每个片段的物理扇区位置（LBA 地址）
 
-3. **块列表条目的含义**：
-   ```
-   块列表条目示例：
-   start = 2048（LBA 扇区号）
-   len = 16（读取 16 个扇区 = 8KB）
-   segment = 0x0820（目标内存段，物理地址 = 0x8200）
-   
-   含义：
-   - 从磁盘 LBA 扇区 2048 开始，读取 16 个扇区（8KB）
-   - 这些扇区包含 GRUB Core 镜像的一部分（可能是 startup.S 代码）
-   - 读取后复制到内存地址 0x8200
-   ```
-
-4. **为什么需要多个块列表条目？**
-   - **文件系统碎片**：GRUB Core 镜像可能分散在磁盘的不同位置
-   - **分段加载**：每个块列表条目对应镜像的一个连续片段
-   - **内存布局**：不同片段可能加载到不同的内存地址（由 `segment` 字段指定）
-
-5. **块列表的生成过程**：
-   ```
-   grub-install 安装流程：
-   1. 编译 GRUB Core 镜像（core.img）
-   2. 将 core.img 写入磁盘（可能分散在多个扇区）
-   3. 记录每个片段的物理扇区位置（LBA）
-   4. 生成块列表，写入第一个 512 字节的末尾
-   5. 块列表由 diskboot.S 读取，用于加载完整的 GRUB Core
-   ```
-
-6. **实际示例**：
+3. **块列表条目的含义和示例**：
    ```
    假设 GRUB Core 镜像分散在磁盘上：
    
