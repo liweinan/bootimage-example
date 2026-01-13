@@ -9,7 +9,6 @@
 - [QEMU 加载 SeaBIOS](#qemu-加载-seabios)
 - [SeaBIOS 初始化中断服务](#seabios-初始化中断服务)
 - [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区)
-- [引导扇区程序：从 SeaBIOS 到用户代码的执行](#引导扇区程序从-seabios-到用户代码的执行)
 - [Linux 内核接管 BIOS](#linux-内核接管-bios)
 - [总结：完整流程时间线](#总结完整流程时间线)
 - [技术细节说明](#技术细节说明)
@@ -556,8 +555,6 @@ platform_hardware_setup(void)
 
 ## BIOS 引导流程：从 SeaBIOS 到引导扇区
 
-> **注意**：本节描述从 SeaBIOS 完成初始化后，通过 INT 19h 启动引导流程，到加载引导扇区的过程。关于引导扇区程序本身的详细内容，请参见下一节 [引导扇区程序：从 SeaBIOS 到用户代码的执行](#引导扇区程序从-seabios-到用户代码的执行)。
-
 ### BIOS 引导流程概述
 
 SeaBIOS 完成初始化后，通过 INT 19h 引导加载服务启动引导过程，读取引导扇区并跳转执行。本节详细说明从 BIOS 到引导扇区的流程。
@@ -661,6 +658,89 @@ boot_disk(u8 bootdrv, int checksig)
     call_boot_entry(SEGOFF(bootseg, bootip), bootdrv);
 }
 ```
+
+### BIOS 如何传递驱动器号给引导扇区程序
+
+**关键点：** BIOS 在跳转到引导扇区时，需要将驱动器号传递给引导扇区程序，以便引导扇区程序知道从哪个存储设备加载后续代码。
+
+**实现机制：** 通过 `call_boot_entry()` 函数将驱动器号设置到 DL 寄存器中。
+
+**源代码位置：`seabios/src/boot.c:987-1000`**
+
+```c
+// 跳转到引导扇区入口点
+static void
+call_boot_entry(struct segoff_s bootsegip, u8 bootdrv)
+{
+    dprintf(1, "Booting from %04x:%04x\n", bootsegip.seg, bootsegip.offset);
+    struct bregs br;
+    memset(&br, 0, sizeof(br));
+    br.flags = F_IF;        // 设置中断标志（允许中断）
+    br.code = bootsegip;    // 设置跳转目标地址（CS:IP = 0x0000:0x7C00）
+    br.dl = bootdrv;        // ← 关键：将驱动器号设置到 DL 寄存器
+    br.ax = 0xaa55;         // 设置魔数（可选，用于验证）
+    farcall16(&br);         // 执行远跳转，DL 寄存器包含驱动器号
+}
+```
+
+**关键步骤：**
+
+1. **第 1004 行**：`br.dl = bootdrv;` - 将驱动器号参数设置到 DL 寄存器
+2. **第 1005 行**：`br.ax = 0xaa55;` - 设置魔数（引导扇区签名，用于验证）
+3. **第 1006 行**：`farcall16(&br);` - 执行远跳转，此时 DL 寄存器已包含驱动器号
+
+**驱动器号约定：**
+
+| DL 值 | 存储设备类型 |
+|-------|------------|
+| `0x00` | 软盘 A（Floppy A） |
+| `0x01` | 软盘 B（Floppy B） |
+| `0x80` | 第一块硬盘 |
+| `0x81` | 第二块硬盘 |
+| `0x82` | 第三块硬盘 |
+| ... | ... |
+
+**引导扇区程序接收驱动器号：**
+
+当引导扇区代码开始执行时，DL 寄存器已经包含了驱动器号：
+
+```asm
+// GRUB 引导扇区代码：grub/grub-core/boot/i386/pc/boot.S
+_start:
+    // BIOS 跳转到这里时，DL 寄存器包含驱动器号
+    // 例如：DL = 0x80（第一块硬盘）
+    
+    // 保存启动驱动器号
+    pushw   %dx             // 保存 DL（驱动器号）到栈
+    
+    // ... 后续代码使用保存的驱动器号读取 GRUB Core ...
+    
+    popw    %dx             // 恢复驱动器号到 DL
+    movb    $0x42, %ah      // INT 13h 功能 0x42：扩展读
+    int     $0x13           // 使用 DL 中的驱动器号读取扇区
+```
+
+**完整传递流程：**
+
+```
+boot_disk(0x80, 1)  // 调用时传入驱动器号 0x80
+    ↓
+call_boot_entry(SEGOFF(0x0000, 0x7C00), 0x80)
+    ↓
+br.dl = 0x80  // 将驱动器号设置到 DL 寄存器
+    ↓
+farcall16(&br)  // 执行远跳转
+    ↓
+跳转到 CS:IP = 0x0000:0x7C00
+    ↓
+引导扇区代码开始执行，DL = 0x80（驱动器号已传递）
+```
+
+**为什么需要传递驱动器号？**
+
+1. **读取剩余代码**：引导扇区只有 512 字节，需要从同一个存储设备读取剩余的代码（如 GRUB Core）
+2. **多设备支持**：系统可能有多个存储设备（硬盘、USB、软盘等），需要知道从哪个设备读取
+3. **BIOS 协议约定**：这是 x86 BIOS 引导协议的标准约定，所有引导扇区程序都依赖这个约定
 
 ### BIOS 如何加载 Bootloader
 
@@ -1512,99 +1592,13 @@ grub_relocator32_boot()
 - `0x100000`（1MB）：内核镜像加载地址
 - `0xFFFFFFFF - bios_size`：BIOS ROM 地址
 
----
+### 引导扇区程序补充说明
 
-## 引导扇区程序：从 SeaBIOS 到用户代码的执行
+引导扇区（Boot Sector）是存储在磁盘第一个扇区（512 字节）的特殊程序。BIOS 完成初始化后，会调用 INT 19h 服务加载并执行引导扇区程序。前面已经详细说明了：
+- BIOS 如何通过 `call_boot_entry()` 函数将驱动器号传递到 DL 寄存器（参见 [BIOS 如何传递驱动器号给引导扇区程序](#bios-如何传递驱动器号给引导扇区程序)）
+- GRUB 引导扇区代码的实现和如何使用 DL 寄存器（参见 [阶段 2：GRUB 引导扇区加载 GRUB Core](#阶段-2grub-引导扇区加载-grub-core)）
 
-### 引导扇区程序概述
-
-引导扇区（Boot Sector）是存储在磁盘第一个扇区（512 字节）的特殊程序。BIOS 完成初始化后，会调用 INT 19h 服务加载并执行引导扇区程序。本节通过一个最小化的引导扇区程序，详细说明 QEMU 和 SeaBIOS 如何协作完成引导过程。
-
-### BIOS 如何传递驱动器号给引导扇区程序
-
-**关键点：引导扇区程序需要知道自己是哪个存储设备加载的，以便读取剩余的代码。**
-
-BIOS 在跳转到引导扇区时，会将驱动器号保存在 **DL 寄存器**中，这是 x86 BIOS 引导协议的标准约定。
-
-**SeaBIOS 源代码证据：**
-
-```c
-// SeaBIOS 源代码：src/boot.c:boot_disk()
-static void
-boot_disk(u8 bootdrv, int checksig)
-{
-    // ... 读取引导扇区到 0x7C00 ...
-    
-    // 跳转到引导扇区程序执行
-    call_boot_entry(SEGOFF(bootseg, bootip), bootdrv);
-    //                                                      ↑
-    //                                            传递驱动器号
-}
-
-// SeaBIOS 源代码：src/boot.c:call_boot_entry()
-static void
-call_boot_entry(struct segoff_s bootsegip, u8 bootdrv)
-{
-    struct bregs br;
-    memset(&br, 0, sizeof(br));
-    br.flags = F_IF;
-    br.code = bootsegip;
-    br.dl = bootdrv;  // ← 关键：将驱动器号设置到 DL 寄存器
-    br.ax = 0xaa55;    // 魔数（可选）
-    farcall16(&br);    // 远跳转到引导扇区，DL 寄存器包含驱动器号
-}
-```
-
-**驱动器号约定：**
-
-| DL 值 | 存储设备类型 |
-|-------|------------|
-| `0x00` | 软盘（Floppy） |
-| `0x80` | 第一块硬盘 |
-| `0x81` | 第二块硬盘 |
-| `0x82` | 第三块硬盘 |
-| ... | ... |
-
-**引导扇区程序如何使用驱动器号：**
-
-引导扇区程序（如 GRUB）在开始执行时，会从 DL 寄存器读取驱动器号，并保存起来，用于后续读取剩余的代码：
-
-```asm
-// GRUB 引导扇区代码：grub/grub-core/boot/i386/pc/boot.S
-_start:
-    // BIOS 跳转到这里时，DL 寄存器包含驱动器号
-    // 例如：DL = 0x80（第一块硬盘）
-    
-    // 步骤 1: 保存启动驱动器号
-    pushw   %dx             // 保存 DL（驱动器号）到栈
-    
-    // ... 后续代码 ...
-    
-    // 步骤 2: 使用保存的驱动器号读取 GRUB Core
-    popw    %dx             // 恢复驱动器号到 DL
-    movb    $0x42, %ah      // INT 13h 功能 0x42：扩展读
-    int     $0x13           // 使用 DL 中的驱动器号读取扇区
-```
-
-**为什么需要驱动器号？**
-
-1. **读取剩余代码**：引导扇区只有 512 字节，需要从同一个存储设备读取剩余的代码（如 GRUB Core）
-2. **多设备支持**：系统可能有多个存储设备（硬盘、USB、软盘等），需要知道从哪个设备读取
-3. **BIOS 协议约定**：这是 x86 BIOS 引导协议的标准约定，所有引导扇区程序都依赖这个约定
-
-**完整流程：**
-
-```
-BIOS 读取引导扇区到 0x7C00
-    ↓
-BIOS 跳转到 0x7C00，DL = 驱动器号（如 0x80）
-    ↓
-引导扇区程序开始执行
-    ├─ 从 DL 寄存器读取驱动器号
-    ├─ 保存驱动器号（pushw %dx）
-    ├─ 使用驱动器号读取剩余的代码（INT 13h, DL = 驱动器号）
-    └─ 继续引导流程
-```
+以下提供一个最小化的引导扇区程序示例，帮助理解引导扇区程序的基本结构。
 
 ### 最小引导扇区程序代码
 
@@ -2490,19 +2484,19 @@ boot_disk() 读取引导扇区
 | `seabios/src/post.c:32-71` | ivt_init() IVT 初始化 | [SeaBIOS 初始化中断服务](#seabios-初始化中断服务) |
 | `seabios/src/hw/pic.c:62-66` | pic_setup() PIC 初始化 | [SeaBIOS 初始化中断服务](#seabios-初始化中断服务) |
 | `seabios/src/post.c:137-158` | interface_init() 接口初始化 | [SeaBIOS 初始化中断服务](#seabios-初始化中断服务) |
-| `seabios/src/post.c:182-193` | startBoot() 启动引导 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
-| `seabios/src/boot.c:1040-1046` | handle_19() INT 19h 处理程序 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
-| `seabios/src/boot.c:882-917` | boot_disk() 读取引导扇区 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
-| `seabios/src/boot.c:987-1025` | do_boot() 引导设备选择 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `seabios/src/post.c:182-193` | startBoot() 启动引导 | [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区) |
+| `seabios/src/boot.c:1040-1046` | handle_19() INT 19h 处理程序 | [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区) |
+| `seabios/src/boot.c:882-917` | boot_disk() 读取引导扇区 | [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区) |
+| `seabios/src/boot.c:987-1025` | do_boot() 引导设备选择 | [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区) |
 
 ### GRUB 源代码
 
 | 文件路径 | 功能说明 | 相关章节 |
 |---------|---------|---------|
-| `grub/grub-core/boot/i386/pc/boot.S` | GRUB 引导扇区代码 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
-| `grub/grub-core/boot/i386/pc/diskboot.S:38-341` | 磁盘引导代码 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
-| `grub/grub-core/boot/i386/pc/startup_raw.S:76-104` | 启动代码 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
-| `grub/grub-core/kern/i386/realmode.S:133-195` | 实模式支持代码 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `grub/grub-core/boot/i386/pc/boot.S` | GRUB 引导扇区代码 | [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区) |
+| `grub/grub-core/boot/i386/pc/diskboot.S:38-341` | 磁盘引导代码 | [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区) |
+| `grub/grub-core/boot/i386/pc/startup_raw.S:76-104` | 启动代码 | [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区) |
+| `grub/grub-core/kern/i386/realmode.S:133-195` | 实模式支持代码 | [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区) |
 | `grub/grub-core/loader/i386/linux.c` | Linux 内核加载器 | [Linux 内核接管 BIOS](#linux-内核接管-bios) |
 
 ### Linux 内核源代码
@@ -2519,7 +2513,7 @@ boot_disk() 读取引导扇区
 
 | 文件路径 | 功能说明 | 相关章节 |
 |---------|---------|---------|
-| `boot.asm` | 最小化引导扇区程序示例 | [引导扇区程序](#引导扇区程序从-seabios-到用户代码的执行) |
+| `boot.asm` | 最小化引导扇区程序示例 | [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区) |
 
 ### 关键数据结构
 
