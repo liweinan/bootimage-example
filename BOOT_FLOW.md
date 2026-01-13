@@ -8,11 +8,14 @@
 
 - [QEMU 加载 SeaBIOS](#qemu-加载-seabios)
 - [SeaBIOS 初始化中断服务](#seabios-初始化中断服务)
+- [BIOS 引导流程：从 SeaBIOS 到引导扇区](#bios-引导流程从-seabios-到引导扇区)
 - [引导扇区程序：从 SeaBIOS 到用户代码的执行](#引导扇区程序从-seabios-到用户代码的执行)
 - [Linux 内核接管 BIOS](#linux-内核接管-bios)
 - [总结：完整流程时间线](#总结完整流程时间线)
+- [技术细节说明](#技术细节说明)
 - [Q&A：常见问题解答](#qa常见问题解答)
 - [关键源代码文件索引](#关键源代码文件索引)
+- [附录](#附录)
 
 ## 补充说明文档
 
@@ -549,11 +552,17 @@ platform_hardware_setup(void)
 - `pic_setup()` 初始化中断控制器，后续中断相关初始化都依赖它
 - `timer_setup()` 和 `clock_setup()` 必须按顺序执行，时钟中断依赖定时器
 
-### BIOS 加载内核的完整流程
+---
 
-SeaBIOS 完成初始化后，通过 INT 19h 引导加载服务启动引导过程，最终加载操作系统内核。本节详细说明从 BIOS 到内核加载的完整流程。
+## BIOS 引导流程：从 SeaBIOS 到引导扇区
 
-#### 引导流程概述
+> **注意**：本节描述从 SeaBIOS 完成初始化后，通过 INT 19h 启动引导流程，到加载引导扇区的过程。关于引导扇区程序本身的详细内容，请参见下一节 [引导扇区程序：从 SeaBIOS 到用户代码的执行](#引导扇区程序从-seabios-到用户代码的执行)。
+
+### BIOS 引导流程概述
+
+SeaBIOS 完成初始化后，通过 INT 19h 引导加载服务启动引导过程，读取引导扇区并跳转执行。本节详细说明从 BIOS 到引导扇区的流程。
+
+> **完整启动顺序**：这是简化版的高层概述。详细的完整流程（包含所有关键文件和源代码位置）请参见 [总结：完整流程时间线](#总结完整流程时间线) 部分。
 
 ```
 SeaBIOS POST 完成
@@ -566,16 +575,16 @@ INT 19h 处理程序（handle_19）
     ↓
 读取引导扇区到 0x7C00
     ↓
-执行引导扇区代码
+执行引导扇区代码（boot.S）
     ↓
-引导扇区加载 Bootloader（如 GRUB）
+引导扇区加载 GRUB Core（diskboot.S → startup_raw.S）
     ↓
-Bootloader 加载内核镜像
+GRUB Core 加载内核镜像
     ↓
 跳转到内核入口点
 ```
 
-#### INT 19h 引导加载服务
+### INT 19h 引导加载服务
 
 **源代码位置：`seabios/src/post.c:182-193`**
 
@@ -608,7 +617,7 @@ handle_19(void)
 }
 ```
 
-#### 引导设备选择和扇区读取
+### 引导设备选择和扇区读取
 
 **源代码位置：`seabios/src/boot.c:882-917`**
 
@@ -653,7 +662,7 @@ boot_disk(u8 bootdrv, int checksig)
 }
 ```
 
-#### BIOS 如何加载 Bootloader
+### BIOS 如何加载 Bootloader
 
 引导扇区程序（512 字节）通常太小，无法直接加载内核，因此采用多阶段引导。本节详细说明 BIOS 如何加载 bootloader（以 GRUB 为例）。
 
@@ -949,9 +958,9 @@ notification_string:
 - **`GRUB_BOOT_MACHINE_STACK_SEG`**：`0x2000` - 栈段地址
 - **`kernel_sector`**：GRUB Core 第一个扇区号（由 `grub-install` 在安装时写入）
 
-**boot.S 如何知道 startup.S 在磁盘上的位置？**
+**boot.S 如何知道 startup_raw.S 在磁盘上的位置？**
 
-boot.S 并不直接知道 startup.S 的位置，而是通过**间接的两阶段机制**：
+boot.S 并不直接知道 startup_raw.S 的位置，而是通过**间接的两阶段机制**：
 
 **阶段 1：boot.S 读取 GRUB Core 第一个扇区**
 
@@ -979,7 +988,7 @@ boot.S 并不直接知道 startup.S 的位置，而是通过**间接的两阶段
 1. **块列表机制**：
    - 第一个扇区的末尾包含块列表（blocklist）
    - 块列表记录了 GRUB Core 镜像所有片段的物理扇区位置
-   - 包括 startup.S、C 代码、模块等所有组件的位置
+   - 包括 startup_raw.S、C 代码、模块等所有组件的位置
 
 2. **diskboot.S 加载流程**：
    ```
@@ -988,23 +997,23 @@ boot.S 并不直接知道 startup.S 的位置，而是通过**间接的两阶段
    2. 循环处理每个块列表条目：
       - 读取条目指定的扇区（使用 INT 13h）
       - 复制到目标内存地址（由 segment 字段指定）
-   3. 所有扇区加载完成后，跳转到 0x8200（startup.S 入口点）
+   3. 所有扇区加载完成后，跳转到 0x8200（startup_raw.S 入口点）
    ```
 
-3. **startup.S 的位置**：
-   - startup.S 的位置记录在块列表中
+3. **startup_raw.S 的位置**：
+   - startup_raw.S 的位置记录在块列表中
    - 块列表由 `grub-install` 在安装时生成，记录了 core.img 所有片段的物理位置
-   - diskboot.S 根据块列表加载 startup.S 到内存 `0x8200`
+   - diskboot.S 根据块列表加载 startup_raw.S 到内存 `0x8200`
 
 **完整定位流程：**
 
 ```
 安装时（grub-install）：
-1. 编译 core.img（包含 startup.S、C 代码等）
+1. 编译 core.img（包含 startup_raw.S、C 代码等）
 2. 将 core.img 写入磁盘（例如扇区 2048-4096）
 3. 生成块列表，记录所有片段的物理位置：
    - 片段1：扇区 2048-2055（diskboot.S + 块列表）
-   - 片段2：扇区 2056-2071（startup.S 代码）
+   - 片段2：扇区 2056-2071（startup_raw.S 代码）
    - 片段3：扇区 2072-2103（C 代码）
    - ...
 4. 将块列表写入第一个扇区的末尾
@@ -1020,18 +1029,18 @@ boot.S 并不直接知道 startup.S 的位置，而是通过**间接的两阶段
 1. 读取块列表（从 0x8000 的末尾）
 2. 根据块列表，读取所有片段：
    - 读取扇区 2048-2055（已加载）
-   - 读取扇区 2056-2071（startup.S）→ 加载到 0x8200
+   - 读取扇区 2056-2071（startup_raw.S）→ 加载到 0x8200
    - 读取扇区 2072-2103（C 代码）→ 加载到 0x9000
    - ...
-3. 所有片段加载完成后，跳转到 0x8200（startup.S 入口）
+3. 所有片段加载完成后，跳转到 0x8200（startup_raw.S 入口）
 ```
 
 **关键点总结：**
 
 - **boot.S 只知道第一个扇区的位置**：通过 `kernel_sector` 字段（由 grub-install 写入）
-- **第一个扇区包含块列表**：记录了完整的 GRUB Core 位置（包括 startup.S）
-- **diskboot.S 使用块列表**：加载完整的 GRUB Core，包括 startup.S
-- **这是两阶段机制**：boot.S → diskboot.S → startup.S，每个阶段知道下一阶段的位置
+- **第一个扇区包含块列表**：记录了完整的 GRUB Core 位置（包括 startup_raw.S）
+- **diskboot.S 使用块列表**：加载完整的 GRUB Core，包括 startup_raw.S
+- **这是两阶段机制**：boot.S → diskboot.S → startup_raw.S，每个阶段知道下一阶段的位置
 
 **GRUB 引导扇区的工作流程（简化版）：**
 
@@ -1172,7 +1181,7 @@ LOCAL(copy_buffer):
 LOCAL(bootit):
     // 所有扇区加载完成，跳转到 GRUB Core 的 C 代码入口点
     ljmp    $0, $(GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
-    // ↑ 跳转到 0x8200（0x8000 + 0x200），这是 startup.S 的入口点
+    // ↑ 跳转到 0x8200（0x8000 + 0x200），这是 startup_raw.S 的入口点
 ```
 
 **块列表结构：**
@@ -1194,7 +1203,7 @@ struct grub_pc_bios_boot_blocklist
 1. **GRUB Core 二进制镜像的片段**：
    - GRUB Core 不是单个源文件，而是一个编译后的二进制镜像
    - 镜像包含多个组件：
-     - `startup.S` / `startup_raw.S`：实模式入口代码（从 `0x8200` 开始）
+     - `startup_raw.S`：实模式入口代码（从 `0x8200` 开始）
      - C 代码：`grub_main()` 等核心函数
      - 模块：文件系统驱动、磁盘驱动等
      - 数据段：配置、符号表等
@@ -1240,7 +1249,7 @@ struct grub_pc_bios_boot_blocklist
    块列表条目 1：
    start = 2048, len = 8, segment = 0x0820
    → 读取磁盘扇区 2048-2055（4KB），加载到内存 0x8200
-   → 包含：startup.S 代码
+   → 包含：startup_raw.S 代码
    
    块列表条目 2：
    start = 4096, len = 32, segment = 0x0900
@@ -1308,6 +1317,8 @@ struct grub_pc_bios_boot_blocklist
 - 引导扇区只有 512 字节，无法包含完整的加载逻辑，所以将加载逻辑放在第一个 GRUB Core 扇区中
 
 **阶段 3：GRUB Core 从实模式切换到保护模式（仅 BIOS）**
+
+> **注意**：这里的"阶段 3"是指 GRUB Core 内部的阶段，与前面的"阶段 1"（BIOS 加载引导扇区）和"阶段 2"（引导扇区加载 GRUB Core）不同。
 
 在 BIOS 模式下，GRUB Core 需要从实模式切换到保护模式。这个过程发生在 `startup_raw.S` 中：
 
@@ -1423,7 +1434,7 @@ grub_relocator32_boot()
     ├─ 设置 GDT
     └─ 跳转到 EIP（内核入口点）
     ↓
-内核开始执行（startup_32 或 startup_64）
+内核开始执行（Setup 代码 → 解压 → startup_64）
 ```
 
 **完整内存布局（引导过程）：**
@@ -1458,9 +1469,10 @@ grub_relocator32_boot()
    - 跳转到 `0x0000:0x7C00` 执行
 
 2. **引导扇区 → GRUB Core**：
-   - 引导扇区代码读取活动分区的引导扇区
-   - 加载 GRUB Core 到 `0x8000` 或更高地址
-   - 跳转到 GRUB Core
+   - 引导扇区代码（boot.S）从 kernel_sector 读取 GRUB Core 第一个扇区（diskboot.S）
+   - 加载 diskboot.S 到 `0x8000`
+   - diskboot.S 使用块列表加载完整的 GRUB Core（包括 startup_raw.S）
+   - 跳转到 GRUB Core（startup_raw.S 入口点 0x8200）
    
    **实模式下的内存使用分析：**
    
@@ -1486,11 +1498,13 @@ grub_relocator32_boot()
      - 这是为什么步骤 3 中需要"切换到保护模式/长模式"的原因
 
 3. **GRUB Core → 内核**：
-   - GRUB 初始化文件系统，读取配置文件
-   - 使用 INT 13h 扩展读（AH=0x42）或文件系统驱动读取内核文件
-   - 加载内核到 `0x100000`（1MB），initramfs 到更高地址
-   - 切换到保护模式/长模式
-   - 跳转到内核入口点
+   - GRUB Core（grub_main()）在保护模式下运行
+   - 初始化文件系统，读取配置文件（grub.cfg）
+   - 使用文件系统驱动或 INT 13h 扩展读读取内核文件
+   - 加载内核镜像（bzImage）到 `0x100000`（1MB），initramfs 到更高地址
+   - 设置内核启动参数（boot_params）
+   - 跳转到内核入口点（code32_start，内核 Setup 代码）
+   - 内核 Setup 代码在实模式下运行，然后切换到长模式
 
 **关键内存地址：**
 - `0x7C00`：引导扇区（MBR）加载地址
@@ -1638,13 +1652,6 @@ dw 0xAA55               ; 引导扇区标志
 > **详细说明**：关于在 QEMU 中测试引导扇区的方法，请参见 [技术细节说明 - Note 6: 在 QEMU 中测试引导扇区](BOOT_FLOW_NOTES.md#note-6-在-qemu-中测试引导扇区)。
 
 ---
-
-## 附录
-
-- [附录A：键盘中断处理代码分析](APPENDIX_A_KEYBOARD_INTERRUPT.md)
-- [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
-- [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md) - 整合了所有中断相关内容的完整文档
-- [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)
 
 ## Linux 内核接管 BIOS
 
