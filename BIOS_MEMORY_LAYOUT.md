@@ -290,7 +290,7 @@
            direction TB
            
            subgraph Low640KB["0x000000 - 0x09FFFF (640KB)"]
-               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载，包含GRUB引导扇区代码<br/>- GRUB Core (0x8000-0x9FFF, 8KB)<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 负责加载Linux内核<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
+               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载，包含GRUB引导扇区代码<br/>- GRUB Core (0x8000-0xCFFF, 约20KB，示例)<br/>  └─ diskboot.S (0x8000-0x81FF, 512B)<br/>  └─ startup_raw.S (0x8200-0x8FFF, 约3.5KB)<br/>  └─ C代码 (0x9000-0xCFFF, 约16KB)<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 负责加载Linux内核<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
            end
            
            subgraph VGARAM["0x0A0000 - 0x0BFFFF (128KB)"]
@@ -374,16 +374,20 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
      - 如果使用 GRUB，引导扇区代码会加载 GRUB Core 到 `0x8000`
 
 4. **GRUB Core（第二阶段 bootloader）**
-   - **加载位置**：`0x8000`（实模式地址）
-   - **内存范围**：`0x8000 - 0x9FFF`（通常 8KB，可能更大）
-   - **大小**：通常 8KB - 32KB（取决于 GRUB 配置）
-   - **对应物理内存**：`0x8000 - 0x9FFF`（物理地址）
+   - **加载位置**：`0x8000`（实模式地址，起始位置）
+   - **内存范围**：`0x8000 - 0xCFFF`（示例：约 20KB，实际大小取决于 GRUB 配置）
+     - `0x8000 - 0x81FF`：diskboot.S（512 字节，包含块列表）
+     - `0x8200 - 0x8FFF`：startup_raw.S 的一部分（约 3.5KB）
+     - `0x9000 - 0xCFFF`：C 代码（grub_main 等，约 16KB）
+   - **大小**：通常 8KB - 32KB（取决于 GRUB 配置和加载的模块）
+   - **对应物理内存**：`0x8000 - 0xCFFF`（物理地址，示例范围）
    - **位置**：位于前1MB的常规RAM区域，紧接引导扇区之后
    - **访问方式**：实模式下直接访问，无需地址转换
    - **加载方式**：
      - 由引导扇区（0x7C00）通过 INT 13h 磁盘服务加载
      - 引导扇区读取 GRUB Core 的第一个扇区到临时缓冲区（0x7000）
      - 然后复制到最终地址 `0x8000`
+     - diskboot.S 根据块列表加载剩余部分到不同地址（0x8200, 0x9000 等）
    - **功能**：
      - 解析 GRUB 配置文件
      - 加载 Linux 内核镜像到 `0x100000`（1MB）
@@ -391,9 +395,13 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
      - 切换到保护模式/长模式
      - 跳转到内核入口点
    - **关键地址**：
-     - `GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000`：GRUB Core 加载地址
+     - `GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000`：GRUB Core 加载地址（起始地址）
      - `GRUB_BOOT_MACHINE_BUFFER_SEG = 0x7000`：临时缓冲区段（读取扇区时使用）
      - `GRUB_BOOT_MACHINE_STACK_SEG = 0x2000`：栈段地址
+   - **对应文件**：
+     - `diskboot.S`：grub/grub-core/boot/i386/pc/diskboot.S（加载到 0x8000）
+     - `startup_raw.S`：grub/grub-core/boot/i386/pc/startup_raw.S（加载到 0x8200）
+     - C代码：grub/grub-core/kern/main.c 等（加载到 0x9000）
 
 > **详细说明**：关于实模式地址与物理内存的映射关系，请参见 [X86 CPU 运行模式详解](X86_CPU_MODES.md)。
 

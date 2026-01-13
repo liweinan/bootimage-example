@@ -1244,10 +1244,15 @@ save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
 启动时（diskboot.S）：
 1. 读取块列表（从 0x8000 的末尾）
 2. 根据块列表，读取所有片段：
-   - 读取扇区 2048-2055（已加载）
-   - 读取扇区 2056-2071（startup_raw.S）→ 加载到 0x8200
-   - 读取扇区 2072-2103（C 代码）→ 加载到 0x9000
+   - 读取扇区 2048-2055（8个扇区 = 4KB，已加载到 0x8000，包含 diskboot.S + 块列表）
+   - 读取扇区 2056-2071（16个扇区 = 8KB，startup_raw.S）→ 加载到 0x8200
+   - 读取扇区 2072-2103（32个扇区 = 16KB，C 代码）→ 加载到 0x9000
    - ...
+   **总大小**：4KB + 8KB + 16KB = 28KB（此示例，实际大小取决于 GRUB 配置）
+   **对应文件**：
+   - `diskboot.S`：grub/grub-core/boot/i386/pc/diskboot.S（第一个512字节在0x8000）
+   - `startup_raw.S`：grub/grub-core/boot/i386/pc/startup_raw.S（加载到0x8200）
+   - C代码：grub/grub-core/kern/main.c 等（加载到0x9000）
 3. 所有片段加载完成后，跳转到 0x8200（startup_raw.S 入口）
 ```
 
