@@ -1019,6 +1019,11 @@ LOCAL(kernel_address):
 
 LOCAL(kernel_sector):
     .long   1               // GRUB Core 第一个扇区号（LBA，由 grub-install 写入）
+                            // **初始值说明：**
+                            // - 编译时默认值为 1，表示第二个扇区（扇区 0 是 boot.S 自己）
+                            // - LBA 扇区号从 0 开始：扇区 0 = 第一个扇区，扇区 1 = 第二个扇区
+                            // - 这个初始值只是占位符，实际安装时会被 grub-install 覆盖
+                            // - grub-install 会将 GRUB Core 的实际扇区号（例如 2048）写入此字段
                             // **关键：这是 boot.S 如何知道 GRUB Core 位置的机制**
                             // 1. grub-install 安装时，将 GRUB Core 写入磁盘的特定扇区
                             // 2. grub-install 记录这个扇区号，写入 boot.S 的 kernel_sector 字段
@@ -1045,14 +1050,20 @@ boot.S 并不直接知道 startup_raw.S 的位置，而是通过**间接的两�
 **阶段 1：boot.S 读取 GRUB Core 第一个扇区**
 
 1. **kernel_sector 字段**：
-   - boot.S 中有一个 `kernel_sector` 字段（第 891-892 行），存储了 GRUB Core 第一个扇区的 LBA 扇区号
+   - boot.S 中有一个 `kernel_sector` 字段（第 191 行），存储了 GRUB Core 第一个扇区的 LBA 扇区号
+   - **初始值说明**：
+     - 编译时默认值为 `1`，表示第二个扇区（因为扇区 0 是 boot.S 自己）
+     - LBA 扇区号从 0 开始计数：扇区 0 = 第一个扇区（512 字节），扇区 1 = 第二个扇区（512 字节）
+     - 这个初始值只是占位符，实际安装时会被 `grub-install` 覆盖为 GRUB Core 的真实位置
    - 这个值在安装时由 `grub-install` 写入：
      ```
      grub-install 安装流程：
      1. 编译 GRUB Core 镜像（core.img）
-     2. 将 core.img 写入磁盘的特定扇区（例如扇区 2048）
+     2. 将 core.img 写入磁盘的特定扇区（例如扇区 2048，而不是扇区 1）
+        - 为什么不是扇区 1？因为扇区 1 通常被分区表或其他数据占用
+        - GRUB Core 通常放在分区开始之后的安全区域（例如扇区 2048）
      3. 记录这个扇区号（2048）
-     4. 将扇区号写入 boot.S 的 kernel_sector 字段
+     4. 将扇区号写入 boot.S 的 kernel_sector 字段（覆盖默认值 1）
      5. 将修改后的 boot.S 写入磁盘第一个扇区（MBR）
      ```
 
