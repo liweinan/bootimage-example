@@ -758,11 +758,14 @@ _start:
 start:
     // GRUB 引导扇区从 0x7C00 开始执行
     // BIOS 跳转到这里时：CS:IP = 0:0x7C00
+    // **重要：此时 DL 寄存器包含驱动器号（BIOS 传递的）**
+    // DL = 0x00（软盘）或 0x80（第一块硬盘）等
     
     // 步骤 1: 关闭中断，设置段寄存器
     cli                     // 关闭中断（此时还不安全）
     
     // 修复某些 BIOS 的 bug：如果 DL 寄存器值不正确，设置为 0x80（第一个硬盘）
+    // **注意：这里访问 DL 寄存器，说明引导扇区程序知道驱动器号**
     testb   $0x80, %dl      // 检查是否是硬盘（0x80-0x8F）
     jz      2f
     testb   $0x70, %dl      // 忽略无效的驱动器号
@@ -782,16 +785,18 @@ real_start:
     sti                     // 重新启用中断
     
     // 步骤 3: 保存启动驱动器号
-    pushw   %dx             // 保存 DL（驱动器号）
+    // **关键：保存 DL 寄存器中的驱动器号，后续读取 GRUB Core 时需要用到**
+    pushw   %dx             // 保存 DL（驱动器号）到栈
     
     // 步骤 4: 显示 "GRUB " 消息
     MSG(notification_string)  // 调用消息打印函数
     
     // 步骤 5: 检测是否支持 LBA 模式
+    // **注意：此时 DL 寄存器仍包含 BIOS 传递的驱动器号（pushw %dx 只是保存到栈，不改变 DL）**
     movw    $disk_address_packet, %si  // 设置磁盘地址包指针
     movb    $0x41, %ah      // INT 13h 功能 0x41：检查扩展磁盘访问
     movw    $0x55aa, %bx    // 签名
-    int     $0x13           // 调用 BIOS
+    int     $0x13           // **使用 DL 中的驱动器号检测 LBA 支持**
     
     jc      LOCAL(chs_mode)  // 如果失败，使用 CHS 模式
     cmpw    $0xaa55, %bx    // 验证签名
@@ -811,8 +816,9 @@ LOCAL(lba_mode):
     movl    %ebx, 12(%si)                   // 写入 DAP
     
     // 调用 INT 13h 扩展读（AH=0x42）
+    // **注意：此时 DL 寄存器仍包含驱动器号（之前保存的）**
     movb    $0x42, %ah      // INT 13h 功能 0x42：扩展读
-    int     $0x13           // 读取扇区到 0x7000:0x0000
+    int     $0x13           // **使用 DL 中的驱动器号读取扇区到 0x7000:0x0000**
     
     jc      LOCAL(chs_mode)  // 如果失败，回退到 CHS 模式
     movw    $GRUB_BOOT_MACHINE_BUFFER_SEG, %bx
@@ -847,12 +853,12 @@ LOCAL(final_init):
     movb    %dl, %dh        // 磁头号
     
     // 调用 INT 13h 标准读（AH=0x02）
-    popw    %dx             // 恢复驱动器号
+    popw    %dx             // **恢复驱动器号到 DL，用于 INT 13h 读取**
     movw    $GRUB_BOOT_MACHINE_BUFFER_SEG, %bx
     movw    %bx, %es        // 设置目标段
     xorw    %bx, %bx        // 偏移 = 0
     movw    $0x0201, %ax    // 功能 0x02，读取 1 个扇区
-    int     $0x13           // 读取到 0x7000:0x0000
+    int     $0x13           // **使用 DL 中的驱动器号读取扇区到 0x7000:0x0000**
     
     jc      LOCAL(read_error)
     movw    %es, %bx
@@ -906,10 +912,18 @@ SeaBIOS 读取 MBR 到 0x7C00
     ├─ 读取方式：INT 13h磁盘服务
     └─ 内存拷贝：从磁盘拷贝512字节到内存0x7C00（不是映射，是真正的拷贝）
     ↓
+BIOS 跳转到 0x7C00，传递驱动器号
+    ├─ DL 寄存器 = 驱动器号（0x00 软盘，0x80 硬盘等）
+    └─ 这是引导扇区程序知道从哪个设备读取的关键信息
+    ↓
 GRUB 引导扇区代码开始执行（0x7C00）
+    ├─ 从 DL 寄存器读取驱动器号（BIOS 传递的）
+    ├─ 保存驱动器号到栈（pushw %dx）
     ├─ 初始化段寄存器和栈
     ├─ 检测磁盘访问模式（LBA 或 CHS）
+    │   └─ 使用 DL 中的驱动器号检测 LBA 支持
     ├─ 从 kernel_sector 读取 GRUB Core（512 字节）
+    │   ├─ 使用 DL 中的驱动器号（LBA 模式）或从栈恢复（CHS 模式）
     │   └─ 先读到临时缓冲区 0x7000:0x0000
     ├─ 复制到最终地址 0x0000:0x8000
     └─ 跳转到 0x8000（GRUB Core 入口点）
@@ -1262,6 +1276,92 @@ grub_relocator32_boot()
 ### 引导扇区程序概述
 
 引导扇区（Boot Sector）是存储在磁盘第一个扇区（512 字节）的特殊程序。BIOS 完成初始化后，会调用 INT 19h 服务加载并执行引导扇区程序。本节通过一个最小化的引导扇区程序，详细说明 QEMU 和 SeaBIOS 如何协作完成引导过程。
+
+### BIOS 如何传递驱动器号给引导扇区程序
+
+**关键点：引导扇区程序需要知道自己是哪个存储设备加载的，以便读取剩余的代码。**
+
+BIOS 在跳转到引导扇区时，会将驱动器号保存在 **DL 寄存器**中，这是 x86 BIOS 引导协议的标准约定。
+
+**SeaBIOS 源代码证据：**
+
+```c
+// SeaBIOS 源代码：src/boot.c:boot_disk()
+static void
+boot_disk(u8 bootdrv, int checksig)
+{
+    // ... 读取引导扇区到 0x7C00 ...
+    
+    // 跳转到引导扇区程序执行
+    call_boot_entry(SEGOFF(bootseg, bootip), bootdrv);
+    //                                                      ↑
+    //                                            传递驱动器号
+}
+
+// SeaBIOS 源代码：src/boot.c:call_boot_entry()
+static void
+call_boot_entry(struct segoff_s bootsegip, u8 bootdrv)
+{
+    struct bregs br;
+    memset(&br, 0, sizeof(br));
+    br.flags = F_IF;
+    br.code = bootsegip;
+    br.dl = bootdrv;  // ← 关键：将驱动器号设置到 DL 寄存器
+    br.ax = 0xaa55;    // 魔数（可选）
+    farcall16(&br);    // 远跳转到引导扇区，DL 寄存器包含驱动器号
+}
+```
+
+**驱动器号约定：**
+
+| DL 值 | 存储设备类型 |
+|-------|------------|
+| `0x00` | 软盘（Floppy） |
+| `0x80` | 第一块硬盘 |
+| `0x81` | 第二块硬盘 |
+| `0x82` | 第三块硬盘 |
+| ... | ... |
+
+**引导扇区程序如何使用驱动器号：**
+
+引导扇区程序（如 GRUB）在开始执行时，会从 DL 寄存器读取驱动器号，并保存起来，用于后续读取剩余的代码：
+
+```asm
+// GRUB 引导扇区代码：grub/grub-core/boot/i386/pc/boot.S
+_start:
+    // BIOS 跳转到这里时，DL 寄存器包含驱动器号
+    // 例如：DL = 0x80（第一块硬盘）
+    
+    // 步骤 1: 保存启动驱动器号
+    pushw   %dx             // 保存 DL（驱动器号）到栈
+    
+    // ... 后续代码 ...
+    
+    // 步骤 2: 使用保存的驱动器号读取 GRUB Core
+    popw    %dx             // 恢复驱动器号到 DL
+    movb    $0x42, %ah      // INT 13h 功能 0x42：扩展读
+    int     $0x13           // 使用 DL 中的驱动器号读取扇区
+```
+
+**为什么需要驱动器号？**
+
+1. **读取剩余代码**：引导扇区只有 512 字节，需要从同一个存储设备读取剩余的代码（如 GRUB Core）
+2. **多设备支持**：系统可能有多个存储设备（硬盘、USB、软盘等），需要知道从哪个设备读取
+3. **BIOS 协议约定**：这是 x86 BIOS 引导协议的标准约定，所有引导扇区程序都依赖这个约定
+
+**完整流程：**
+
+```
+BIOS 读取引导扇区到 0x7C00
+    ↓
+BIOS 跳转到 0x7C00，DL = 驱动器号（如 0x80）
+    ↓
+引导扇区程序开始执行
+    ├─ 从 DL 寄存器读取驱动器号
+    ├─ 保存驱动器号（pushw %dx）
+    ├─ 使用驱动器号读取剩余的代码（INT 13h, DL = 驱动器号）
+    └─ 继续引导流程
+```
 
 ### 最小引导扇区程序代码
 
@@ -1760,11 +1860,14 @@ boot_disk() 读取引导扇区
     ├─ 调用 INT 13h（AH=0x02）读取第一个扇区
     ├─ 加载到内存地址 0x7C00（段:偏移 = 0x07C0:0x0000）
     ├─ 验证引导扇区签名（0xAA55）
-    └─ 跳转到 0x0000:0x7C00 执行
+    └─ 跳转到 0x0000:0x7C00 执行，DL = 驱动器号（0x00 或 0x80 等）
     ↓
 引导扇区程序执行（boot.asm 或 GRUB boot.S）
+    ├─ **从 DL 寄存器读取驱动器号**（BIOS 传递的）
+    ├─ 保存驱动器号（pushw %dx）
     ├─ 设置显示模式（INT 10h, AH=0x00, AL=0x03）
     ├─ 加载 GRUB Core（如果使用 GRUB）
+    │   └─ **使用保存的驱动器号读取剩余代码**（INT 13h）
     └─ 跳转到 GRUB Core 或操作系统加载器
     ↓
 GRUB Core 执行（如果使用 GRUB）
