@@ -889,9 +889,14 @@ LOCAL(kernel_address):
     .word   GRUB_BOOT_MACHINE_KERNEL_ADDR  // 0x8000：GRUB Core 加载地址
 
 LOCAL(kernel_sector):
-    .long   1               // GRUB Core 所在的扇区号（由 grub-setup 写入）
+    .long   1               // GRUB Core 第一个扇区号（LBA，由 grub-install 写入）
+                            // **关键：这是 boot.S 如何知道 GRUB Core 位置的机制**
+                            // 1. grub-install 安装时，将 GRUB Core 写入磁盘的特定扇区
+                            // 2. grub-install 记录这个扇区号，写入 boot.S 的 kernel_sector 字段
+                            // 3. boot.S 读取这个字段，知道从哪个扇区读取 GRUB Core 的第一个扇区
+                            // 4. 第一个扇区包含 diskboot.S 和块列表，块列表记录了完整的 GRUB Core 位置
 LOCAL(kernel_sector_high):
-    .long   0               // 高 32 位扇区号（用于大磁盘）
+    .long   0               // 高 32 位扇区号（用于大磁盘，支持超过 2TB 的磁盘）
 
 notification_string:
     .asciz "GRUB "          // 启动时显示的消息
@@ -902,7 +907,91 @@ notification_string:
 - **`GRUB_BOOT_MACHINE_KERNEL_ADDR`**：`0x8000` - GRUB Core 加载地址
 - **`GRUB_BOOT_MACHINE_BUFFER_SEG`**：`0x7000` - 临时缓冲区段（读取扇区时使用）
 - **`GRUB_BOOT_MACHINE_STACK_SEG`**：`0x2000` - 栈段地址
-- **`kernel_sector`**：GRUB Core 所在的扇区号（由 `grub-setup` 在安装时写入）
+- **`kernel_sector`**：GRUB Core 第一个扇区号（由 `grub-install` 在安装时写入）
+
+**boot.S 如何知道 startup.S 在磁盘上的位置？**
+
+boot.S 并不直接知道 startup.S 的位置，而是通过**间接的两阶段机制**：
+
+**阶段 1：boot.S 读取 GRUB Core 第一个扇区**
+
+1. **kernel_sector 字段**：
+   - boot.S 中有一个 `kernel_sector` 字段（第 891-892 行），存储了 GRUB Core 第一个扇区的 LBA 扇区号
+   - 这个值在安装时由 `grub-install` 写入：
+     ```
+     grub-install 安装流程：
+     1. 编译 GRUB Core 镜像（core.img）
+     2. 将 core.img 写入磁盘的特定扇区（例如扇区 2048）
+     3. 记录这个扇区号（2048）
+     4. 将扇区号写入 boot.S 的 kernel_sector 字段
+     5. 将修改后的 boot.S 写入磁盘第一个扇区（MBR）
+     ```
+
+2. **boot.S 读取第一个扇区**：
+   - boot.S 从 `kernel_sector` 字段读取扇区号（第 813-816 行）
+   - 使用 INT 13h 读取这个扇区的 512 字节到内存 `0x8000`
+   - 这 512 字节包含：
+     - `diskboot.S` 代码（约 400 字节）
+     - 块列表数据（12 字节，在末尾）
+
+**阶段 2：diskboot.S 使用块列表加载完整的 GRUB Core**
+
+1. **块列表机制**：
+   - 第一个扇区的末尾包含块列表（blocklist）
+   - 块列表记录了 GRUB Core 镜像所有片段的物理扇区位置
+   - 包括 startup.S、C 代码、模块等所有组件的位置
+
+2. **diskboot.S 加载流程**：
+   ```
+   diskboot.S 执行流程：
+   1. 读取块列表（从第一个扇区的末尾）
+   2. 循环处理每个块列表条目：
+      - 读取条目指定的扇区（使用 INT 13h）
+      - 复制到目标内存地址（由 segment 字段指定）
+   3. 所有扇区加载完成后，跳转到 0x8200（startup.S 入口点）
+   ```
+
+3. **startup.S 的位置**：
+   - startup.S 的位置记录在块列表中
+   - 块列表由 `grub-install` 在安装时生成，记录了 core.img 所有片段的物理位置
+   - diskboot.S 根据块列表加载 startup.S 到内存 `0x8200`
+
+**完整定位流程：**
+
+```
+安装时（grub-install）：
+1. 编译 core.img（包含 startup.S、C 代码等）
+2. 将 core.img 写入磁盘（例如扇区 2048-4096）
+3. 生成块列表，记录所有片段的物理位置：
+   - 片段1：扇区 2048-2055（diskboot.S + 块列表）
+   - 片段2：扇区 2056-2071（startup.S 代码）
+   - 片段3：扇区 2072-2103（C 代码）
+   - ...
+4. 将块列表写入第一个扇区的末尾
+5. 将第一个扇区号（2048）写入 boot.S 的 kernel_sector 字段
+6. 将 boot.S 写入磁盘第一个扇区（MBR）
+
+启动时（boot.S）：
+1. 从 kernel_sector 字段读取扇区号（2048）
+2. 读取扇区 2048 的 512 字节到 0x8000（包含 diskboot.S 和块列表）
+3. 跳转到 0x8000（diskboot.S 入口）
+
+启动时（diskboot.S）：
+1. 读取块列表（从 0x8000 的末尾）
+2. 根据块列表，读取所有片段：
+   - 读取扇区 2048-2055（已加载）
+   - 读取扇区 2056-2071（startup.S）→ 加载到 0x8200
+   - 读取扇区 2072-2103（C 代码）→ 加载到 0x9000
+   - ...
+3. 所有片段加载完成后，跳转到 0x8200（startup.S 入口）
+```
+
+**关键点总结：**
+
+- **boot.S 只知道第一个扇区的位置**：通过 `kernel_sector` 字段（由 grub-install 写入）
+- **第一个扇区包含块列表**：记录了完整的 GRUB Core 位置（包括 startup.S）
+- **diskboot.S 使用块列表**：加载完整的 GRUB Core，包括 startup.S
+- **这是两阶段机制**：boot.S → diskboot.S → startup.S，每个阶段知道下一阶段的位置
 
 **GRUB 引导扇区的工作流程：**
 
@@ -1037,6 +1126,82 @@ struct grub_pc_bios_boot_blocklist
     grub_uint16_t segment;  // 目标内存段地址（2 字节）
 } GRUB_PACKED;
 ```
+
+**块列表中读取的扇区对应什么数据？**
+
+块列表中的 `start` 和 `len` 字段指定的扇区，是 **GRUB Core 镜像在磁盘上的物理位置**。这些扇区包含的是：
+
+1. **GRUB Core 二进制镜像的片段**：
+   - GRUB Core 不是单个源文件，而是一个编译后的二进制镜像
+   - 镜像包含多个组件：
+     - `startup.S` / `startup_raw.S`：实模式入口代码（从 `0x8200` 开始）
+     - C 代码：`grub_main()` 等核心函数
+     - 模块：文件系统驱动、磁盘驱动等
+     - 数据段：配置、符号表等
+
+2. **磁盘上的存储位置**：
+   - GRUB Core 镜像通常存储在 `/boot/grub/i386-pc/core.img` 文件中
+   - 安装时，`grub-install` 将 `core.img` 写入磁盘的特定扇区
+   - 由于文件系统碎片，镜像可能分散在多个不连续的扇区中
+   - 块列表记录了每个片段的物理扇区位置（LBA 地址）
+
+3. **块列表条目的含义**：
+   ```
+   块列表条目示例：
+   start = 2048（LBA 扇区号）
+   len = 16（读取 16 个扇区 = 8KB）
+   segment = 0x0820（目标内存段，物理地址 = 0x8200）
+   
+   含义：
+   - 从磁盘 LBA 扇区 2048 开始，读取 16 个扇区（8KB）
+   - 这些扇区包含 GRUB Core 镜像的一部分（可能是 startup.S 代码）
+   - 读取后复制到内存地址 0x8200
+   ```
+
+4. **为什么需要多个块列表条目？**
+   - **文件系统碎片**：GRUB Core 镜像可能分散在磁盘的不同位置
+   - **分段加载**：每个块列表条目对应镜像的一个连续片段
+   - **内存布局**：不同片段可能加载到不同的内存地址（由 `segment` 字段指定）
+
+5. **块列表的生成过程**：
+   ```
+   grub-install 安装流程：
+   1. 编译 GRUB Core 镜像（core.img）
+   2. 将 core.img 写入磁盘（可能分散在多个扇区）
+   3. 记录每个片段的物理扇区位置（LBA）
+   4. 生成块列表，写入第一个 512 字节的末尾
+   5. 块列表由 diskboot.S 读取，用于加载完整的 GRUB Core
+   ```
+
+6. **实际示例**：
+   ```
+   假设 GRUB Core 镜像分散在磁盘上：
+   
+   块列表条目 1：
+   start = 2048, len = 8, segment = 0x0820
+   → 读取磁盘扇区 2048-2055（4KB），加载到内存 0x8200
+   → 包含：startup.S 代码
+   
+   块列表条目 2：
+   start = 4096, len = 32, segment = 0x0900
+   → 读取磁盘扇区 4096-4127（16KB），加载到内存 0x9000
+   → 包含：C 代码（grub_main 等）
+   
+   块列表条目 3：
+   start = 8192, len = 16, segment = 0x0A00
+   → 读取磁盘扇区 8192-8207（8KB），加载到内存 0xA000
+   → 包含：文件系统驱动模块
+   
+   块列表条目 4：
+   start = 0, len = 0, segment = 0
+   → 结束标记（len = 0 表示块列表结束）
+   ```
+
+**关键点总结：**
+- 块列表中的扇区是 **GRUB Core 镜像的物理存储位置**，不是源文件
+- 这些扇区包含编译后的二进制代码和数据
+- 由于文件系统碎片，镜像可能分散在多个不连续的扇区中
+- 块列表记录了每个片段的物理位置，允许分段加载完整的 GRUB Core
 
 **完整加载流程：**
 
