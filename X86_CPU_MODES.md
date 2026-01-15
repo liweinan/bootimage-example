@@ -682,9 +682,7 @@ flowchart TB
 
    > **关于"4GB顶部"的详细解释，请参见 [BIOS_MEMORY_LAYOUT.md - 为什么 BIOS 存储在 4GB 地址空间顶部？](BIOS_MEMORY_LAYOUT.md#问题-2为什么-bios-存储在-4gb-地址空间顶部)**
 
----## 相关文档
-
-- [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)
+---## 相关文档- [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)
 - [BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)
 - [Linux 用户空间内存模型详解](LINUX_USERSPACE_MEMORY.md) - Linux 用户空间的内存模型和汇编内存访问
 - [BIOS 中断处理完整指南](BIOS_INTERRUPT_COMPLETE.md)
