@@ -290,7 +290,7 @@
            direction TB
            
            subgraph Low640KB["0x000000 - 0x09FFFF (640KB)"]
-               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载，包含GRUB引导扇区代码<br/>- GRUB Core (0x8000-0xCFFF, 约20KB，示例)<br/>  └─ diskboot.S (0x8000-0x81FF, 512B)<br/>  └─ startup_raw.S (0x8200-0x8FFF, 约3.5KB)<br/>  └─ C代码 (0x9000-0xCFFF, 约16KB)<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 负责加载Linux内核<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
+               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载，包含GRUB引导扇区代码<br/>- GRUB Core 压缩状态 (0x8000-0xCFFF, 约20-32KB)<br/>  └─ diskboot.S (0x8000-0x81FF, 512B)<br/>  └─ startup_raw.S (0x8200-0x8FFF, 约3.5KB)<br/>  └─ C代码压缩 (0x9000-0xCFFF, LZMA压缩)<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 实模式加载，压缩状态<br/>  └─ 由 startup_raw.S 解压到 0x100000<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
            end
            
            subgraph VGARAM["0x0A0000 - 0x0BFFFF (128KB)"]
@@ -307,6 +307,9 @@
            
            subgraph Above1MB["0x100000 - 0xFFFFFFFF (前4GB RAM)"]
                RAM4GB["超过1MB的RAM<br/>保护模式可访问<br/>真正的物理RAM"]
+               GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>0x100000+ (1MB+)<br/>约 20KB - 50KB（解压后）<br/>保护模式可访问<br/>由 startup_raw.S 解压"]
+               KernelLoad["Linux 内核镜像（压缩）<br/>0x100000 (1MB)<br/>由 GRUB 加载<br/>会覆盖解压后的 GRUB Core"]
+               KernelDecomp["Linux 内核解压后<br/>0x1000000+ (16MB+)<br/>由内核 setup 代码解压"]
            end
            
            subgraph Above4GB["0x100000000 - ... (超过4GB的RAM)"]
@@ -330,6 +333,9 @@
        style BIOSMapped fill:#ffcccc
        style Above1MB fill:#ccccff
        style RAM4GB fill:#ccccff
+       style GRUBDecomp fill:#ccffcc
+       style KernelLoad fill:#ffffcc
+       style KernelDecomp fill:#ffcccc
        style Above4GB fill:#ccccff
        style RAM8GB fill:#ccccff
        style BIOSROM fill:#ffcccc
@@ -391,9 +397,9 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
      - 然后复制到最终地址 `0x8000`
      - diskboot.S 根据块列表加载剩余部分到不同地址（0x8200, 0x9000 等）
 
-   **阶段 2：解压后的 GRUB Core（保护模式，如果使用 LZMA 压缩）或未压缩的 GRUB Core（如果未压缩）**
+   **阶段 2：解压后的 GRUB Core（保护模式，默认使用 LZMA 压缩）**
 
-   **情况 1：使用 LZMA 压缩**
+   **默认情况：使用 LZMA 压缩**
    - **解压位置**：`GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000`（1MB）
    - **内存范围**：`0x100000+`（解压后，约 20KB - 50KB，取决于 GRUB 配置）
    - **解压时机**：`startup_raw.S` 切换到保护模式后
@@ -404,7 +410,9 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
      - **解压时机**：在 `startup_raw.S` 中，**此时还没有加载任何模块**
      - **模块加载**：模块是在 `grub_main()` 之后才动态加载的，不在解压流程中
 
-   **情况 2：不使用 LZMA 压缩**
+   **特殊情况：不使用 LZMA 压缩（仅在编译时禁用或系统不支持时）**
+
+   > **注意**：这是特殊情况，默认情况下 GRUB 使用 LZMA 压缩。
    - **代码位置**：直接在前 1MB 中（`0x8000+`），未压缩
    - **内存范围**：`0x8000+`（未压缩，约 20KB - 100KB 或更大，取决于 GRUB 配置）
    - **处理方式**：不需要解压，代码已经在正确的位置
@@ -413,14 +421,15 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
      - **不需要解压**：代码未压缩，直接在前 1MB 中
      - **代码位置**：`0x8000+`（前 1MB），与压缩状态的加载位置相同
      - **模块加载**：模块是在 `grub_main()` 之后才动态加载的
-   - **使用场景**：
+   - **使用场景**（特殊情况）：
      - **编译时禁用 LZMA**：使用 `--disable-liblzma` 配置选项
      - **系统没有 LZMA 库**：如果编译时检测不到 LZMA 库
      - **嵌入式系统**：某些嵌入式系统可能不使用压缩
      - **调试目的**：开发时可能禁用压缩以便调试
    - **限制**：
      - **前 1MB 空间有限**：如果 GRUB Core 很大（> 100KB），前 1MB 可能不够用
-     - **因此，默认情况下 GRUB 使用 LZMA 压缩**，以减小 core.img 的大小并避免前 1MB 空间不足
+     - **✅ 因此，默认情况下 GRUB 使用 LZMA 压缩**，以减小 core.img 的大小并避免前 1MB 空间不足
+     - **实际部署中几乎总是使用压缩**，未压缩情况仅用于特殊场景（调试、嵌入式系统等）
 
    **Linux 内核加载和解压位置**：
    - **GRUB 加载地址**：`0x100000`（1MB）
