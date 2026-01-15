@@ -111,8 +111,94 @@ echo "末尾 16 字节（可能包含块列表）:"
 hexdump -C core_img_first_sector.bin | tail -2
 echo ""
 
+# 分析 core.img 的完整大小
+echo "8. 分析 core.img 的完整大小"
+echo "----------------------------------------"
+
+# 方法1: 从块列表计算总大小
+BLOCKLIST_START=0x1F4  # 500 字节
+BLOCKLIST_ENTRY_SIZE=12
+
+TOTAL_SECTORS=0
+ENTRY_COUNT=0
+
+# 读取块列表条目
+for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
+    OFFSET=$((BLOCKLIST_START - (i * BLOCKLIST_ENTRY_SIZE)))
+    if [ $OFFSET -lt 0 ]; then
+        break
+    fi
+    
+    # 读取块列表条目（12 字节）
+    ENTRY_DATA=$(dd if=core_img_first_sector.bin bs=1 skip=$OFFSET count=12 2>/dev/null | od -An -tu1 -v)
+    
+    # 解析字段（小端序）
+    # start 低 32 位 (0-3), start 高 32 位 (4-7), len (8-9), segment (10-11)
+    START_LOW_B0=$(echo $ENTRY_DATA | awk '{print $1}')
+    START_LOW_B1=$(echo $ENTRY_DATA | awk '{print $2}')
+    START_LOW_B2=$(echo $ENTRY_DATA | awk '{print $3}')
+    START_LOW_B3=$(echo $ENTRY_DATA | awk '{print $4}')
+    START_LOW=$((START_LOW_B0 + (START_LOW_B1 * 256) + (START_LOW_B2 * 65536) + (START_LOW_B3 * 16777216)))
+    
+    LEN_B0=$(echo $ENTRY_DATA | awk '{print $9}')
+    LEN_B1=$(echo $ENTRY_DATA | awk '{print $10}')
+    LEN=$((LEN_B0 + (LEN_B1 * 256)))
+    
+    if [ "$LEN" -eq 0 ]; then
+        echo "  条目 $i: len=0 (结束标记)"
+        break
+    fi
+    
+    TOTAL_SECTORS=$((TOTAL_SECTORS + LEN))
+    ENTRY_COUNT=$((ENTRY_COUNT + 1))
+    
+    SEG_B0=$(echo $ENTRY_DATA | awk '{print $11}')
+    SEG_B1=$(echo $ENTRY_DATA | awk '{print $12}')
+    SEG=$((SEG_B0 + (SEG_B1 * 256)))
+    
+    echo "  条目 $i: start=$START_LOW, len=$LEN 扇区, segment=0x$(printf '%04x' $SEG)"
+done
+
+if [ "$TOTAL_SECTORS" -gt 0 ]; then
+    TOTAL_BYTES=$((TOTAL_SECTORS * 512))
+    TOTAL_KB=$((TOTAL_BYTES * 10 / 1024))
+    TOTAL_KB_INT=$((TOTAL_KB / 10))
+    TOTAL_KB_FRAC=$((TOTAL_KB % 10))
+    TOTAL_MB=$((TOTAL_BYTES * 100 / 1048576))
+    TOTAL_MB_INT=$((TOTAL_MB / 100))
+    TOTAL_MB_FRAC=$((TOTAL_MB % 100))
+    
+    echo ""
+    echo "core.img 完整大小:"
+    echo "  - 扇区数: $TOTAL_SECTORS"
+    echo "  - 字节数: $TOTAL_BYTES 字节"
+    echo "  - 大小: ${TOTAL_KB_INT}.${TOTAL_KB_FRAC} KB (${TOTAL_MB_INT}.${TOTAL_MB_FRAC} MB)"
+    echo "  - 块列表条目数: $ENTRY_COUNT"
+    
+    # 提取完整的 core.img
+    echo ""
+    echo "9. 提取完整的 core.img"
+    echo "----------------------------------------"
+    dd if="$ISO_FILE" bs=512 skip=$KERNEL_SECTOR count=$TOTAL_SECTORS 2>/dev/null > core_img_full.bin
+    FULL_SIZE=$(stat -f%z core_img_full.bin 2>/dev/null || stat -c%s core_img_full.bin 2>/dev/null)
+    FULL_KB=$((FULL_SIZE * 10 / 1024))
+    FULL_KB_INT=$((FULL_KB / 10))
+    FULL_KB_FRAC=$((FULL_KB % 10))
+    echo "已提取完整的 core.img: core_img_full.bin"
+    echo "文件大小: $FULL_SIZE 字节 (${FULL_KB_INT}.${FULL_KB_FRAC} KB)"
+    echo ""
+else
+    echo "⚠️  无法从块列表确定 core.img 大小"
+    echo "  尝试提取较大的区域进行分析..."
+    # 提取前 128 个扇区作为样本
+    dd if="$ISO_FILE" bs=512 skip=$KERNEL_SECTOR count=128 2>/dev/null > core_img_sample.bin
+    SAMPLE_SIZE=$(stat -f%z core_img_sample.bin 2>/dev/null || stat -c%s core_img_sample.bin 2>/dev/null)
+    echo "  已提取样本: core_img_sample.bin ($SAMPLE_SIZE 字节)"
+    echo ""
+fi
+
 # 查找 GRUB 特征字符串
-echo "8. 查找 GRUB 特征字符串"
+echo "10. 查找 GRUB 特征字符串"
 echo "----------------------------------------"
 if strings core_img_first_sector.bin | grep -q "loading\|Geom\|Read\|Error"; then
     echo "✅ 找到 GRUB 特征字符串:"
@@ -123,16 +209,28 @@ fi
 echo ""
 
 # 提取更多 core.img 数据用于压缩检测
-echo "9. 提取 core.img 的前 64KB（用于压缩检测）"
+echo "11. 提取 core.img 数据（用于压缩检测）"
 echo "----------------------------------------"
-CORE_IMG_FILE="core_img_sample.bin"
-dd if="$ISO_FILE" bs=512 skip=$KERNEL_SECTOR count=128 2>/dev/null > "$CORE_IMG_FILE"
-CORE_SIZE=$(stat -f%z "$CORE_IMG_FILE" 2>/dev/null || stat -c%s "$CORE_IMG_FILE" 2>/dev/null)
-echo "提取了 $CORE_SIZE 字节的 core.img 数据"
+# 使用完整的 core.img 或样本
+if [ -f "core_img_full.bin" ]; then
+    CORE_IMG_FILE="core_img_full.bin"
+    CORE_SIZE=$(stat -f%z "$CORE_IMG_FILE" 2>/dev/null || stat -c%s "$CORE_IMG_FILE" 2>/dev/null)
+    CORE_KB=$((CORE_SIZE * 10 / 1024))
+    CORE_KB_INT=$((CORE_KB / 10))
+    CORE_KB_FRAC=$((CORE_KB % 10))
+    echo "使用完整的 core.img: $CORE_SIZE 字节 (${CORE_KB_INT}.${CORE_KB_FRAC} KB)"
+else
+    CORE_IMG_FILE="core_img_sample.bin"
+    CORE_SIZE=$(stat -f%z "$CORE_IMG_FILE" 2>/dev/null || stat -c%s "$CORE_IMG_FILE" 2>/dev/null)
+    CORE_KB=$((CORE_SIZE * 10 / 1024))
+    CORE_KB_INT=$((CORE_KB / 10))
+    CORE_KB_FRAC=$((CORE_KB % 10))
+    echo "使用 core.img 样本: $CORE_SIZE 字节 (${CORE_KB_INT}.${CORE_KB_FRAC} KB)"
+fi
 echo ""
 
 # 检测压缩状态
-echo "10. 检测 core.img 压缩状态"
+echo "12. 检测 core.img 压缩状态"
 echo "----------------------------------------"
 
 # 方法1: 查找 LZMA 相关的函数调用或字符串
@@ -147,7 +245,7 @@ fi
 echo ""
 
 # 方法2: 检查数据特征（压缩数据通常熵值较高）
-echo "11. 分析数据特征（压缩检测）"
+echo "13. 分析数据特征（压缩检测）"
 echo "----------------------------------------"
 
 # 计算数据的熵值（简单方法：检查字节分布的均匀性）
@@ -161,7 +259,7 @@ if [ "$CORE_SIZE" -ge 2048 ]; then
     dd if="$CORE_IMG_FILE" bs=512 skip=1 count=4 2>/dev/null > core_img_startup_raw.bin
     
     # 计算数据特征
-    TOTAL_BYTES=$(stat -f%z core_img_startup_raw.bin 2>/dev/null || stat -c%s core_img_startup_raw.bin 2>/dev/null)
+    STARTUP_RAW_BYTES=$(stat -f%z core_img_startup_raw.bin 2>/dev/null || stat -c%s core_img_startup_raw.bin 2>/dev/null)
     
     # 统计 NOP (0x90) 字节数量
     NOP_COUNT=$(od -An -tx1 core_img_startup_raw.bin | tr -d '\n ' | grep -o '90' | wc -l | tr -d ' ')
@@ -170,14 +268,14 @@ if [ "$CORE_SIZE" -ge 2048 ]; then
     ZERO_COUNT=$(od -An -tx1 core_img_startup_raw.bin | tr -d '\n ' | grep -o '00' | wc -l | tr -d ' ')
     
     # 计算比例（使用 awk 避免依赖 bc）
-    NOP_RATIO=$(awk "BEGIN {printf \"%.1f\", $NOP_COUNT * 100 / $TOTAL_BYTES}")
-    ZERO_RATIO=$(awk "BEGIN {printf \"%.1f\", $ZERO_COUNT * 100 / $TOTAL_BYTES}")
+    NOP_RATIO=$(awk "BEGIN {printf \"%.1f\", $NOP_COUNT * 100 / $STARTUP_RAW_BYTES}")
+    ZERO_RATIO=$(awk "BEGIN {printf \"%.1f\", $ZERO_COUNT * 100 / $STARTUP_RAW_BYTES}")
     
     # 检查是否有可打印字符串（未压缩代码通常有更多字符串）
     PRINTABLE_STRINGS=$(strings -n 3 core_img_startup_raw.bin 2>/dev/null | wc -l | tr -d ' ')
     
-    echo "数据区域分析（startup_raw.S 区域，约 2KB）:"
-    echo "- 总字节数: $TOTAL_BYTES"
+echo "数据区域分析（startup_raw.S 区域，约 2KB）:"
+echo "- 总字节数: $STARTUP_RAW_BYTES"
     echo "- NOP (0x90) 字节数量: $NOP_COUNT (${NOP_RATIO}%)"
     echo "- 零字节 (0x00) 数量: $ZERO_COUNT (${ZERO_RATIO}%)"
     echo "- 可打印字符串数量: $PRINTABLE_STRINGS"
@@ -264,6 +362,15 @@ echo "=========================================="
 echo "引导扇区: $BOOT_SECTOR_FILE (512 字节)"
 echo "kernel_sector: $KERNEL_SECTOR (模式: $MODE)"
 echo "core.img 起始扇区: $KERNEL_SECTOR"
+if [ "$TOTAL_SECTORS" -gt 0 ]; then
+    TOTAL_KB_DISPLAY=$((TOTAL_BYTES * 10 / 1024))
+    TOTAL_KB_INT_DISPLAY=$((TOTAL_KB_DISPLAY / 10))
+    TOTAL_KB_FRAC_DISPLAY=$((TOTAL_KB_DISPLAY % 10))
+    echo "core.img 完整大小: $TOTAL_SECTORS 扇区 = $TOTAL_BYTES 字节 = ${TOTAL_KB_INT_DISPLAY}.${TOTAL_KB_FRAC_DISPLAY} KB"
+    echo "core.img 完整文件: core_img_full.bin"
+else
+    echo "core.img 大小: 无法确定（块列表解析失败）"
+fi
 echo "core.img 第一个扇区: core_img_first_sector.bin"
 echo ""
 echo "说明:"
@@ -271,3 +378,4 @@ echo "- 标准模式: kernel_sector 在偏移 0x5c (92 字节)"
 echo "- HYBRID_BOOT 模式: kernel_sector 在偏移 0x1b0 (432 字节)"
 echo "- ISO 镜像通常使用 HYBRID_BOOT 模式"
 echo "- core.img 不在 ISO 文件系统中，而是嵌入在 ISO 镜像的特定扇区位置"
+echo "- core.img 大小通过块列表计算得出"
