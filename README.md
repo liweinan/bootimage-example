@@ -145,7 +145,7 @@ DISPLAY=:1 make run-gui
 
 ### 启动流程文档
 
-- **[BOOT_FLOW.md](BOOT_FLOW.md)** - 计算机启动流程详解
+- **[BOOT_FLOW.md](BOOT_FLOW.md)** - 计算机启动流程详解（从 QEMU 到 Linux 内核的完整流程）
 - **[BOOT_FLOW_NOTES.md](BOOT_FLOW_NOTES.md)** - 启动流程笔记
 - **[BOOT_FLOW_OPTIMIZATION_ANALYSIS.md](BOOT_FLOW_OPTIMIZATION_ANALYSIS.md)** - 启动流程优化分析
 - **[BOOT_FLOW_QA.md](BOOT_FLOW_QA.md)** - 启动流程问答
@@ -154,6 +154,11 @@ DISPLAY=:1 make run-gui
 - **[DISK_TO_MEMORY_TRANSFER.md](DISK_TO_MEMORY_TRANSFER.md)** - 磁盘数据拷贝到内存的详细过程（PIO/DMA）
 - **[BOOT_SECTOR_ANALYSIS.md](BOOT_SECTOR_ANALYSIS.md)** - 引导扇区代码手工分析指南
 - **[CALL_BOOT_ENTRY_EXPLANATION.md](CALL_BOOT_ENTRY_EXPLANATION.md)** - call_boot_entry 函数详细解释
+
+### GRUB 引导加载程序文档
+
+- **[GRUB_ISO_ANALYSIS.md](GRUB_ISO_ANALYSIS.md)** - GRUB ISO 镜像引导分析（boot.S、core.img 位置、内存布局等）
+- **[GRUB_ISO_BOOT_FILES.md](GRUB_ISO_BOOT_FILES.md)** - GRUB ISO 镜像中哪些文件在 boot 阶段被加载
 
 ### 中断相关文档
 
@@ -197,8 +202,25 @@ DISPLAY=:1 make run-gui
 - **[BIOS_DOCS_OPTIMIZATION_ANALYSIS.md](BIOS_DOCS_OPTIMIZATION_ANALYSIS.md)** - BIOS 文档优化分析
 - **[EXTRACTION_ANALYSIS.md](EXTRACTION_ANALYSIS.md)** - 提取分析文档
 
-### 验证脚本
+### 分析与验证工具
+
+#### BIOS 分析工具
 
 - **[verify_bios.py](verify_bios.py)** - BIOS 验证脚本
 - **[verify_bios_mapping.py](verify_bios_mapping.py)** - BIOS 映射验证脚本
 - **[analyze_bios_structure.py](analyze_bios_structure.py)** - BIOS 结构分析脚本
+- **[verify_bios_structure.py](verify_bios_structure.py)** - BIOS 结构验证脚本（验证 128KB BIOS 中两个 64KB 块的数据分布，分析代码区域和元数据区域）
+
+#### GRUB 分析工具
+
+- **[analyze_grub_boot_sector.sh](analyze_grub_boot_sector.sh)** - GRUB 引导扇区分析工具
+  - 自动检测标准模式和 HYBRID_BOOT 模式
+  - 查找 kernel_sector 字段和 core.img 位置
+  - 检测 core.img 压缩状态（LZMA 压缩 vs 未压缩）
+  - 使用方法：`./analyze_grub_boot_sector.sh grub.iso`
+
+- **[disassemble_core_img.py](disassemble_core_img.py)** - core.img 反汇编分析工具
+  - 反汇编分析 core.img，识别指令模式
+  - 计算数据熵值，判断压缩状态
+  - 分析内存空间需求
+  - 使用方法：`python3 disassemble_core_img.py grub.iso [kernel_sector]`
