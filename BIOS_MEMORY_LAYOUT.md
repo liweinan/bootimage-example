@@ -289,31 +289,31 @@
        subgraph DRAM["物理内存（DRAM芯片）"]
            direction TB
            
-           subgraph Low640KB["0x000000 - 0x09FFFF (640KB)"]
-               LowRAM["常规RAM<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载，包含GRUB引导扇区代码<br/>- GRUB Core 压缩状态 (0x8000-0xCFFF, 约20-32KB)<br/>  └─ diskboot.S (0x8000-0x81FF, 512B)<br/>  └─ startup_raw.S (0x8200-0x8FFF, 约3.5KB)<br/>  └─ C代码压缩 (0x9000-0xCFFF, LZMA压缩)<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 实模式加载，压缩状态<br/>  └─ 由 startup_raw.S 解压到 0x100000<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
+           subgraph Low640KB["常规RAM区域"]
+               LowRAM["0x000000 - 0x09FFFF (640KB)<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载，包含GRUB引导扇区代码<br/>- GRUB Core 压缩状态 (0x8000-0xCFFF, 约20-32KB)<br/>  └─ diskboot.S (0x8000-0x81FF, 512B)<br/>  └─ startup_raw.S (0x8200-0x8FFF, 约3.5KB)<br/>  └─ C代码压缩 (0x9000-0xCFFF, LZMA压缩)<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 实模式加载，压缩状态<br/>  └─ 由 startup_raw.S 解压到 0x100000<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
            end
            
-           subgraph VGARAM["0x0A0000 - 0x0BFFFF (128KB)"]
-               VGAMem["VGA显存<br/>实模式可访问，硬件映射到显卡"]
+           subgraph VGARAM["VGA显存区域"]
+               VGAMem["0x0A0000 - 0x0BFFFF (128KB)<br/>VGA显存<br/>实模式可访问，硬件映射到显卡"]
            end
            
-           subgraph ExtROM["0x0C0000 - 0x0DFFFF (128KB)"]
-               OptionROM["扩展ROM<br/>可选ROM（网卡、显卡等）<br/>实模式可访问，硬件映射"]
+           subgraph ExtROM["扩展ROM区域"]
+               OptionROM["0x0C0000 - 0x0DFFFF (128KB)<br/>扩展ROM<br/>可选ROM（网卡、显卡等）<br/>实模式可访问，硬件映射"]
            end
            
-           subgraph BIOSMap["0x0E0000 - 0x0FFFFF (128KB)"]
-               BIOSMapped["BIOS映射区域<br/>实模式可访问<br/>不是RAM，是ROM映射<br/>实际BIOS在4GB顶部"]
+           subgraph BIOSMap["BIOS映射区域"]
+               BIOSMapped["0x0E0000 - 0x0FFFFF (128KB)<br/>BIOS映射区域<br/>实模式可访问<br/>不是RAM，是ROM映射<br/>实际BIOS在4GB顶部"]
            end
            
-           subgraph Above1MB["0x100000 - 0xFFFFFFFF (前4GB RAM)"]
-               RAM4GB["超过1MB的RAM<br/>保护模式可访问<br/>真正的物理RAM"]
+           subgraph Above1MB["1MB以上RAM区域"]
+               RAM4GB["0x100000 - 0xFFFFFFFF (前4GB RAM)<br/>超过1MB的RAM<br/>保护模式可访问<br/>真正的物理RAM"]
                GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>0x100000+ (1MB+)<br/>约 50KB - 100KB（解压后，标准配置）<br/>不在前 1MB 内存空间内<br/>保护模式可访问，需要 A20 地址线<br/>由 startup_raw.S 解压到 1MB 以上"]
                KernelLoad["Linux 内核镜像（压缩）<br/>0x100000 (1MB)<br/>由 GRUB 加载<br/>会覆盖解压后的 GRUB Core"]
                KernelDecomp["Linux 内核解压后<br/>0x1000000+ (16MB+)<br/>由内核 setup 代码解压"]
            end
            
-           subgraph Above4GB["0x100000000 - ... (超过4GB的RAM)"]
-               RAM8GB["超过4GB的RAM<br/>保护模式可访问<br/>真正的物理RAM"]
+           subgraph Above4GB["超过4GB RAM区域"]
+               RAM8GB["0x100000000 - ... (超过4GB的RAM)<br/>超过4GB的RAM<br/>保护模式可访问<br/>真正的物理RAM"]
            end
        end
        
