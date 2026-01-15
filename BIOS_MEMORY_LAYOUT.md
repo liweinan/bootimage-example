@@ -307,7 +307,7 @@
            
            subgraph Above1MB["0x100000 - 0xFFFFFFFF (前4GB RAM)"]
                RAM4GB["超过1MB的RAM<br/>保护模式可访问<br/>真正的物理RAM"]
-               GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>0x100000+ (1MB+)<br/>约 20KB - 50KB（解压后）<br/>保护模式可访问<br/>由 startup_raw.S 解压"]
+               GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>0x100000+ (1MB+)<br/>约 50KB - 100KB（解压后，标准配置）<br/>不在前 1MB 内存空间内<br/>保护模式可访问，需要 A20 地址线<br/>由 startup_raw.S 解压到 1MB 以上"]
                KernelLoad["Linux 内核镜像（压缩）<br/>0x100000 (1MB)<br/>由 GRUB 加载<br/>会覆盖解压后的 GRUB Core"]
                KernelDecomp["Linux 内核解压后<br/>0x1000000+ (16MB+)<br/>由内核 setup 代码解压"]
            end
@@ -401,12 +401,14 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
 
    **默认情况：使用 LZMA 压缩**
    - **解压位置**：`GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000`（1MB）
-   - **内存范围**：`0x100000+`（解压后，约 20KB - 50KB，取决于 GRUB 配置）
+   - **内存范围**：`0x100000+`（解压后，约 50KB - 100KB，标准配置，取决于 GRUB 配置）
+   - **关键点**：**不在前 1MB 内存空间内**（`0x100000` 是 1MB 边界，`0x100000+` 是 1MB 以上）
    - **解压时机**：`startup_raw.S` 切换到保护模式后
    - **解压函数**：`_LzmaDecodeA`（在 `startup_raw.S:346` 调用）
    - **访问方式**：保护模式下访问（需要 A20 地址线启用）
    - **关键点**：
      - **解压位置**：`0x100000`（1MB），与内核加载地址相同
+     - **解压后大小**：约 50KB - 100KB（标准配置），不在前 1MB 内存空间内
      - **解压时机**：在 `startup_raw.S` 中，**此时还没有加载任何模块**
      - **模块加载**：模块是在 `grub_main()` 之后才动态加载的，不在解压流程中
 
