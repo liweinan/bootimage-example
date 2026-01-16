@@ -160,6 +160,7 @@ DISPLAY=:1 make run-gui
 - **[GRUB_ISO_ANALYSIS.md](GRUB_ISO_ANALYSIS.md)** - GRUB ISO 镜像引导分析（boot.S、core.img 位置、内存布局等）
 - **[GRUB_ISO_BOOT_FILES.md](GRUB_ISO_BOOT_FILES.md)** - GRUB ISO 镜像中哪些文件在 boot 阶段被加载
 - **[GRUB_KERNEL_ADDR_ANALYSIS.md](GRUB_KERNEL_ADDR_ANALYSIS.md)** - GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000 的计算和设计原因分析
+- **[CREATE_GRUB_ISO.md](CREATE_GRUB_ISO.md)** - 使用 grub-mkrescue 生成 GRUB ISO 镜像教程
 
 ### 中断相关文档
 
