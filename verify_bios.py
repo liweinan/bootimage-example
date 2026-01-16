@@ -4,12 +4,22 @@ BIOS.bin 验证脚本（统一版本）
 
 **重要说明：**
 - 这个脚本验证的是 **BIOS 固件**（bios.bin），不是 Bootloader
-- BIOS 映射在物理地址 0xF0000-0xFFFFF（由 QEMU 加载）
+- BIOS 映射在物理地址 0xF0000-0xFFFFF（64KB，由 QEMU 映射）
+- CPU 复位后从 0xFFFF0 开始执行（reset vector，在映射范围内）
 - Bootloader（boot.bin）会被 BIOS 加载到 0x7C00（使用 verify_boot_sector.py 验证）
 
 **BIOS vs Bootloader：**
-- **BIOS (bios.bin)**：固件代码，映射到 0xF0000-0xFFFFF，由 QEMU 直接加载
+- **BIOS (bios.bin)**：固件代码，映射到 0xF0000-0xFFFFF，由 QEMU 直接映射
+  - 映射范围：0xF0000-0xFFFFF（64KB）
+  - 执行起始：0xFFFF0（reset vector，在映射范围内）
+  - 结束地址：0xFFFFF（映射范围的最后一个字节）
 - **Bootloader (boot.bin)**：引导程序，从磁盘读取，由 BIOS 加载到 0x7C00
+
+**关键澄清：**
+- ❌ 不是"加载到"0xFFFFF（0xFFFFF 是结束地址，不是执行地址）
+- ✅ 是"映射到"0xF0000-0xFFFFF 这个地址范围
+- ✅ CPU 从 0xFFFF0 开始执行（reset vector，在映射范围内）
+- ✅ 对于 128KB 文件，硬件支持映射到 0xE0000-0xFFFFF，但 SeaBIOS 只使用 0xF0000-0xFFFFF
 
 **功能：**
 1. 验证 BIOS ROM 文件中的关键固定地址是否正确
@@ -83,9 +93,23 @@ def phys_to_file_offset(phys_addr):
     
     规则：
     - BIOS ROM 映射到物理地址 0xF0000-0xFFFFF (64KB)
+      - 起始地址：0xF0000（BIOS ROM 开始）
+      - 执行地址：0xFFFF0（CPU 复位后从这里开始，reset vector）
+      - 结束地址：0xFFFFF（BIOS ROM 结束，映射范围的最后一个字节）
     - 文件是 128KB，包含两个 64KB 块
+      - 第一个 64KB 块：文件偏移 0x00000-0x0FFFF（可能包含元数据）
+      - 第二个 64KB 块：文件偏移 0x10000-0x1FFFF（实际 BIOS 代码）
     - 实际 BIOS 代码在第二个 64KB 块（文件偏移 0x10000-0x1FFFF）
     - 物理地址 = 0xF0000 + (文件偏移 - 0x10000)
+    
+    关键映射关系：
+    - 物理地址 0xFFFF0（reset vector）→ 文件偏移 0x1FFF0（在第二个 64KB 块内）
+    - 物理地址 0xFE05B（entry_post）→ 文件偏移 0x1E05B（在第二个 64KB 块内）
+    - 物理地址 0xF0000-0xFFFFF → 文件偏移 0x10000-0x1FFFF（第二个 64KB 块）
+    
+    注意：
+    - 0xFFFFF 是映射范围的结束地址，不是执行地址
+    - CPU 从 0xFFFF0 开始执行（在映射范围内，对应文件的第二个 64KB 块）
     """
     rom_offset = phys_addr - BIOS_BASE
     file_offset = 64 * 1024 + rom_offset  # 第二个 64KB 块
