@@ -30,10 +30,10 @@ core.img 总大小: 29184 字节 (28 KB)
 ----------------------------------------------------------------------
 ✅ 找到块列表位置：文件偏移 0x1f4，内存地址 0x81f4
 ✅ diskboot.S 代码区域：0x0000 - 0x1f3（约 500 字节（0x1f4 字节））
-✅ 块列表数据区域：0x1f4 - 0x1FF（12 字节）
+✅ 块列表数据区域：0x1f4 - 0x1FF（12 字节（0xc 字节））
 
 使用 objdump 反汇编 diskboot.S（16位实模式代码）:
-命令: objdump -D -b binary -m i8086 -M intel /tmp/grub_verify_4068736/diskboot.bin
+命令: objdump -D -b binary -m i8086 -M intel /tmp/grub_verify_4081282/diskboot.bin
 
 ✅ objdump 反汇编成功
 
@@ -47,7 +47,7 @@ core.img 总大小: 29184 字节 (28 KB)
 diskboot.S 反汇编代码（前 30 行，对应内存地址 0x8000+）:
 ----------------------------------------------------------------------
 
-/tmp/grub_verify_4068736/diskboot.bin:     file format binary
+/tmp/grub_verify_4081282/diskboot.bin:     file format binary
 
 
 Disassembly of section .data:
@@ -88,6 +88,7 @@ Disassembly of section .data:
   ✅ objdump 反汇编成功
 
 检查 4096 字节之后是否有 LZMA 标记...
+  ⚠️  在 4096 字节之后未找到 LZMA 压缩标记
 
 【步骤 5】数据特征分析
 ----------------------------------------------------------------------
