@@ -290,7 +290,7 @@
            direction TB
            
            subgraph Low640KB["常规RAM区域"]
-               LowRAM["0x000000 - 0x09FFFF (640KB 常规RAM区域)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>系统数据结构：<br/>• IVT (0x0000-0x03FF, 1KB)<br/>  └─ 中断向量表，256个中断入口<br/>• BDA (0x0400-0x04FF, 256B)<br/>  └─ BIOS数据区，系统配置信息<br/>• DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>DOS系统组件：<br/>• DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>• COMMAND.COM (0x7E00+, 50-60KB)<br/>• 用户程序 (0x7E00-0x9FFFF)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>引导加载程序：<br/>• 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载的第一个扇区<br/>  └─ DOS系统：包含DOS引导代码，加载IO.SYS<br/>  └─ GRUB系统：包含GRUB boot.S代码，加载GRUB Core<br/>• GRUB Core 压缩状态 (0x8000-0xCFFF, 约28KB, 已验证)<br/>  └─ 前4KB未压缩（实模式代码）：<br/>     • diskboot.S 代码 (0x8000-0x81F3, 约400B)<br/>     • 块列表数据 (0x81F4-0x81FF, 12B, 文件偏移0x1F4)<br/>     • startup_raw.S (0x8200-0x8FFF, 实际大小可能小于3.5KB，已验证前1.5KB)<br/>  └─ 后24KB压缩（C代码）：<br/>     • C代码压缩 (0x9000-0xCFFF, 约24KB, LZMA压缩, 已验证)<br/>  └─ 混合格式：前4KB未压缩（diskboot.S + startup_raw.S），后24KB压缩（C代码）<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 实模式加载，压缩状态<br/>  └─ 由 startup_raw.S 解压到 0x100000<br/>  └─ 临时缓冲区：0x7000:0x0000 (读取时使用)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>访问方式：实模式可访问，真正的物理RAM"]
+               LowRAM["0x000000 - 0x09FFFF (640KB 常规RAM区域)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>系统数据结构：<br/>• IVT (0x0000-0x03FF, 1KB)<br/>  └─ 中断向量表，256个中断入口<br/>• BDA (0x0400-0x04FF, 256B)<br/>  └─ BIOS数据区，系统配置信息<br/>• DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>DOS系统组件：<br/>• DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>• COMMAND.COM (0x7E00+, 50-60KB)<br/>• 用户程序 (0x7E00-0x9FFFF)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>引导加载程序：<br/>• 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载的第一个扇区<br/>  └─ DOS系统：包含DOS引导代码，加载IO.SYS<br/>  └─ GRUB系统：包含GRUB boot.S代码，加载GRUB Core<br/>• GRUB Core 压缩状态 (0x8000-0xCFFF, 约28KB, 已验证)<br/>  └─ 前约4.1KB未压缩（实模式代码）：<br/>     • diskboot.S 代码 (0x8000-0x81F3, 约0.5KB)<br/>     • 块列表数据 (0x81F4-0x81FF, 12B, 文件偏移0x1F4)<br/>     • startup_raw.S (0x8200-0x9063, 约3.6KB)<br/>  └─ 后24KB压缩（C代码）：<br/>     • C代码压缩 (0x9000-0xCFFF, 约24KB, LZMA压缩, 已验证)<br/>  └─ 混合格式：前约4.1KB未压缩（diskboot.S + startup_raw.S），后约24KB压缩（C代码）<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 实模式加载，压缩状态<br/>  └─ 由 startup_raw.S 解压到 0x100000<br/>  └─ 临时缓冲区：0x7000:0x0000 (读取时使用)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>访问方式：实模式可访问，真正的物理RAM"]
            end
            
            subgraph VGARAM["VGA显存区域"]
@@ -357,7 +357,7 @@
   5. 解压后大小：约 50KB - 100KB（取决于 GRUB 配置）
    - **混合格式说明**（已验证）：
      - 只有 C 代码部分被 LZMA 压缩（后 24KB）
-     - diskboot.S 和 startup_raw.S 保持未压缩（前 4KB，实模式代码）
+     - diskboot.S 和 startup_raw.S 保持未压缩（前约 4.1KB，实模式代码）
 - **包含内容**：
   - GRUB 核心 C 代码（`main.c`、`disk.c`、`file.c`、`fs.c` 等）
   - i386_pc 平台初始化代码（`kern/i386/pc/init.c`）
@@ -497,17 +497,14 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
    **阶段 1：压缩状态的 GRUB Core（实模式加载）**
    - **加载位置**：`0x8000`（实模式地址，起始位置）
    - **内存范围**：`0x8000 - 0xCFFF`（示例：约 28KB，混合格式，已验证）
-     - `0x8000 - 0x81F3`：diskboot.S 代码（约 400 字节）
+     - `0x8000 - 0x81F3`：diskboot.S 代码（约 0.5KB）
      - `0x81F4 - 0x81FF`：块列表数据（12 字节，第一个条目）
-     - `0x8200 - 0x8FFF`：startup_raw.S（未压缩，实际大小可能小于 3.5KB，可能有填充）
-       - 验证脚本分析了前 1.5KB（512-2048 字节），包含实模式代码、保护模式切换、A20 地址线启用等
-       - 源代码包含 lzma_decode.S（通过 `#include`），但编译后大小取决于实际实现
+     - `0x8200 - 0x9063`：startup_raw.S（未压缩，约 3.6KB）
      - `0x9000 - 0xCFFF`：C 代码（LZMA 压缩状态，约 24KB，已验证）
    - **压缩状态**（已验证）：
-     - **前 4KB 未压缩**：diskboot.S + startup_raw.S（实模式代码，在 `0x8000 - 0x8FFF`）
-       - diskboot.S：512 字节（0x8000-0x81FF）
-       - startup_raw.S：从 0x8200 开始，实际大小可能小于 3.5KB，可能有填充或对齐
-       - 验证脚本分析了 startup_raw.S 的前 1.5KB（512-2048 字节），确认包含实模式代码、保护模式切换、A20 地址线启用等
+     - **前约 4.1KB 未压缩**：diskboot.S + startup_raw.S（实模式代码，在 `0x8000 - 0x9063`）
+       - diskboot.S：约 0.5KB（0x8000-0x81F3）+ 块列表 12 字节（0x81F4-0x81FF）
+       - startup_raw.S：从 0x8200 开始，约 3.6KB
      - **后 24KB LZMA 压缩**：C 代码（在 `0x9000+`，需要解压到 `0x100000`）
    - **大小**：通常 8KB - 32KB（压缩状态，取决于 GRUB 配置）
    - **对应物理内存**：`0x8000 - 0xCFFF`（物理地址，示例范围）

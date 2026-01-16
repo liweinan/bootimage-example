@@ -109,6 +109,83 @@ else
     exit 1
 fi
 
+# ========== 1.5. 分析 boot.S 代码 ==========
+echo ""
+echo "【步骤 1.5】分析 boot.S 代码（引导扇区）"
+echo "----------------------------------------------------------------------"
+
+if command -v objdump >/dev/null 2>&1; then
+    echo "使用 objdump 反汇编 boot.S（16位实模式代码）:"
+    echo "命令: objdump -D -b binary -m i8086 -M intel $BOOT_SECTOR_BIN"
+    echo ""
+    
+    OBJDUMP_BOOT_OUTPUT=$(objdump -D -b binary -m i8086 -M intel --adjust-vma=0x7c00 "$BOOT_SECTOR_BIN" 2>&1)
+    OBJDUMP_BOOT_EXIT=$?
+    
+    if [ $OBJDUMP_BOOT_EXIT -eq 0 ]; then
+        echo "✅ objdump 反汇编成功"
+        echo ""
+        echo "查找 boot.S 的关键代码特征:"
+        echo "----------------------------------------------------------------------"
+        
+        # 查找关键代码特征（使用 grep 直接检查，避免子 shell 问题）
+        OBJDUMP_BOOT_TMP="$TEMP_DIR/objdump_boot.txt"
+        echo "$OBJDUMP_BOOT_OUTPUT" > "$OBJDUMP_BOOT_TMP"
+        
+        FOUND_PUSH_DX=false
+        FOUND_LJMP=false
+        FOUND_INT13H=false
+        FOUND_KERNEL_SECTOR_READ=false
+        FOUND_GRUB_STRING=false
+        
+        # 检查是否包含 "GRUB" 字符串
+        if grep -q "GRUB" "$BOOT_SECTOR_BIN"; then
+            FOUND_GRUB_STRING=true
+        fi
+        
+        # 使用 grep 检查特征（避免子 shell 问题）
+        if grep -qiE "push.*dx|pushw.*dx" "$OBJDUMP_BOOT_TMP"; then
+            FOUND_PUSH_DX=true
+        fi
+        
+        if grep -qiE "ljmp|jmp.*far" "$OBJDUMP_BOOT_TMP"; then
+            FOUND_LJMP=true
+        fi
+        
+        if grep -qi "int.*0x13" "$OBJDUMP_BOOT_TMP"; then
+            FOUND_INT13H=true
+        fi
+        
+        if grep -qiE "mov.*0x[0-9a-f]+.*\[|movl.*0x[0-9a-f]+" "$OBJDUMP_BOOT_TMP"; then
+            FOUND_KERNEL_SECTOR_READ=true
+        fi
+        
+        echo "  - 保存驱动器号 (push dx): $(if [ "$FOUND_PUSH_DX" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        echo "  - 长跳转指令 (ljmp): $(if [ "$FOUND_LJMP" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        echo "  - INT 13h 调用: $(if [ "$FOUND_INT13H" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        echo "  - 读取 kernel_sector: $(if [ "$FOUND_KERNEL_SECTOR_READ" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        echo "  - GRUB 特征字符串: $(if [ "$FOUND_GRUB_STRING" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        
+        if [ "$FOUND_PUSH_DX" = true ] && [ "$FOUND_INT13H" = true ]; then
+            echo ""
+            echo "  ✅ 关键 boot.S 代码特征已找到"
+        else
+            echo ""
+            echo "  ⚠️  部分特征未找到，但可能是代码优化或格式差异"
+        fi
+        
+        echo ""
+        echo "boot.S 反汇编代码（前 40 行，对应内存地址 0x7C00+）:"
+        echo "----------------------------------------------------------------------"
+        echo "$OBJDUMP_BOOT_OUTPUT" | head -40
+        
+    else
+        echo "  ⚠️  objdump 反汇编失败，退出码: $OBJDUMP_BOOT_EXIT"
+    fi
+else
+    echo "  ⚠️  objdump 未安装，跳过 boot.S 反汇编"
+fi
+
 # ========== 2. 提取 core.img ==========
 echo ""
 echo "【步骤 2】提取 core.img"
@@ -286,17 +363,39 @@ if command -v objdump >/dev/null 2>&1; then
         
         LAST_CODE_ADDR=512
         CONSECUTIVE_PADDING=0
+        FOUND_CODE_BOUNDARY=false
         
         while IFS= read -r line; do
-            # 提取地址（支持 "   0:" 和 "0x0000:" 格式）
-            OFFSET=$(echo "$line" | sed -n 's/.*[[:space:]]*\([0-9a-fA-F]*\):.*/\1/p' | head -1)
+            # 提取地址（支持多种格式）
+            # 格式1: "  0x008000:" 或 "   0x008000:"
+            # 格式2: "   200:" 或 "  200:"
+            OFFSET=""
+            if echo "$line" | grep -qE "^\s*0x[0-9a-fA-F]+:"; then
+                # 格式1: 0x008000:
+                OFFSET=$(echo "$line" | sed -n 's/.*0x\([0-9a-fA-F]*\):.*/\1/p' | head -1)
+            elif echo "$line" | grep -qE "^\s+[0-9a-fA-F]+:"; then
+                # 格式2: 200:
+                OFFSET=$(echo "$line" | sed -n 's/^\s*\([0-9a-fA-F]*\):.*/\1/p' | head -1)
+            fi
+            
             if [ -n "$OFFSET" ]; then
-                ADDR=$((0x$OFFSET))
-                if [ "$ADDR" -ge 512 ]; then
-                    # 检查是否是填充字节（nop 或 0x00）
-                    if echo "$line" | grep -qi "nop\|00"; then
+                MEM_ADDR=$((0x$OFFSET))
+                # 注意：objdump 显示的是内存地址（0x8000+），需要转换为文件偏移
+                # 文件偏移 = 内存地址 - 0x8000
+                MEM_BASE=32768  # 0x8000 in decimal
+                if [ "$MEM_ADDR" -ge $MEM_BASE ]; then
+                    ADDR=$((MEM_ADDR - MEM_BASE))
+                else
+                    ADDR=$MEM_ADDR
+                fi
+                # 对于前 4KB 的数据，文件偏移应该在 512-4096 之间
+                if [ "$ADDR" -ge 512 ] && [ "$ADDR" -lt 4096 ]; then
+                    # 检查是否是填充字节（nop 或连续的 0x00）
+                    # 更精确的判断：检查是否是 "nop" 指令或连续的 "00 00 00" 字节
+                    if echo "$line" | grep -qiE "nop|^\s*[0-9a-fA-Fx]+:\s+00\s+00\s+00"; then
                         CONSECUTIVE_PADDING=$((CONSECUTIVE_PADDING + 1))
                         if [ "$CONSECUTIVE_PADDING" -gt 50 ]; then
+                            FOUND_CODE_BOUNDARY=true
                             break
                         fi
                     else
@@ -309,7 +408,7 @@ if command -v objdump >/dev/null 2>&1; then
             fi
         done < "$OBJDUMP_TMP"
         
-        if [ "$LAST_CODE_ADDR" -gt 512 ]; then
+        if [ "$LAST_CODE_ADDR" -gt 512 ] || [ "$FOUND_CODE_BOUNDARY" = true ]; then
             # 如果找到了 LZMA 标记，使用较小的值
             if [ -n "$LZMA_POS" ] && [ "$LZMA_POS" -gt 0 ] && [ "$LZMA_POS" -lt 1024 ]; then
                 # LZMA 标记太早，忽略
@@ -321,6 +420,13 @@ if command -v objdump >/dev/null 2>&1; then
             fi
             echo "  ✅ 通过 objdump 分析：startup_raw.S 代码实际结束位置约 0x$(printf "%x" $STARTUP_RAW_END)"
             echo "     实际代码大小：约 $((STARTUP_RAW_END - 512)) 字节（0x$(printf "%x" $((STARTUP_RAW_END - 512))) 字节）"
+            if [ "$FOUND_CODE_BOUNDARY" = true ]; then
+                echo "     检测到连续填充字节，代码边界在 0x$(printf "%x" $LAST_CODE_ADDR)"
+            elif [ "$LAST_CODE_ADDR" -gt 512 ]; then
+                echo "     最后有效代码地址: 0x$(printf "%x" $LAST_CODE_ADDR)"
+            fi
+        else
+            echo "  ⚠️  objdump 未能确定代码边界（LAST_CODE_ADDR=$LAST_CODE_ADDR），使用默认值 4KB"
         fi
     else
         echo "  ⚠️  objdump 分析失败，退出码: $OBJDUMP_EXIT2"

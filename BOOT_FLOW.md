@@ -1035,7 +1035,7 @@ boot_cdrom(struct drive_s *drive)
 1. BIOS 读取引导扇区（boot.S）到 0x7C00
     ↓
 2. boot.S 读取第一个 GRUB Core 扇区（diskboot.S）到 0x8000
-   ├─ 包含 diskboot.S 代码（~400 字节）
+   ├─ 包含 diskboot.S 代码（约 0.5KB）
    └─ 包含块列表数据（12 字节，在末尾）
     ↓
 3. boot.S 跳转到 0x8000（diskboot.S 入口）
@@ -1089,23 +1089,28 @@ boot.S 通过 `kernel_sector` 字段知道 GRUB Core 第一个扇区的位置，
    - **字段位置**：
      - **标准模式**：偏移 0x5c（92 字节）
      - **HYBRID_BOOT 模式**：偏移 0x1b0（432 字节，用于 ISO 镜像）
-   - **初始值**：编译时默认值为 `1`（占位符），实际安装时由 `grub-install` 覆盖为真实位置（例如扇区 2048）
+   - **初始值**：编译时默认值为 `1`（占位符），实际安装时由 `grub-install` 覆盖为真实位置
+   - **实际值示例**：
+     - 传统磁盘安装：通常为扇区 2048 或更大
+     - ISO 镜像（HYBRID_BOOT 模式）：例如扇区 11916（已验证）
    - **安装流程**：
      ```
      grub-install 安装流程：
      1. 编译 GRUB Core 镜像（core.img）
-     2. 将 core.img 写入磁盘的特定扇区（例如扇区 2048）
-     3. 记录这个扇区号（2048）
+     2. 将 core.img 写入磁盘的特定扇区（例如传统磁盘为扇区 2048，ISO 镜像为扇区 11916）
+     3. 记录这个扇区号（例如 2048 或 11916）
      4. 将扇区号写入 boot.S 的 kernel_sector 字段（覆盖默认值 1）
-     5. 将修改后的 boot.S 写入磁盘第一个扇区（MBR）
+     5. 将修改后的 boot.S 写入磁盘第一个扇区（MBR 或 ISO 引导扇区）
      ```
 
 2. **boot.S 读取 GRUB Core 的第一个扇区**：
    - boot.S 从 `kernel_sector` 字段读取扇区号
-   - 使用 INT 13h 读取这个扇区的 512 字节到内存 `0x8000`
+   - **读取流程（两阶段）**：
+     1. **临时缓冲区**：使用 INT 13h 读取扇区到临时缓冲区 `0x7000:0x0000`（物理地址 `0x70000`）
+     2. **最终地址**：从临时缓冲区复制到最终地址 `0x0000:0x8000`（物理地址 `0x8000`）
    - 这 512 字节包含：
-     - `diskboot.S` 代码（约 400 字节）
-     - 块列表数据（12 字节，在末尾）
+     - `diskboot.S` 代码（约 0.5KB）
+     - 块列表数据（12 字节，在末尾，文件偏移 `0x1F4-0x1FF`，对应内存地址 `0x81F4-0x81FF`）
 
 **阶段 2：diskboot.S 使用块列表加载完整的 GRUB Core**
 
@@ -1116,11 +1121,19 @@ boot.S 通过 `kernel_sector` 字段知道 GRUB Core 第一个扇区的位置，
    - 由 `grub-mkimage` 在安装时写入
 
 2. **diskboot.S 加载流程**：
-   - diskboot.S 读取块列表（从 0x8000 的末尾）
+   - diskboot.S 读取块列表（从内存地址 `0x81F4` 开始，对应文件偏移 `0x1F4`）
+   - **块列表结构**（已验证）：
+     - 每个条目 12 字节：start（8 字节，LBA 扇区号）+ len（2 字节，扇区数）+ segment（2 字节，目标段地址）
+     - 第一个条目示例（ISO 镜像）：start=11917, len=56, segment=0x0820
+     - 最后一个条目 len=0 表示结束
    - 循环处理每个块列表条目：
-     - 读取条目指定的扇区（使用 INT 13h）
-     - 复制到目标内存地址（由 segment 字段指定）
+     - 读取条目指定的扇区（使用 INT 13h，先读到临时缓冲区 `0x7000:0x0000`）
+     - 复制到目标内存地址（由 segment 字段指定，例如 segment=0x0820 对应物理地址 `0x8200`）
    - 所有扇区加载完成后，跳转到 0x8200（startup_raw.S 入口点）
+   - **关键代码验证**（通过 objdump 反汇编确认）：
+     - `mov di,0x81f4`：设置 DI 指向块列表位置
+     - `int 0x13`：调用 INT 13h 读取扇区
+     - `jmp 0x0:0x8200`：跳转到 startup_raw.S 入口点
 
 **关键点总结：**
 - **boot.S 只知道 GRUB Core 第一个扇区的位置**：通过 `kernel_sector` 字段（由 grub-install 写入）
@@ -1246,18 +1259,23 @@ LOCAL(final_init):
 
     // 步骤 8: 将 GRUB Core 从缓冲区复制到最终地址
 LOCAL(copy_buffer):
+    // **关键：两阶段读取流程（已验证）**
+    // 阶段 1：INT 13h 读取到临时缓冲区 0x7000:0x0000（物理地址 0x70000）
+    // 阶段 2：从临时缓冲区复制到最终地址 0x0000:0x8000（物理地址 0x8000）
+    // 
     // 从 0x7000:0x0000 复制到 0x0000:0x8000（GRUB_BOOT_MACHINE_KERNEL_ADDR）
     pusha
     pushw   %ds
     
     movw    $0x100, %cx     // 复制 512 字节（0x100 字）
-    movw    %bx, %ds        // 源段 = 0x7000
+    movw    %bx, %ds        // 源段 = 0x7000（临时缓冲区段）
     xorw    %si, %si        // 源偏移 = 0
     movw    $GRUB_BOOT_MACHINE_KERNEL_ADDR, %di  // 目标偏移 = 0x8000
     movw    %si, %es        // 目标段 = 0x0000
     
     cld                     // 方向标志：向前
     rep movsw               // 重复复制字（DS:SI -> ES:DI）
+                           // 从 0x7000:0x0000 复制到 0x0000:0x8000
     
     popw    %ds
     popa
@@ -1420,7 +1438,8 @@ blocklist_default_seg:
 // grub/grub-core/boot/i386/pc/diskboot.S:61-310
 _start:
     // 设置 %di 指向第一个块列表条目
-    movw    $LOCAL(firstlist), %di
+    // 块列表在扇区末尾，文件偏移 0x1F4，内存地址 0x81F4
+    movw    $LOCAL(firstlist), %di  // %di = 0x81F4（已验证）
     
 LOCAL(bootloop):
     // 检查 len 字段（偏移 8 字节）
@@ -1429,20 +1448,21 @@ LOCAL(bootloop):
     
 LOCAL(setup_sectors):
     // 读取 start 字段（偏移 0-7 字节）：起始扇区号
-    movl    (%di), %ebx      // 低 32 位
-    movl    4(%di), %ecx     // 高 32 位
+    movl    (%di), %ebx      // 低 32 位（例如：11917 = 0x2e8d）
+    movl    4(%di), %ecx     // 高 32 位（通常为 0）
     
     // 读取 len 字段（偏移 8 字节）：要读取的扇区数
-    movw    8(%di), %ax      // 读取扇区数
+    movw    8(%di), %ax      // 读取扇区数（例如：56）
     
-    // 使用 INT 13h 读取扇区到临时缓冲区（0x7000:0x0000）
+    // 使用 INT 13h 读取扇区到临时缓冲区（0x7000:0x0000，物理地址 0x70000）
     // ... 读取代码 ...
     
 LOCAL(copy_buffer):
     // 读取 segment 字段（偏移 10 字节）：目标内存段
-    movw    10(%di), %es     // 设置目标段地址
+    movw    10(%di), %es     // 设置目标段地址（例如：0x0820）
     
     // 从临时缓冲区（0x7000:0x0000）复制数据到目标地址
+    // 例如：segment=0x0820 对应物理地址 0x8200（startup_raw.S 入口点）
     // ... 复制代码 ...
     
     // 检查是否完成当前条目
@@ -1470,6 +1490,14 @@ LOCAL(copy_buffer):
 - 4(%di)     → start 高 32 位
 - 8(%di)     → len
 - 10(%di)    → segment
+
+实际验证示例（ISO 镜像）：
+- 块列表位置：文件偏移 0x1F4，内存地址 0x81F4（在 diskboot.S 扇区的末尾）
+- 第一个条目：start=11917 (0x2e8d), len=56, segment=0x0820
+  - start=11917：表示从扇区 11917 开始读取（kernel_sector + 1）
+  - len=56：需要读取 56 个扇区（约 28KB）
+  - segment=0x0820：目标内存段，对应物理地址 0x8200（startup_raw.S 入口点）
+- 最后一个条目：len=0，表示块列表结束
 ```
 
 **5. 块列表的生成代码（grub-install）：**
@@ -1517,15 +1545,21 @@ save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
 | **功能** | 读取 GRUB Core 第一个扇区 | 加载 GRUB Core 剩余部分 |
 | **代码来源** | `grub/grub-core/boot/i386/pc/boot.S` | `grub/grub-core/boot/i386/pc/diskboot.S` |
 | **加载者** | BIOS（通过 INT 13h） | boot.S（通过 INT 13h） |
-| **包含内容** | 引导代码（约 446 字节）+ 引导签名（2 字节） | diskboot.S 代码（约 400 字节）+ 块列表（12 字节） |
+| **包含内容** | 引导代码（约 446 字节）+ 引导签名（2 字节） | diskboot.S 代码（约 500 字节，0x1f4 字节）+ 块列表（12 字节，0xc 字节） |
 
 **关键点：**
 - **boot.S 和 diskboot.S 各占 512 字节，但它们是两个不同的扇区**
 - boot.S 存储在磁盘扇区 0（MBR），由 BIOS 加载到 0x7C00
-- diskboot.S 存储在磁盘的其他扇区，由 boot.S 加载到 0x8000
+- diskboot.S 存储在磁盘的其他扇区（由 kernel_sector 指定，例如 ISO 镜像为扇区 11916），由 boot.S 加载到 0x8000
+- **boot.S 读取流程**（已验证）：
+  1. 从 kernel_sector 字段读取扇区号（例如 11916）
+  2. 使用 INT 13h 读取扇区到临时缓冲区 `0x7000:0x0000`（物理地址 `0x70000`）
+  3. 从临时缓冲区复制到最终地址 `0x0000:0x8000`（物理地址 `0x8000`）
+  4. 跳转到 0x8000 执行 diskboot.S
 - boot.S 负责读取 diskboot.S，diskboot.S 负责加载完整的 GRUB Core
-- **块列表机制**：diskboot.S 使用块列表（存储在第一个 512 字节的末尾）加载完整的 GRUB Core，包括 startup_raw.S、C 代码等所有组件
+- **块列表机制**：diskboot.S 使用块列表（存储在第一个 512 字节的末尾，文件偏移 0x1F4，内存地址 0x81F4）加载完整的 GRUB Core，包括 startup_raw.S、C 代码等所有组件
 - **块列表中的扇区**：是 GRUB Core 镜像在磁盘上的物理存储位置，包含编译后的二进制代码和数据（startup_raw.S、C 代码、模块等）
+- **验证结果**：通过 objdump 反汇编确认 diskboot.S 的关键代码特征（块列表读取、INT 13h 调用、跳转到 startup_raw.S）
 
 **关键设计点：**
 
@@ -1533,8 +1567,12 @@ save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
 2. **块列表**：存储在第一个 512 字节的末尾，由 `grub-mkimage` 在安装时写入
 3. **分段加载**：GRUB Core 可能分散在磁盘的不同位置（由于文件系统碎片），块列表记录了每个片段的位置
 4. **内存布局**：
-   - `0x8000-0x81FF`：第一个 512 字节（diskboot.S + 块列表）
-   - `0x8200+`：GRUB Core 的剩余部分（C 代码、模块等）
+   - `0x8000-0x81F3`：diskboot.S 代码（约 400 字节）
+   - `0x81F4-0x81FF`：块列表数据（12 字节，第一个条目）
+   - `0x8200+`：GRUB Core 的剩余部分（startup_raw.S、C 代码、模块等）
+   - **压缩状态**（已验证）：
+     - 前 4KB 未压缩：diskboot.S + startup_raw.S（在 0x8000+）
+     - 后 24KB LZMA 压缩：C 代码（解压到 0x100000）
 
 **为什么需要块列表？**
 
@@ -1596,7 +1634,11 @@ LOCAL (codestart):
 post_reed_solomon:
     // 步骤 5: 解压 GRUB Core（如果使用 LZMA 压缩）
 #ifdef ENABLE_LZMA
-    // 如果使用 LZMA 压缩：
+    // 如果使用 LZMA 压缩（默认情况，已验证）：
+    // **压缩状态**（通过验证脚本确认）：
+    // - 前 4KB 未压缩：diskboot.S + startup_raw.S（在 0x8000+，实模式代码）
+    // - 后 24KB LZMA 压缩：C 代码（需要解压到 0x100000）
+    // - 解压目标地址：0x100000 (1MB)
     movl    $GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR, %edi  // 解压目标地址：0x100000 (1MB)
     movl    $LOCAL(decompressor_end), %esi                 // 解压源：压缩的代码结束位置
     pushl   %edi
@@ -1709,9 +1751,14 @@ startup_raw.S: jmp *%esi
 **关于压缩的常见问题：**
 
 1. **前 1MB 够用吗？**
-   - **如果使用 LZMA 压缩**：✅ 够用
-     - 压缩后的 GRUB Core：约 8KB - 32KB（在 `0x8000 - 0xCFFF`）
+   - **如果使用 LZMA 压缩**（默认情况，已验证）：✅ 够用
+     - **混合格式**（已验证）：
+       - 前约 4.1KB 未压缩：diskboot.S + startup_raw.S（在 `0x8000 - 0x9063`，实模式代码）
+         - diskboot.S：约 0.5KB（0x8000-0x81F3）+ 块列表 12 字节（0x81F4-0x81FF）
+         - startup_raw.S：从 0x8200 开始，约 3.6KB
+       - 后约 24KB LZMA 压缩：C 代码（在 `0x9063+`，需要解压到 `0x100000`）
      - 前 1MB 有约 640KB 可用空间，足够容纳压缩的代码
+     - 解压后的代码在 1MB 以上（`0x100000`），有足够的空间运行
    - **如果不使用 LZMA 压缩**：⚠️ 可能不够用
      - 未压缩的 GRUB Core：约 20KB - 100KB 或更大（取决于配置）
      - 如果 GRUB Core 很大（> 100KB），前 1MB 可能不够用
@@ -1724,18 +1771,19 @@ startup_raw.S: jmp *%esi
    - **调试目的**：开发时可能禁用压缩以便调试
 
 3. **是不是默认都是压缩-解压的流程？**
-   - **是的，默认情况下 GRUB 使用 LZMA 压缩**
+   - **是的，默认情况下 GRUB 使用 LZMA 压缩**（已验证）
    - **原因**：
      - GRUB Core 未压缩时可能很大（几十 KB 到几百 KB）
      - 前 1MB 空间有限（约 640KB 可用）
      - 使用压缩可以：
-       - 减小 core.img 的大小（压缩后约 8KB - 32KB）
+       - 减小 core.img 的大小（压缩后约 28KB，已验证：前约 4.1KB 未压缩 + 后约 24KB 压缩）
        - 在前 1MB 中容纳更多代码
        - 解压到 1MB 以上，避免前 1MB 空间不足
-   - **压缩流程**：
-     - 编译时：GRUB Core 被 LZMA 压缩，嵌入到 core.img
-     - 启动时：`startup_raw.S` 解压到 `0x100000`（1MB）
+   - **压缩流程**（已验证）：
+     - 编译时：GRUB Core 的 C 代码部分被 LZMA 压缩，嵌入到 core.img
+     - 启动时：`startup_raw.S` 解压 C 代码部分到 `0x100000`（1MB）
      - 解压后：代码在 1MB 以上，有足够的空间运行
+     - **混合格式**：前约 4.1KB 未压缩（diskboot.S + startup_raw.S），后约 24KB 压缩（C 代码）
 
 **实际大小示例：**
 
@@ -1844,8 +1892,11 @@ grub_relocator32_boot()
 ...
 0x007C00 - 0x007DFF      引导扇区（MBR）← BIOS 加载到这里
 0x007E00 - 0x007FFF      引导扇区栈
-0x008000 - 0x009FFF      GRUB Core（第二阶段）← 引导扇区加载
-0x00A000 - 0x00BFFF      GRUB 文件系统驱动
+0x008000 - 0x0081F3      diskboot.S 代码（约 400 字节）← boot.S 加载
+0x0081F4 - 0x0081FF      块列表数据（12 字节，文件偏移 0x1F4）
+0x008200 - 0x008FFF      startup_raw.S（未压缩，已验证前 1.5KB）← diskboot.S 加载
+0x009000 - 0x00CFFF      C 代码（LZMA 压缩状态，约 24KB，已验证）← diskboot.S 加载
+0x00D000 - 0x00FFFF      可用空间
 ...
 0x0100000 (1MB) - ...    内核镜像（vmlinuz）← GRUB 加载
 0x0200000 - ...          initramfs ← GRUB 加载
@@ -2451,7 +2502,7 @@ boot_disk() 读取引导扇区
 【阶段 2】diskboot.S（GRUB Core 第一个扇区，grub/grub-core/boot/i386/pc/diskboot.S）
     ├─ 磁盘位置：其他扇区（由 kernel_sector 指定，例如扇区 2048）
     ├─ 内存位置：0x8000
-    ├─ 大小：512 字节（包含 diskboot.S 代码约 400 字节 + 块列表 12 字节）
+    ├─ 大小：512 字节（包含 diskboot.S 代码约 0.5KB + 块列表 12 字节）
     ├─ 保存驱动器号
     ├─ 读取块列表（从 0x8000 的末尾）
     ├─ 循环读取每个块列表条目指定的扇区
