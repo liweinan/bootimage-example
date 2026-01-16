@@ -206,10 +206,19 @@ DISPLAY=:1 make run-gui
 
 #### BIOS 分析工具
 
-- **[verify_bios.py](verify_bios.py)** - BIOS 验证脚本
-- **[verify_bios_mapping.py](verify_bios_mapping.py)** - BIOS 映射验证脚本
+- **[verify_bios.py](verify_bios.py)** - BIOS 验证脚本（统一版本）
+  - 验证 BIOS ROM 文件中的关键固定地址是否正确
+  - 分析 BIOS 文件结构（两个 64KB 块的内容分布）
+  - 查找关键 BIOS 入口点
+  - 分析填充区域和代码模式
+  - 使用方法：
+    - `python3 verify_bios.py [bios_file]` - 执行所有分析（默认）
+    - `python3 verify_bios.py [bios_file] --structure` - 只执行文件结构分析
+    - `python3 verify_bios.py [bios_file] --addresses` - 只执行固定地址验证
+
 - **[analyze_bios_structure.py](analyze_bios_structure.py)** - BIOS 结构分析脚本
-- **[verify_bios_structure.py](verify_bios_structure.py)** - BIOS 结构验证脚本（验证 128KB BIOS 中两个 64KB 块的数据分布，分析代码区域和元数据区域）
+
+- **[BIOS_MEMORY_MAPPING.md](BIOS_MEMORY_MAPPING.md)** - BIOS 文件映射到物理内存的证据分析文档
 
 #### GRUB 分析工具
 

@@ -290,7 +290,7 @@
            direction TB
            
            subgraph Low640KB["常规RAM区域"]
-               LowRAM["0x000000 - 0x09FFFF (640KB)<br/>- IVT (0x0000-0x03FF, 1KB)<br/>- BDA (0x0400-0x04FF, 256B)<br/>- DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>- DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>- 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载，包含GRUB引导扇区代码<br/>- GRUB Core 压缩状态 (0x8000-0xCFFF, 约20-32KB)<br/>  └─ diskboot.S (0x8000-0x81FF, 512B)<br/>  └─ startup_raw.S (0x8200-0x8FFF, 约3.5KB)<br/>  └─ C代码压缩 (0x9000-0xCFFF, LZMA压缩)<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 实模式加载，压缩状态<br/>  └─ 由 startup_raw.S 解压到 0x100000<br/>- COMMAND.COM (0x7E00+, 50-60KB)<br/>- 用户程序 (0x7E00-0x9FFFF)<br/>实模式可访问，真正的物理RAM"]
+               LowRAM["0x000000 - 0x09FFFF (640KB 常规RAM区域)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>系统数据结构：<br/>• IVT (0x0000-0x03FF, 1KB)<br/>  └─ 中断向量表，256个中断入口<br/>• BDA (0x0400-0x04FF, 256B)<br/>  └─ BIOS数据区，系统配置信息<br/>• DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>DOS系统组件：<br/>• DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>• COMMAND.COM (0x7E00+, 50-60KB)<br/>• 用户程序 (0x7E00-0x9FFFF)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>引导加载程序：<br/>• 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载的第一个扇区<br/>  └─ DOS系统：包含DOS引导代码，加载IO.SYS<br/>  └─ GRUB系统：包含GRUB boot.S代码，加载GRUB Core<br/>• GRUB Core 压缩状态 (0x8000-0xCFFF, 约20-32KB)<br/>  └─ diskboot.S (0x8000-0x81FF, 512B)<br/>  └─ startup_raw.S (0x8200-0x8FFF, 约3.5KB)<br/>  └─ C代码压缩 (0x9000-0xCFFF, LZMA压缩)<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 实模式加载，压缩状态<br/>  └─ 由 startup_raw.S 解压到 0x100000<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>访问方式：实模式可访问，真正的物理RAM"]
            end
            
            subgraph VGARAM["VGA显存区域"]
@@ -307,9 +307,9 @@
            
            subgraph Above1MB["1MB以上RAM区域"]
                RAM4GB["0x100000 - 0xFFFFFFFF (前4GB RAM)<br/>超过1MB的RAM<br/>保护模式可访问<br/>真正的物理RAM"]
-               GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>0x100000+ (1MB+)<br/>约 50KB - 100KB（解压后，标准配置）<br/>不在前 1MB 内存空间内<br/>保护模式可访问，需要 A20 地址线<br/>由 startup_raw.S 解压到 1MB 以上"]
-               KernelLoad["Linux 内核镜像（压缩）<br/>0x100000 (1MB)<br/>由 GRUB 加载<br/>会覆盖解压后的 GRUB Core"]
-               KernelDecomp["Linux 内核解压后<br/>0x1000000+ (16MB+)<br/>由内核 setup 代码解压"]
+               GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000+ (1MB+)<br/>大小：约 50KB - 100KB（解压后，标准配置）<br/>解压时机：startup_raw.S 切换到保护模式后<br/>解压函数：_LzmaDecodeA<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>包含内容：<br/>• grub_main()（main.c）<br/>• 磁盘/文件系统框架（disk.c, file.c, fs.c）<br/>• 内存管理（mm.c）<br/>• 命令处理（command.c）<br/>• i386_pc 平台初始化（init.c, mmap.c）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：解析 grub.cfg、显示菜单、加载内核<br/>生命周期：解压后 → 内核加载前（会被覆盖）<br/>访问方式：保护模式，需要 A20 地址线"]
+               KernelLoad["Linux 内核镜像（压缩，bzImage 格式）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000 (1MB)<br/>大小：几 MB - 几十 MB（取决于内核配置）<br/>加载时机：GRUB 解析 grub.cfg 后<br/>加载方式：GRUB 通过文件系统读取<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>镜像结构：<br/>• 头部：setup 代码（实模式，约 32KB）<br/>• 主体：压缩的内核代码（vmlinux 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>关键点：<br/>• 会覆盖解压后的 GRUB Core<br/>• 包含自己的解压代码（setup）<br/>• 解压目标：0x1000000+ (16MB+)"]
+               KernelDecomp["Linux 内核解压后（vmlinux）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x1000000+ (16MB+)<br/>大小：几十 MB - 几百 MB（取决于内核配置）<br/>解压时机：内核 setup 代码执行后<br/>解压方式：内核 setup 代码调用解压函数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>包含内容：<br/>• 内核核心代码（kernel/）<br/>• 设备驱动（drivers/）<br/>• 文件系统（fs/）<br/>• 网络栈（net/）<br/>• 内存管理（mm/）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：内核接管系统，GRUB 不再需要<br/>运行模式：长模式（64位）或保护模式（32位）"]
            end
            
            subgraph Above4GB["超过4GB RAM区域"]
@@ -341,6 +341,112 @@
        style BIOSROM fill:#ffcccc
        style BIOSFull fill:#ffcccc
    ```
+
+**1MB 以上 RAM 区域详细说明：**
+
+这个区域是系统启动过程中最重要的内存区域之一，承载了从 GRUB 到 Linux 内核的完整启动流程。以下是各个组件的详细说明：
+
+**1. GRUB Core 解压后（0x100000+）**
+
+- **加载时机**：在 `startup_raw.S` 切换到保护模式并启用 A20 地址线后
+- **解压过程**：
+  1. `startup_raw.S` 调用 `_LzmaDecodeA` 函数
+  2. 从 `0x9000+`（压缩状态）读取压缩数据
+  3. 解压到 `0x100000`（1MB）开始的内存区域
+  4. 解压后大小：约 50KB - 100KB（取决于 GRUB 配置）
+- **包含内容**：
+  - GRUB 核心 C 代码（`main.c`、`disk.c`、`file.c`、`fs.c` 等）
+  - i386_pc 平台初始化代码（`kern/i386/pc/init.c`）
+  - 内存管理、命令处理、文件系统框架等
+- **功能**：
+  - 解析 `grub.cfg` 配置文件
+  - 显示启动菜单
+  - 加载 Linux 内核镜像
+  - 准备内核启动参数
+- **生命周期**：
+  - 从解压完成到内核加载前一直存在
+  - 内核加载时会覆盖此区域（因为内核也加载到 `0x100000`）
+
+**2. Linux 内核镜像（压缩，0x100000）**
+
+- **加载时机**：GRUB 解析 `grub.cfg` 后，用户选择启动项时
+- **加载过程**：
+  1. GRUB 读取内核镜像文件（通常是 `vmlinuz` 或 `bzImage`）
+  2. 将压缩的内核镜像加载到 `0x100000`（1MB）
+  3. **注意**：这会覆盖之前解压的 GRUB Core
+- **镜像结构**（bzImage 格式）：
+  - **头部**：setup 代码（实模式，约 32KB）
+  - **主体**：压缩的内核代码（vmlinux 压缩后）
+  - **总大小**：通常几 MB 到几十 MB（取决于内核配置）
+- **关键点**：
+  - 内核镜像加载到 `0x100000` 会覆盖 GRUB Core
+  - 这是设计上的选择：GRUB 完成使命后不再需要
+  - 内核镜像包含自己的解压代码（setup 代码）
+
+**3. Linux 内核解压后（0x1000000+，16MB+）**
+
+- **解压时机**：内核 setup 代码执行后
+- **解压过程**：
+  1. 内核 setup 代码（在 `0x100000`）执行
+  2. 检测可用内存（通过 BIOS E820）
+  3. 选择解压目标地址（通常 `0x1000000`，16MB，或更高）
+  4. 解压内核代码到目标地址
+  5. 跳转到解压后的内核入口点（`startup_64`）
+- **解压后大小**：通常几十 MB 到几百 MB（取决于内核配置）
+- **内存布局演变**：
+  ```
+  时间线：
+  
+  T1: 0x100000+ → GRUB Core 解压后（约 50KB - 100KB）
+  T2: 0x100000  → Linux 内核镜像加载（覆盖 GRUB Core）
+  T3: 0x1000000+ → Linux 内核解压后（内核接管系统）
+  ```
+
+**4. 内存区域关系和时间线**
+
+**启动流程中的内存使用顺序**：
+
+```
+阶段 1：GRUB Core 解压（保护模式）
+├─ 0x100000+：GRUB Core 解压后（约 50KB - 100KB）
+└─ 功能：解析配置、显示菜单、准备加载内核
+
+阶段 2：Linux 内核加载（保护模式）
+├─ 0x100000：Linux 内核镜像（压缩，几 MB - 几十 MB）
+│  └─ 覆盖 GRUB Core（GRUB 完成使命）
+└─ 功能：内核 setup 代码执行
+
+阶段 3：Linux 内核解压（保护模式 → 长模式）
+├─ 0x100000：内核 setup 代码（仍在执行）
+└─ 0x1000000+：Linux 内核解压后（几十 MB - 几百 MB）
+   └─ 功能：内核接管系统，GRUB 和 setup 代码不再需要
+```
+
+**为什么需要 1MB 以上的内存？**
+
+1. **前 1MB 空间限制**：
+   - 前 1MB 只有约 640KB 可用 RAM
+   - 需要为 BIOS 数据区、栈、临时缓冲区等留出空间
+   - GRUB Core 解压后可能达到 50KB - 100KB，前 1MB 可能不够
+
+2. **保护模式的优势**：
+   - 保护模式可以访问完整的 4GB 地址空间
+   - 不受前 1MB 限制
+   - 可以加载更大的内核镜像
+
+3. **设计选择**：
+   - GRUB Core 解压到 `0x100000`（1MB）
+   - 内核也加载到 `0x100000`（覆盖 GRUB Core）
+   - 内核解压到 `0x1000000`（16MB）或更高
+   - 这样设计可以最大化利用内存空间
+
+**关键地址总结**：
+
+| 地址 | 用途 | 大小 | 时机 |
+|------|------|------|------|
+| `0x100000` | GRUB Core 解压后 | 约 50KB - 100KB | `startup_raw.S` 解压后 |
+| `0x100000` | Linux 内核镜像（压缩） | 几 MB - 几十 MB | GRUB 加载内核时 |
+| `0x1000000+` | Linux 内核解压后 | 几十 MB - 几百 MB | 内核 setup 代码解压后 |
 
 **DOS 通信区（0x0500-0x05FF）说明：**
 
@@ -376,8 +482,11 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
      - `0x7C00 - 0x7DFD`：引导代码和数据（510 字节）
      - `0x7DFE - 0x7DFF`：引导签名（2 字节：0xAA55）
    - **功能**：
-     - BIOS 通过 INT 13h 将磁盘第一个扇区加载到此地址
-     - 如果使用 GRUB，引导扇区代码会加载 GRUB Core 到 `0x8000`
+     - BIOS 通过 INT 13h 将磁盘第一个扇区（MBR 或分区引导扇区）加载到此地址
+     - **内容取决于系统配置**：
+       - **DOS 系统**：包含 DOS 引导代码，会加载 IO.SYS（DOS 内核）到 `0x0600`
+       - **GRUB 系统**：包含 GRUB boot.S 代码，会加载 GRUB Core 到 `0x8000`
+       - **其他 bootloader**：可能包含其他引导程序的代码
 
 4. **GRUB Core（第二阶段 bootloader）**
 
@@ -411,6 +520,64 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
      - **解压后大小**：约 50KB - 100KB（标准配置），不在前 1MB 内存空间内
      - **解压时机**：在 `startup_raw.S` 中，**此时还没有加载任何模块**
      - **模块加载**：模块是在 `grub_main()` 之后才动态加载的，不在解压流程中
+
+   **对应 GRUB 源文件（解压后的代码包含以下文件编译后的二进制）**：
+
+   > **注意**：这不是 `boot.img`，而是 `core.img` 解压后的部分。`boot.img` 只是引导扇区（512字节，在 0x7C00），而 `core.img` 是 GRUB Core（包含解压后的 C 代码）。
+
+   **通用核心文件**（所有平台都包含）：
+   - `grub-core/kern/main.c`：主入口函数 `grub_main()`，解析配置文件、显示菜单
+   - `grub-core/kern/disk.c`：磁盘驱动框架，提供统一的磁盘访问接口
+   - `grub-core/kern/file.c`：文件操作框架，提供统一的文件读写接口
+   - `grub-core/kern/fs.c`：文件系统框架，支持多种文件系统（ext2/3/4, fat, iso9660 等）
+   - `grub-core/kern/mm.c`：内存管理，分配和释放内存
+   - `grub-core/kern/command.c`：命令处理框架，解析和执行 GRUB 命令
+   - `grub-core/kern/device.c`：设备管理框架
+   - `grub-core/kern/partition.c`：分区管理，识别 MBR、GPT 等分区表
+   - `grub-core/kern/dl.c`：动态加载器，加载 `.mod` 模块文件
+   - `grub-core/kern/env.c`：环境变量管理
+   - `grub-core/kern/err.c`：错误处理框架
+   - `grub-core/kern/term.c`：终端框架，处理键盘输入和屏幕输出
+   - `grub-core/kern/parser.c`：配置文件解析器（grub.cfg）
+   - `grub-core/kern/rescue_parser.c`：救援模式解析器
+   - `grub-core/kern/rescue_reader.c`：救援模式读取器
+   - `grub-core/kern/buffer.c`：缓冲区管理
+   - `grub-core/kern/list.c`：链表数据结构
+   - `grub-core/kern/misc.c`：杂项工具函数
+   - `grub-core/kern/corecmd.c`：核心命令实现
+   - `grub-core/kern/verifiers.c`：验证器框架（用于安全启动）
+   - `grub-core/kern/compiler-rt.c`：编译器运行时支持
+   - `grub-core/kern/time.c`：时间管理
+   - `grub-core/kern/generic/millisleep.c`：毫秒级睡眠
+
+   **i386_pc 平台特定文件**（仅 i386_pc 平台包含）：
+   - `grub-core/kern/i386/pc/init.c`：i386_pc 平台初始化（`grub_stub_init()` 等）
+   - `grub-core/kern/i386/pc/mmap.c`：i386_pc 平台内存映射（BIOS E820 内存检测）
+   - `grub-core/term/i386/pc/console.c`：i386_pc 平台控制台（VGA 文本模式、键盘）
+
+   **其他可能包含的文件**（取决于编译配置）：
+   - `grub-core/kern/i386/pc/acpi.c`：ACPI 支持（如果启用）
+   - `grub-core/kern/i386/tsc.c`：时间戳计数器（TSC）
+   - `grub-core/kern/i386/tsc_pit.c`：PIT（可编程间隔定时器）支持
+   - `grub-core/kern/i386/tsc_pmtimer.c`：PM 定时器支持
+   - `grub-core/lib/i386/pc/biosnum.c`：BIOS 驱动器号管理
+
+   **源代码位置**：
+   - 定义文件：`grub/grub-core/Makefile.core.def`（`kernel = { ... }` 部分）
+   - 编译后：这些文件被编译并链接到 `core.img` 中
+   - 压缩状态：在 `core.img` 中，C 代码部分被 LZMA 压缩（约 24KB）
+   - 解压后：在内存 `0x100000+`，解压后的代码（约 50KB - 100KB）
+
+   **关键函数入口点**：
+   - `grub_stub_init()`：解压后的代码入口点（在 `kern/i386/pc/init.c` 中）
+     - 由 `startup_raw.S` 的 `jmp *%esi` 跳转到这里（`0x100000`）
+     - 初始化 i386_pc 平台特定功能
+     - 调用 `grub_main()`
+   - `grub_main()`：GRUB 主入口函数（在 `kern/main.c` 中）
+     - 解析 `grub.cfg` 配置文件
+     - 显示启动菜单（如果配置）
+     - 加载 Linux 内核镜像
+     - 调用 `grub_cmd_linux()`（在 `loader/i386/pc/linux.c` 中，但这是模块，不在 core.img 中）
 
    **特殊情况：不使用 LZMA 压缩（仅在编译时禁用或系统不支持时）**
 

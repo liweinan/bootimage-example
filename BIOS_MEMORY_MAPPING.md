@@ -1,18 +1,10 @@
-#!/usr/bin/env python3
-"""
-验证 BIOS 文件映射到物理内存的证据
+# BIOS 文件映射到物理内存的证据分析
 
-通过分析 QEMU 源代码和 BIOS 文件结构，证明第一个 64KB 块不映射到物理内存
-"""
+本文档通过分析 QEMU 源代码和 BIOS 文件结构，说明 BIOS 文件如何映射到物理内存。
 
-print("="*70)
-print("BIOS 文件映射到物理内存的证据分析")
-print("="*70)
-
-print("""
 ## 证据 1: QEMU 源代码中的映射实现
 
-根据 QEMU 源代码 hw/i386/x86-common.c 中的 x86_isa_bios_init() 函数：
+根据 QEMU 源代码 `hw/i386/x86-common.c` 中的 `x86_isa_bios_init()` 函数：
 
 ```c
 void x86_isa_bios_init(MemoryRegion *isa_bios, MemoryRegion *isa_memory,
@@ -33,6 +25,7 @@ void x86_isa_bios_init(MemoryRegion *isa_bios, MemoryRegion *isa_memory,
 ```
 
 **关键点：**
+
 1. `bios_size - isa_bios_size` 计算起始偏移
    - 如果 bios_size = 128KB，则偏移 = 128KB - 128KB = 0
    - 这意味着从 BIOS 内存区域的**偏移0**开始取 128KB
@@ -56,6 +49,7 @@ void x86_isa_bios_init(MemoryRegion *isa_bios, MemoryRegion *isa_memory,
 **重要：地址映射取决于 BIOS 文件大小和 QEMU 的映射策略**
 
 ### 情况 1: 如果 BIOS 文件是 64KB
+
 **物理地址到文件偏移的转换公式：**
 ```
 物理地址 = 0xF0000 + 文件偏移
@@ -64,6 +58,7 @@ void x86_isa_bios_init(MemoryRegion *isa_bios, MemoryRegion *isa_memory,
 - 只映射高64KB区域
 
 ### 情况 2: 如果 BIOS 文件是 128KB（当前情况）
+
 **物理地址到文件偏移的转换公式：**
 ```
 如果物理地址 < 0xF0000:
@@ -104,7 +99,7 @@ void x86_isa_bios_init(MemoryRegion *isa_bios, MemoryRegion *isa_memory,
 
 ## 证据 4: 文件内容对比
 
-从 analyze_bios_structure.py 的分析结果：
+从 `verify_bios.py` 的分析结果：
 
 **第一个 64KB 块：**
 - 61% 是 0x00（填充）
@@ -177,12 +172,9 @@ memory_region_add_subregion(rom_memory,
 - 硬件支持映射128KB，但实际映射取决于实现
 - 最小要求：高64KB（0xF0000-0xFFFFF）必须包含有效的 BIOS 代码
 - 第一个64KB块即使映射，也主要是元数据，不影响 BIOS 功能
-""")
 
-print("\n" + "="*70)
-print("验证方法")
-print("="*70)
-print("""
+## 验证方法
+
 可以通过以下方法验证：
 
 1. 在 QEMU 中尝试访问第一个块的地址：
@@ -190,13 +182,12 @@ print("""
    - 但实际上无法访问（因为没有映射）
 
 2. 查看 QEMU 的内存映射：
-   - 使用 QEMU monitor 命令：info mem
+   - 使用 QEMU monitor 命令：`info mem`
    - 查看 0xE0000-0xFFFFF 区域的映射
    - 确认只映射了 64KB（第二个块）
 
 3. 分析文件结构：
+   - 使用 `verify_bios.py --structure` 分析文件结构
    - 第一个块包含符号表等元数据
    - 第二个块包含可执行代码
    - 两者内容完全不同
-""")
-

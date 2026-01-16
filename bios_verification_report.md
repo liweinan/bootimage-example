@@ -185,9 +185,20 @@ od -An -tx1 -j $((0x1E3FE)) -N 8 /Users/weli/works/qemu/pc-bios/bios.bin
 
 ---
 
-### 步骤 8: 综合验证脚本
+### 步骤 8: 使用统一验证脚本
+
+**推荐方法：使用 `verify_bios.py` 统一验证脚本**
 
 **命令**:
+```bash
+# 执行完整的验证（包括结构分析和地址验证）
+python3 verify_bios.py /Users/weli/works/qemu/pc-bios/bios.bin
+
+# 或只执行固定地址验证
+python3 verify_bios.py /Users/weli/works/qemu/pc-bios/bios.bin --addresses
+```
+
+**手动验证方法（用于理解地址映射）**:
 ```bash
 python3 << 'EOF'
 # 读取并验证关键地址的内容
@@ -640,45 +651,61 @@ tail -c 32 /Users/weli/works/qemu/pc-bios/bios.bin | hexdump -C
 
 ### Python 验证脚本
 
-可以使用以下 Python 脚本批量验证多个地址：
+可以使用统一的验证脚本 `verify_bios.py` 批量验证多个地址：
 
-```python
-#!/usr/bin/env python3
-"""验证 BIOS.bin 中的固定地址"""
+**使用方法：**
 
-BIOS_BASE = 0xF0000
-FILE_PATH = '/Users/weli/works/qemu/pc-bios/bios.bin'
+```bash
+# 执行所有分析（默认，包括结构分析和地址验证）
+python3 verify_bios.py [bios_file]
 
-def phys_to_file_offset(phys_addr):
-    """将物理地址转换为文件偏移"""
-    rom_offset = phys_addr - BIOS_BASE
-    file_offset = 64 * 1024 + rom_offset  # 第二个 64KB 块
-    return file_offset
+# 只执行固定地址验证
+python3 verify_bios.py [bios_file] --addresses
 
-def verify_address(name, phys_addr, expected_bytes=None):
-    """验证指定地址的内容"""
-    file_offset = phys_to_file_offset(phys_addr)
-    print(f"\n{name} (物理地址 0x{phys_addr:05X}, 文件偏移 0x{file_offset:05X}):")
-    
-    with open(FILE_PATH, 'rb') as f:
-        f.seek(file_offset)
-        data = f.read(16)
-        hex_str = ' '.join(f'{b:02x}' for b in data)
-        print(f"  内容: {hex_str}")
-        
-        if expected_bytes:
-            match = data[:len(expected_bytes)] == expected_bytes
-            print(f"  匹配预期: {'✅' if match else '❌'}")
-    
-    return data
-
-# 验证关键地址
-verify_address("Reset Vector", 0xFFFF0, bytes([0xea, 0x5b, 0xe0, 0x00, 0xf0]))
-verify_address("Entry Post", 0xFE05B)
-verify_address("Entry 10 (INT 10h)", 0xFF065, bytes([0xcf]))
-verify_address("Entry 02 (INT 02h)", 0xFE2C3)
-verify_address("Entry 13 Official", 0xFE3FE)
+# 只执行文件结构分析
+python3 verify_bios.py [bios_file] --structure
 ```
+
+**示例输出：**
+
+```bash
+$ python3 verify_bios.py /Users/weli/works/qemu/pc-bios/bios.bin --addresses
+
+======================================================================
+BIOS.bin 验证脚本（统一版本）
+======================================================================
+验证文件: /Users/weli/works/qemu/pc-bios/bios.bin
+
+======================================================================
+reset_vector (CPU 上电复位入口（reset vector）)
+======================================================================
+物理地址: 0xFFFF0
+ROM 偏移: 0xFFF0
+文件偏移: 0x1FFF0
+内容: ea 5b e0 00 f0 30 36 2f 32 33 2f 39 39 00 fc 00
+预期: ea 5b e0 00 f0
+状态: ✅ 匹配
+
+...
+
+======================================================================
+固定地址验证总结
+======================================================================
+关键地址验证: 7/7 通过
+Reset Vector 分析: ✅ 通过
+
+✅ 所有验证通过！
+```
+
+**脚本功能：**
+
+- 验证所有关键 BIOS 入口点的固定地址
+- 分析 Reset Vector 并验证跳转目标
+- 分析 0xFF 填充区域
+- 分析文件结构（两个 64KB 块的内容分布）
+- 查找关键 BIOS 入口点（JMP FAR 指令）
+
+更多详细信息请参考 [verify_bios.py](verify_bios.py) 脚本源码。
 
 ### 使用 hexdump 查看
 
