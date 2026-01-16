@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """
-验证 GRUB ISO 镜像的引导扇区和 core.img 入口点
+验证 GRUB ISO 镜像的引导扇区和 core.img 分析
 
 从 grub.iso 中提取引导扇区（第一个扇区，512 字节），
 验证其是否符合 GRUB 引导扇区的特征。
-同时验证 core.img 的解压后代码入口点（grub_stub_init）。
+分析 core.img 的结构、压缩状态和代码入口点（grub_stub_init）。
+
+功能：
+- 验证引导扇区签名和关键字段
+- 提取并分析 core.img 的块列表
+- 检测 core.img 的压缩状态（LZMA 压缩 vs 未压缩）
+- 分析数据特征（熵值、NOP 字节、零字节等）
+- 查找代码入口点（grub_stub_init）
+
+注意：此脚本只进行分析，不执行实际的解压操作。
+解压过程由 GRUB 在运行时通过 startup_raw.S 中的 _LzmaDecodeA 函数完成。
 """
 
 import sys
@@ -153,9 +163,9 @@ def verify_grub_boot_sector(iso_file):
         else:
             print(f"  ⚠️  无法确定模式（两个字段都无效）")
     
-    # 验证 core.img 入口点（grub_stub_init）
+    # 分析 core.img 入口点（grub_stub_init）
     print("\n" + "="*70)
-    print("验证 core.img 解压后代码入口点（grub_stub_init）")
+    print("分析 core.img 代码入口点（grub_stub_init）")
     print("="*70)
     
     # 确定 kernel_sector
@@ -188,8 +198,11 @@ def verify_grub_boot_sector(iso_file):
                 
                 total_sectors = 0
                 entry_count = 0
+                blocklist_entries = []
                 
                 # 读取块列表条目（最多 20 个）
+                print(f"\n块列表详细分析:")
+                print("-" * 70)
                 for i in range(20):
                     offset = BLOCKLIST_START - (i * BLOCKLIST_ENTRY_SIZE)
                     if offset < 0:
@@ -199,18 +212,33 @@ def verify_grub_boot_sector(iso_file):
                         # 读取块列表条目（12 字节）
                         entry = core_img_first[offset:offset+12]
                         
-                        # 解析 len 字段（偏移 8-9，小端序）
+                        # 解析字段（小端序）
+                        # start 低 32 位 (0-3), start 高 32 位 (4-7), len (8-9), segment (10-11)
+                        start_low = struct.unpack('<I', entry[0:4])[0]
+                        start_high = struct.unpack('<I', entry[4:8])[0]
                         len_val = struct.unpack('<H', entry[8:10])[0]
+                        segment = struct.unpack('<H', entry[10:12])[0]
                         
                         if len_val == 0:
+                            print(f"  条目 {i}: len=0 (结束标记)")
                             break
                         
                         total_sectors += len_val
                         entry_count += 1
+                        blocklist_entries.append({
+                            'index': i,
+                            'start_low': start_low,
+                            'start_high': start_high,
+                            'len': len_val,
+                            'segment': segment
+                        })
+                        
+                        print(f"  条目 {i}: start={start_low} (0x{start_low:x}), len={len_val} 扇区, segment=0x{segment:04x}")
                 
                 if total_sectors > 0:
                     core_img_size = total_sectors * 512
-                    print(f"✅ core.img 大小: {total_sectors} 扇区 = {core_img_size} 字节 ({core_img_size/1024:.1f} KB)")
+                    print(f"\n✅ core.img 大小: {total_sectors} 扇区 = {core_img_size} 字节 ({core_img_size/1024:.1f} KB)")
+                    print(f"   块列表条目数: {entry_count}")
                     
                     # 提取完整的 core.img
                     try:
@@ -221,7 +249,7 @@ def verify_grub_boot_sector(iso_file):
                         if len(core_img) == core_img_size:
                             print(f"✅ 成功提取完整的 core.img")
                             
-                            # 查找解压后的代码入口点特征
+                            # 查找代码入口点特征
                             # 1. 更准确地检测 LZMA 压缩
                             # LZMA 压缩数据通常：
                             # - 有特定的头部标记（5D 00 00 开头）
@@ -256,6 +284,77 @@ def verify_grub_boot_sector(iso_file):
                                 
                                 # 高熵值（> 7.0）通常表示压缩数据
                                 high_entropy = entropy > 7.0
+                                
+                                # 数据特征分析（startup_raw.S 区域）
+                                if len(core_img) >= 2048:
+                                    startup_raw_data = core_img[512:2048]  # startup_raw.S 区域（约 1.5KB）
+                                    nop_count = startup_raw_data.count(0x90)
+                                    zero_count = startup_raw_data.count(0x00)
+                                    startup_raw_bytes = len(startup_raw_data)
+                                    nop_ratio = (nop_count * 100.0) / startup_raw_bytes if startup_raw_bytes > 0 else 0
+                                    zero_ratio = (zero_count * 100.0) / startup_raw_bytes if startup_raw_bytes > 0 else 0
+                                    
+                                    # 统计可打印字符串
+                                    printable_strings = []
+                                    current_string = b''
+                                    for byte in startup_raw_data:
+                                        if 32 <= byte < 127:
+                                            current_string += bytes([byte])
+                                        else:
+                                            if len(current_string) >= 3:
+                                                printable_strings.append(current_string.decode('ascii', errors='ignore'))
+                                            current_string = b''
+                                    if len(current_string) >= 3:
+                                        printable_strings.append(current_string.decode('ascii', errors='ignore'))
+                                    printable_count = len(printable_strings)
+                            
+                            # 数据特征分析（startup_raw.S 区域）
+                            nop_count = 0
+                            zero_count = 0
+                            nop_ratio = 0
+                            zero_ratio = 0
+                            printable_count = 0
+                            compression_score = 0
+                            
+                            if len(core_img) >= 2048:
+                                startup_raw_data = core_img[512:2048]  # startup_raw.S 区域（约 1.5KB）
+                                nop_count = startup_raw_data.count(0x90)
+                                zero_count = startup_raw_data.count(0x00)
+                                startup_raw_bytes = len(startup_raw_data)
+                                nop_ratio = (nop_count * 100.0) / startup_raw_bytes if startup_raw_bytes > 0 else 0
+                                zero_ratio = (zero_count * 100.0) / startup_raw_bytes if startup_raw_bytes > 0 else 0
+                                
+                                # 统计可打印字符串
+                                printable_strings = []
+                                current_string = b''
+                                for byte in startup_raw_data:
+                                    if 32 <= byte < 127:
+                                        current_string += bytes([byte])
+                                    else:
+                                        if len(current_string) >= 3:
+                                            printable_strings.append(current_string.decode('ascii', errors='ignore'))
+                                        current_string = b''
+                                if len(current_string) >= 3:
+                                    printable_strings.append(current_string.decode('ascii', errors='ignore'))
+                                printable_count = len(printable_strings)
+                                
+                                # 检查是否有 LZMA 解压函数调用模式（call _LzmaDecodeA）
+                                has_lzma_call = False
+                                if b'\xe8' in startup_raw_data:  # CALL 指令
+                                    # 查找多个连续的 CALL 指令（可能是 LZMA 解压相关）
+                                    call_positions = [i for i, b in enumerate(startup_raw_data) if b == 0xE8]
+                                    if len(call_positions) >= 3:
+                                        has_lzma_call = True
+                                
+                                # 压缩评分系统
+                                if has_lzma_back or b'LZMA' in back_24k[:1024] if back_24k else False:
+                                    compression_score += 3
+                                if has_lzma_call:
+                                    compression_score += 2
+                                if zero_ratio < 15:
+                                    compression_score += 1
+                                if nop_count > 30 or printable_count > 8:
+                                    compression_score -= 1
                             
                             # 判断压缩状态
                             # 混合格式：前 4KB 未压缩，后 24KB 压缩
@@ -269,25 +368,65 @@ def verify_grub_boot_sector(iso_file):
                             # grub_stub_init 通常会调用 grub_main
                             # 查找 CALL 指令后跟可能的 grub_main 地址
                             
+                            print(f"\n数据特征分析（startup_raw.S 区域，约 1.5KB）:")
+                            if len(core_img) >= 2048:
+                                print(f"  - 总字节数: {len(startup_raw_data)}")
+                                print(f"  - NOP (0x90) 字节数量: {nop_count} ({nop_ratio:.1f}%)")
+                                print(f"  - 零字节 (0x00) 数量: {zero_count} ({zero_ratio:.1f}%)")
+                                print(f"  - 可打印字符串数量: {printable_count}")
+                            
                             print(f"\n压缩状态检测:")
-                            if is_mixed:
+                            if compression_score >= 3:
+                                print("  ✅ **使用 LZMA 压缩**")
+                                print("     - 检测到 LZMA 压缩特征")
+                                if has_lzma_back:
+                                    print("     - ✅ 已分析到 LZMA 压缩代码部分（在 core.img 的后 24KB 区域）")
+                                if has_lzma_call:
+                                    print("     - 检测到可能的 LZMA 解压函数调用（在 startup_raw.S 中）")
+                                print("     - 解压过程：")
+                                print("       1. startup_raw.S 切换到保护模式并启用 A20 地址线")
+                                print("       2. 调用 _LzmaDecodeA 函数解压压缩的 C 代码部分")
+                                print("       3. 解压目标地址: 0x100000 (1MB)")
+                                print("       4. 解压后跳转到 grub_stub_init（解压后的代码入口点）")
+                            elif compression_score <= 0 and zero_ratio >= 15:
+                                print("  ⚠️  **可能未压缩**")
+                                print("     - 检测到未压缩代码特征")
+                                if nop_count > 30:
+                                    print(f"     - NOP 指令较多 ({nop_count})，符合未压缩代码特征")
+                                if printable_count > 8:
+                                    print(f"     - 可打印字符串较多 ({printable_count})，符合未压缩代码特征")
+                                print(f"     - 零字节比例: {zero_ratio:.1f}% (未压缩代码常有填充的零字节)")
+                                print("     - core.img 可能直接在前 1MB 中执行，不需要解压")
+                                print("     - 代码位置: 0x8000+ (前 1MB)")
+                            elif is_mixed:
                                 print("  ✅ 检测到混合格式（前 4KB 未压缩，后 24KB 压缩）")
                                 print("  → 前 4KB: diskboot.S + startup_raw.S（未压缩，在 0x8000+）")
                                 print("  → 后 24KB: C 代码（LZMA 压缩）")
-                                print("  → 解压后的代码入口点: 0x100000 (1MB)")
-                                print("  → startup_raw.S 的 jmp *%esi 会跳转到解压后的代码（0x100000）")
-                                print("  → grub_stub_init 在解压后的代码中，不在压缩的 core.img 中")
+                                print("  → ✅ 已分析到 LZMA 压缩代码部分（core.img 的后 24KB 区域）")
+                                print("  → 解压过程：")
+                                print("     1. startup_raw.S 切换到保护模式并启用 A20 地址线")
+                                print("     2. 调用 _LzmaDecodeA 函数解压后 24KB 的压缩代码")
+                                print("     3. 解压目标地址: 0x100000 (1MB)")
+                                print("     4. 解压后跳转到 grub_stub_init（解压后的代码入口点）")
+                                print("  → grub_stub_init 在解压后的代码中（0x100000），不在压缩的 core.img 中")
                             elif is_fully_compressed:
                                 print("  ✅ 检测到 LZMA 压缩")
-                                print("  → 解压后的代码入口点: 0x100000 (1MB)")
+                                print("  → 运行时代码入口点: 0x100000 (1MB)")
                                 print("  → startup_raw.S 的 jmp *%esi 会跳转到 0x100000")
                             elif is_uncompressed:
                                 print("  ⚠️  未检测到 LZMA 压缩（代码未压缩）")
                                 print("  → 代码入口点可能在 0x8000+ (前 1MB)")
                                 print("  → grub_stub_init 可能在 core.img 的 C 代码区域")
                             else:
-                                print("  ⚠️  压缩状态不确定")
-                                print("  → 需要进一步分析")
+                                print("  ❓ **无法确定**")
+                                print("     - 数据特征不明显，需要进一步分析")
+                                print(f"     - 压缩评分: {compression_score} (>=3 表示压缩，<=0 表示未压缩)")
+                                print(f"     - NOP 比例: {nop_ratio:.1f}%")
+                                print(f"     - 零字节比例: {zero_ratio:.1f}%")
+                                print(f"     - 字符串数量: {printable_count}")
+                                print("     - 提示:")
+                                print("       * 如果零字节比例 < 15%，可能是压缩的")
+                                print("       * 如果零字节比例 >= 15% 且 NOP/字符串较多，可能是未压缩的")
                             
                             # 查找可能的初始化函数特征
                             # 初始化函数通常会：
@@ -417,7 +556,7 @@ def verify_grub_boot_sector(iso_file):
                                                     addr_str = parts[0].replace(':', '')
                                                     try:
                                                         file_offset = int(addr_str, 16)
-                                                        # 如果是压缩的，解压后在 0x100000
+                                                        # 如果是压缩的，运行时在 0x100000
                                                         # 如果未压缩，在 0x8000+
                                                         if has_lzma:
                                                             mem_addr = 0x100000 + file_offset
@@ -457,7 +596,7 @@ def verify_grub_boot_sector(iso_file):
                                     # - 55 89 E5 (AT&T 语法，但二进制相同)
                                     prologue_positions = []
                                     
-                                    # 如果代码是压缩的，grub_stub_init 在解压后的代码中（0x100000），
+                                    # 如果代码是压缩的，grub_stub_init 在运行时代码中（0x100000），
                                     # 不在压缩的 core.img 中，所以无法直接找到
                                     # 只能在前 4KB（未压缩部分）查找
                                     
@@ -482,8 +621,8 @@ def verify_grub_boot_sector(iso_file):
                                         
                                         if is_mixed or is_fully_compressed:
                                             print(f"\n  ⚠️  注意：这些函数序言在未压缩的前 4KB 中（startup_raw.S 的辅助函数）")
-                                            print(f"     grub_stub_init 在解压后的代码中（0x100000），不在压缩的 core.img 中")
-                                            print(f"     要找到 grub_stub_init，需要先解压 core.img 的后 24KB 部分")
+                                            print(f"     grub_stub_init 在运行时代码中（0x100000），不在压缩的 core.img 中")
+                                            print(f"     要找到 grub_stub_init，需要在实际运行时查看 0x100000 处的代码")
                                     
                                     # 查找可能的 grub_stub_init 入口点
                                     # 通常在 startup_raw.S 之后，C 代码开始的地方
@@ -527,7 +666,7 @@ def verify_grub_boot_sector(iso_file):
                                         first_c_function = c_funcs[0]
                                         if has_lzma:
                                             mem_addr = 0x100000 + first_c_function
-                                            print(f"  ✅ 可能的 grub_stub_init 入口点（解压后）:")
+                                            print(f"  ✅ 可能的 grub_stub_init 入口点（运行时）:")
                                         else:
                                             mem_addr = 0x8000 + first_c_function
                                             print(f"  ✅ 可能的 grub_stub_init 入口点（未压缩）:")
@@ -620,11 +759,11 @@ def verify_grub_boot_sector(iso_file):
                                         # 可能是内联函数或辅助函数
                                         print(f"  ⚠️  在 startup_raw.S 区域找到 {len(startup_funcs)} 个函数序言")
                                         print(f"     这些可能是 startup_raw.S 中的辅助函数，不是 grub_stub_init")
-                                        print(f"     如果代码被压缩，grub_stub_init 在解压后的代码中（0x100000）")
+                                        print(f"     如果代码被压缩，grub_stub_init 在运行时代码中（0x100000）")
                                     else:
                                         print(f"  ⚠️  未找到函数序言")
                                         print(f"     可能原因:")
-                                        print(f"     1. 代码被压缩，grub_stub_init 在解压后的代码中（0x100000）")
+                                        print(f"     1. 代码被压缩，grub_stub_init 在运行时代码中（0x100000）")
                                         print(f"     2. 使用不同的函数序言模式")
                                         print(f"     3. 代码是混合格式（前部分未压缩，后部分压缩）")
                                     
@@ -649,11 +788,11 @@ def verify_grub_boot_sector(iso_file):
                                     if is_mixed or is_fully_compressed:
                                         print(f"\n⚠️  重要说明：")
                                         print(f"   - core.img 的后 24KB 是 LZMA 压缩的 C 代码")
-                                        print(f"   - grub_stub_init 在解压后的代码中，不在压缩的 core.img 中")
-                                        print(f"   - 解压后的代码位置: 0x100000 (1MB)")
-                                        print(f"   - startup_raw.S 的 jmp *%esi 会跳转到解压后的代码（0x100000）")
-                                        print(f"   - 要查看 grub_stub_init 的具体指令，需要先解压 core.img")
-                                        print(f"   - 解压后的代码入口点（grub_stub_init）通常在 0x100000 附近")
+                                        print(f"   - grub_stub_init 在运行时代码中，不在压缩的 core.img 中")
+                                        print(f"   - 运行时代码位置: 0x100000 (1MB)")
+                                        print(f"   - startup_raw.S 的 jmp *%esi 会跳转到运行时代码（0x100000）")
+                                        print(f"   - 要查看 grub_stub_init 的具体指令，需要在实际运行时查看 0x100000 处的代码")
+                                        print(f"   - 运行时代码入口点（grub_stub_init）通常在 0x100000 附近")
                             
                             except FileNotFoundError:
                                 print("⚠️  objdump 未找到，使用简单分析")
@@ -721,19 +860,18 @@ def verify_grub_boot_sector(iso_file):
                             
                             if is_mixed:
                                 print("  ✅ 检测到混合格式（前 4KB 未压缩，后 24KB 压缩）")
-                                print("  ✅ 解压后的代码入口点: 0x100000 (1MB)")
-                                print("  ✅ startup_raw.S 的 jmp *%esi 会跳转到解压后的代码（0x100000）")
-                                print("  ⚠️  grub_stub_init 在解压后的代码中，不在压缩的 core.img 中")
+                                print("  ✅ 运行时代码入口点: 0x100000 (1MB)")
+                                print("  ✅ startup_raw.S 的 jmp *%esi 会跳转到运行时代码（0x100000）")
+                                print("  ⚠️  grub_stub_init 在运行时代码中，不在压缩的 core.img 中")
                                 print("  ⚠️  无法在压缩的 core.img 中直接查看 grub_stub_init 的指令")
                                 print("  💡 要查看 grub_stub_init 的具体指令，需要：")
-                                print("     1. 使用 LZMA 解压库解压 core.img 的后 24KB 部分")
-                                print("     2. 或者在实际运行环境中使用调试器查看 0x100000 处的代码")
-                                print("     3. 或者查看 GRUB 源代码：grub/grub-core/kern/i386/pc/init.c")
+                                print("     1. 在实际运行环境中使用调试器查看 0x100000 处的代码")
+                                print("     2. 或者查看 GRUB 源代码：grub/grub-core/kern/i386/pc/init.c")
                             elif is_fully_compressed:
                                 print("  ✅ 使用 LZMA 压缩")
-                                print("  ✅ 解压后的代码入口点: 0x100000 (1MB)")
-                                print("  ✅ startup_raw.S 的 jmp *%esi 会跳转到解压后的代码")
-                                print("  ⚠️  grub_stub_init 在解压后的代码中，不在压缩的 core.img 中")
+                                print("  ✅ 运行时代码入口点: 0x100000 (1MB)")
+                                print("  ✅ startup_raw.S 的 jmp *%esi 会跳转到运行时代码")
+                                print("  ⚠️  grub_stub_init 在运行时代码中，不在压缩的 core.img 中")
                             elif is_uncompressed:
                                 print("  ✅ 代码未压缩")
                                 print("  ✅ 代码入口点: 0x8000+ (前 1MB)")
@@ -748,7 +886,7 @@ def verify_grub_boot_sector(iso_file):
                                 print("  ✅ 代码入口点可能在 0x8000+ 或 0x100000")
                             
                             print(f"\n  📝 说明：")
-                            print(f"     - startup_raw.S 的 jmp *%esi 跳转到解压后的代码入口点")
+                            print(f"     - startup_raw.S 的 jmp *%esi 跳转到运行时代码入口点")
                             print(f"     - 入口点通常是 grub_stub_init() 或类似的初始化函数")
                             print(f"     - grub_stub_init 会调用 grub_main()（main.c）")
                             print(f"     - grub_main() 会解析 grub.cfg 并调用 grub_cmd_linux()（linux.c）")
@@ -774,8 +912,7 @@ def verify_grub_boot_sector(iso_file):
     if kernel_sector:
         print(f"✅ kernel_sector: {kernel_sector}")
         print("✅ core.img 入口点验证完成")
-    print("\n提示: 使用 'analyze_grub_boot_sector.sh' 进行更详细的分析")
-    print("     使用 'disassemble_core_img.py' 进行 core.img 反汇编分析")
+    print("\n提示: 所有 GRUB 分析功能已整合到此脚本中")
     
     return True
 

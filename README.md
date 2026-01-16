@@ -219,8 +219,6 @@ DISPLAY=:1 make run-gui
     - `python3 verify_bios.py [bios_file] --structure` - 只执行文件结构分析
     - `python3 verify_bios.py [bios_file] --addresses` - 只执行固定地址验证
 
-- **[analyze_bios_structure.py](analyze_bios_structure.py)** - BIOS 结构分析脚本
-
 - **[BIOS_MEMORY_MAPPING.md](BIOS_MEMORY_MAPPING.md)** - BIOS 文件映射到物理内存的证据分析文档
 
 #### Bootloader（引导扇区）分析工具
@@ -235,14 +233,13 @@ DISPLAY=:1 make run-gui
 
 #### GRUB 分析工具
 
-- **[analyze_grub_boot_sector.sh](analyze_grub_boot_sector.sh)** - GRUB 引导扇区分析工具
+- **[verify_grub_boot_sector.py](verify_grub_boot_sector.py)** - GRUB ISO 镜像验证脚本（统一版本）
+  - **验证对象**：GRUB ISO 镜像（grub.iso）的引导扇区和 core.img
   - 自动检测标准模式和 HYBRID_BOOT 模式
-  - 查找 kernel_sector 字段和 core.img 位置
+  - 验证引导扇区签名和关键字段（kernel_sector、kernel_address）
+  - 提取 core.img 并分析块列表（显示每个条目的详细信息）
   - 检测 core.img 压缩状态（LZMA 压缩 vs 未压缩）
-  - 使用方法：`./analyze_grub_boot_sector.sh grub.iso`
-
-- **[disassemble_core_img.py](disassemble_core_img.py)** - core.img 反汇编分析工具
-  - 反汇编分析 core.img，识别指令模式
-  - 计算数据熵值，判断压缩状态
-  - 分析内存空间需求
-  - 使用方法：`python3 disassemble_core_img.py grub.iso [kernel_sector]`
+    - 数据特征分析（NOP 字节、零字节、可打印字符串统计）
+    - 熵值计算和压缩评分系统
+  - 反汇编分析 core.img（查找 grub_stub_init 入口点）
+  - 使用方法：`python3 verify_grub_boot_sector.py [iso_file]`

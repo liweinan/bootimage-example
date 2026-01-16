@@ -10,17 +10,20 @@ GRUB ISO 镜像使用 **HYBRID_BOOT 模式**，引导扇区结构与传统磁盘
 
 本项目提供了两个分析工具：
 
-1. **`analyze_grub_boot_sector.sh`** - 分析引导扇区，查找 kernel_sector 字段和 core.img 位置
-2. **`disassemble_core_img.py`** - 反汇编分析 core.img，判断压缩状态和代码特征
+1. **`verify_grub_boot_sector.py`** - GRUB ISO 镜像验证脚本（统一版本），整合了所有 GRUB 分析功能
+   - 分析引导扇区，查找 kernel_sector 字段和 core.img 位置
+   - 反汇编分析 core.img，判断压缩状态和代码特征
+   - 数据特征分析（NOP 字节、零字节、可打印字符串统计）
+   - 熵值计算和压缩评分系统
 
 ### 使用方法
 
 ```bash
 # 分析引导扇区
-./analyze_grub_boot_sector.sh grub.iso
+python3 verify_grub_boot_sector.py grub.iso
 
 # 反汇编分析 core.img
-python3 disassemble_core_img.py grub.iso [kernel_sector]
+python3 verify_grub_boot_sector.py grub.iso
 ```
 
 ## boot.S 分析
@@ -313,5 +316,7 @@ LOCAL(bootloop):
 
 ## 分析工具
 
-- **`analyze_grub_boot_sector.sh`** - 分析引导扇区，查找 kernel_sector 和 core.img 位置
-- **`disassemble_core_img.py`** - 反汇编分析 core.img，判断压缩状态
+- **`verify_grub_boot_sector.py`** - GRUB ISO 镜像验证脚本（统一版本），整合了所有 GRUB 分析功能
+  - 分析引导扇区，查找 kernel_sector 和 core.img 位置
+  - 反汇编分析 core.img，判断压缩状态
+  - 数据特征分析和压缩评分系统
