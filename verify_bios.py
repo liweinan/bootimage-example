@@ -2,7 +2,16 @@
 """
 BIOS.bin 验证脚本（统一版本）
 
-整合了固定地址验证和文件结构分析功能：
+**重要说明：**
+- 这个脚本验证的是 **BIOS 固件**（bios.bin），不是 Bootloader
+- BIOS 映射在物理地址 0xF0000-0xFFFFF（由 QEMU 加载）
+- Bootloader（boot.bin）会被 BIOS 加载到 0x7C00（使用 verify_boot_sector.py 验证）
+
+**BIOS vs Bootloader：**
+- **BIOS (bios.bin)**：固件代码，映射到 0xF0000-0xFFFFF，由 QEMU 直接加载
+- **Bootloader (boot.bin)**：引导程序，从磁盘读取，由 BIOS 加载到 0x7C00
+
+**功能：**
 1. 验证 BIOS ROM 文件中的关键固定地址是否正确
 2. 分析 BIOS 文件结构（两个 64KB 块的内容分布）
 3. 查找关键 BIOS 入口点

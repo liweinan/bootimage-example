@@ -204,9 +204,11 @@ DISPLAY=:1 make run-gui
 
 ### 分析与验证工具
 
-#### BIOS 分析工具
+#### BIOS 固件分析工具
 
-- **[verify_bios.py](verify_bios.py)** - BIOS 验证脚本（统一版本）
+- **[verify_bios.py](verify_bios.py)** - BIOS 固件验证脚本（统一版本）
+  - **验证对象**：BIOS 固件（bios.bin），映射到物理地址 0xF0000-0xFFFFF
+  - **注意**：这是验证 BIOS 固件，不是 Bootloader（Bootloader 使用 verify_boot_sector.py）
   - 验证 BIOS ROM 文件中的关键固定地址是否正确
   - 分析 BIOS 文件结构（两个 64KB 块的内容分布）
   - 查找关键 BIOS 入口点
@@ -219,6 +221,16 @@ DISPLAY=:1 make run-gui
 - **[analyze_bios_structure.py](analyze_bios_structure.py)** - BIOS 结构分析脚本
 
 - **[BIOS_MEMORY_MAPPING.md](BIOS_MEMORY_MAPPING.md)** - BIOS 文件映射到物理内存的证据分析文档
+
+#### Bootloader（引导扇区）分析工具
+
+- **[verify_boot_sector.py](verify_boot_sector.py)** - 引导扇区验证脚本
+  - **验证对象**：Bootloader（boot.bin），由 BIOS 加载到内存地址 0x7C00
+  - **注意**：这是验证 Bootloader，不是 BIOS 固件（BIOS 使用 verify_bios.py）
+  - 验证引导扇区文件大小（512 字节）
+  - 验证引导扇区签名（0xAA55）
+  - 验证代码内容和内存地址映射（0x7C00-0x7DFF）
+  - 使用方法：`python3 verify_boot_sector.py [boot_file]`
 
 #### GRUB 分析工具
 

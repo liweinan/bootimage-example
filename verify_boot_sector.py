@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 """
-验证引导扇区 boot.bin 在内存地址 0x7C00 位置的代码
+验证引导扇区 boot.bin（Bootloader）在内存地址 0x7C00 位置的代码
 
-引导扇区会被 BIOS 加载到内存地址 0x7C00 处执行。
+**重要说明：**
+- 这个脚本验证的是 **Bootloader（引导程序）**，不是 BIOS
+- Bootloader 会被 BIOS 从磁盘加载到内存地址 0x7C00 处执行
+- BIOS 本身映射在 0xF0000-0xFFFFF（使用 verify_bios.py 验证）
+
+**引导流程：**
+1. BIOS（在 0xF0000-0xFFFFF）初始化完成
+2. BIOS 通过 INT 13h 从磁盘读取引导扇区（boot.bin，512 字节）
+3. BIOS 将引导扇区加载到内存地址 0x7C00
+4. BIOS 跳转到 0x7C00 执行引导扇区代码
+
 这个脚本验证 boot.bin 文件的内容，确认其符合引导扇区的要求。
 """
 
