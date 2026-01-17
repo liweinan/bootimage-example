@@ -1587,10 +1587,14 @@ blocklist_default_seg:
     // 最后一个条目 len = 0 表示结束
 ```
 
-**3. diskboot.S 读取块列表的代码：**
+**3. diskboot.S 读取块列表的代码（包含跳转到 startup_raw.S）：**
+
+以下代码展示了 `diskboot.S` 的完整执行流程：从读取块列表到跳转到 `startup_raw.S`。代码包含两个主要部分：
+1. **块列表读取循环**（`LOCAL(bootloop)` - `LOCAL(bootit)` 之前）：遍历所有块列表条目，读取并复制数据
+2. **跳转到 startup_raw.S**（`LOCAL(bootit)` 标签）：所有块列表处理完成后，跳转到 `startup_raw.S`
 
 ```asm
-// grub/grub-core/boot/i386/pc/diskboot.S:61-310
+// grub/grub-core/boot/i386/pc/diskboot.S:61-320
 _start:
     // 设置 %di 指向第一个块列表条目
     // 块列表在扇区末尾，文件偏移 0x1F4，内存地址 0x81F4
@@ -1599,7 +1603,7 @@ _start:
 LOCAL(bootloop):
     // 检查 len 字段（偏移 8 字节）
     cmpw    $0, 8(%di)
-    je      LOCAL(bootit)  // 如果 len = 0，跳转到启动代码
+    je      LOCAL(bootit)  // 如果 len = 0，跳转到启动代码（所有块列表处理完成）
     
 LOCAL(setup_sectors):
     // 读取 start 字段（偏移 0-7 字节）：起始扇区号
@@ -1628,25 +1632,22 @@ LOCAL(copy_buffer):
     subw    $GRUB_BOOT_MACHINE_LIST_SIZE, %di
     jmp     LOCAL(bootloop)  // 继续处理下一个条目
 
+// ========== 跳转到 startup_raw.S ==========
 LOCAL(bootit):
     // 所有块列表条目处理完成，跳转到 startup_raw.S
     // startup_raw.S 位于内存地址 0x8200（段地址 0x0000，偏移 0x8200）
     // 源代码位置：grub/grub-core/boot/i386/pc/diskboot.S:310-320
-    movw    $GRUB_BOOT_MACHINE_KERNEL_SEG, %ax  // %ax = 0x0000
-    movw    %ax, %ds                              // 设置数据段
-    movw    %ax, %ss                              // 设置栈段
     
-    // 跳转到 startup_raw.S 入口点（0x8200）
-    // 使用长跳转（ljmp）或近跳转（jmp），取决于代码段设置
-    ljmp    $GRUB_BOOT_MACHINE_KERNEL_SEG, $GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200
-    // 或者简化为：
-    // jmp     $0x0000, $0x8200
-    // 实际代码可能是：
-    // movw    $0x0000, %ax
-    // pushw   %ax
-    // movw    $0x8200, %ax
-    // pushw   %ax
-    // lret    // 长返回，跳转到 0x0000:0x8200
+    // 设置段寄存器
+    movw    $GRUB_BOOT_MACHINE_KERNEL_SEG, %ax  // %ax = 0x0000
+    movw    %ax, %ds                              // 设置数据段 = 0x0000
+    movw    %ax, %ss                              // 设置栈段 = 0x0000
+    
+    // 跳转到 startup_raw.S 入口点（0x0000:0x8200）
+    // 使用长跳转（ljmp）跳转到段地址 0x0000，偏移 0x8200
+    ljmp    $GRUB_BOOT_MACHINE_KERNEL_SEG, $(GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
+    // 等价于：ljmp $0x0000, $0x8200
+    // 这会跳转到物理地址 0x8200，即 startup_raw.S 的入口点（LOCAL(codestart)）
 ```
 
 **4. 块列表字段的内存布局：**
