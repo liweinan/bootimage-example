@@ -422,33 +422,42 @@ if command -v objdump >/dev/null 2>&1; then
         echo ""
         echo "startup_raw.S 反汇编代码（前 40 行，对应内存地址 0x8200+）:"
         echo "----------------------------------------------------------------------"
-        # 显示包含指令的行，过滤出 startup_raw.S 区域（内存地址 0x8200+，对应文件偏移 512+）
+        # 使用 --adjust-vma=0x8000 重新反汇编，确保地址正确
+        OBJDUMP_STARTUP=$(objdump -D -b binary -m i386 -M intel --adjust-vma=0x8000 "$FRONT_4K_BIN" 2>&1)
+        OBJDUMP_STARTUP_TMP="$TEMP_DIR/objdump_startup.txt"
+        echo "$OBJDUMP_STARTUP" > "$OBJDUMP_STARTUP_TMP"
+        
+        # 使用 awk 过滤并显示 startup_raw.S 区域（内存地址 0x8200-0x9000）
         LINE_COUNT=0
         while IFS= read -r line && [ "$LINE_COUNT" -lt 40 ]; do
             # 检查是否是包含地址的行
             if echo "$line" | grep -qE "^\s*(0x)?[0-9a-fA-F]+:"; then
-                # 提取地址
+                # 提取地址（支持多种格式）
                 ADDR_STR=""
+                # 格式1: "   0x008200:" 或 "  0x8200:"
                 if echo "$line" | grep -qE "^\s*0x[0-9a-fA-F]+:"; then
                     ADDR_STR=$(echo "$line" | sed -n 's/.*0x\([0-9a-fA-F]*\):.*/\1/p' | head -1)
+                # 格式2: "   2080:" 
                 elif echo "$line" | grep -qE "^\s+[0-9a-fA-F]+:"; then
                     ADDR_STR=$(echo "$line" | sed -n 's/^\s*\([0-9a-fA-F]*\):.*/\1/p' | head -1)
                 fi
                 
                 if [ -n "$ADDR_STR" ]; then
                     ADDR=$((0x$ADDR_STR))
-                    MEM_BASE=32768  # 0x8000
-                    if [ "$ADDR" -ge $MEM_BASE ]; then
-                        FILE_OFFSET=$((ADDR - MEM_BASE))
-                        # 只显示 startup_raw.S 区域（文件偏移 512-4096，对应内存地址 0x8200-0x9000）
-                        if [ "$FILE_OFFSET" -ge 512 ] && [ "$FILE_OFFSET" -lt 4096 ]; then
-                            echo "$line"
-                            LINE_COUNT=$((LINE_COUNT + 1))
-                        fi
+                    # startup_raw.S 区域：内存地址 0x8200-0x9000（对应文件偏移 512-4096）
+                    if [ "$ADDR" -ge 33280 ] && [ "$ADDR" -lt 36864 ]; then  # 0x8200-0x9000
+                        echo "$line"
+                        LINE_COUNT=$((LINE_COUNT + 1))
                     fi
                 fi
             fi
-        done < "$OBJDUMP_TMP"
+        done < "$OBJDUMP_STARTUP_TMP"
+        
+        # 如果没找到，直接显示前 40 行包含地址的行（不过滤地址范围）
+        if [ "$LINE_COUNT" -eq 0 ]; then
+            echo "  ⚠️  未能按地址范围过滤，显示所有反汇编代码（前 40 行包含地址的行）:"
+            echo "$OBJDUMP_STARTUP" | grep -E "^\s*(0x)?[0-9a-fA-F]+:" | head -40
+        fi
         
         LAST_CODE_ADDR=512
         CONSECUTIVE_PADDING=0
