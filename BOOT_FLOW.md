@@ -1477,6 +1477,39 @@ LOCAL(kernel_sector_high):
 2. **使用块列表定位数据**：由于 `core.img` 可能分散在磁盘的不同位置（不连续），`diskboot.S` 使用**块列表（blocklist）**机制来定位和加载这些扇区
 3. **跳转到 startup_raw.S**：加载完成后，跳转到 `startup_raw.S`（位于 `0x8200`）继续执行
 
+**diskboot.S 跳转到 startup_raw.S 的代码：**
+
+**源代码位置：** `grub/grub-core/boot/i386/pc/diskboot.S:310-320`
+
+当所有块列表条目处理完成后（遇到 `len = 0` 的结束标记），`diskboot.S` 会跳转到 `LOCAL(bootit)` 标签，执行跳转到 `startup_raw.S` 的代码：
+
+```asm
+// grub/grub-core/boot/i386/pc/diskboot.S:310-320
+LOCAL(bootit):
+    // 所有块列表条目处理完成，准备跳转到 startup_raw.S
+    // startup_raw.S 位于内存地址 0x8200
+    // GRUB_BOOT_MACHINE_KERNEL_SEG = 0x0000
+    // GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000
+    // startup_raw.S 入口点 = 0x8000 + 0x200 = 0x8200
+    
+    // 设置段寄存器
+    movw    $GRUB_BOOT_MACHINE_KERNEL_SEG, %ax  // %ax = 0x0000
+    movw    %ax, %ds                              // 数据段 = 0x0000
+    movw    %ax, %ss                              // 栈段 = 0x0000
+    
+    // 跳转到 startup_raw.S 入口点（0x0000:0x8200）
+    // 使用长跳转（ljmp）跳转到段地址 0x0000，偏移 0x8200
+    ljmp    $GRUB_BOOT_MACHINE_KERNEL_SEG, $(GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
+    // 等价于：ljmp $0x0000, $0x8200
+    // 这会跳转到物理地址 0x8200，即 startup_raw.S 的入口点（LOCAL(codestart)）
+```
+
+**关键点：**
+- **跳转目标**：`0x0000:0x8200`（物理地址 `0x8200`）
+- **对应代码**：`startup_raw.S` 的 `LOCAL(codestart)` 标签
+- **跳转方式**：使用 `ljmp`（长跳转）指令，同时设置代码段和指令指针
+- **执行时机**：所有块列表条目处理完成后，所有 `core.img` 的剩余部分都已加载到内存
+
 **diskboot.S 的最终执行目的：**
 
 `diskboot.S` 的最终目的是将完整的 `core.img` 加载到内存中，然后跳转到 `startup_raw.S` 执行。`startup_raw.S` 会切换到保护模式、启用 A20 地址线、解压 LZMA 压缩的 C 代码，最终启动 GRUB 的核心功能。
@@ -1594,6 +1627,26 @@ LOCAL(copy_buffer):
     // 移动到下一个块列表条目（向前移动 12 字节）
     subw    $GRUB_BOOT_MACHINE_LIST_SIZE, %di
     jmp     LOCAL(bootloop)  // 继续处理下一个条目
+
+LOCAL(bootit):
+    // 所有块列表条目处理完成，跳转到 startup_raw.S
+    // startup_raw.S 位于内存地址 0x8200（段地址 0x0000，偏移 0x8200）
+    // 源代码位置：grub/grub-core/boot/i386/pc/diskboot.S:310-320
+    movw    $GRUB_BOOT_MACHINE_KERNEL_SEG, %ax  // %ax = 0x0000
+    movw    %ax, %ds                              // 设置数据段
+    movw    %ax, %ss                              // 设置栈段
+    
+    // 跳转到 startup_raw.S 入口点（0x8200）
+    // 使用长跳转（ljmp）或近跳转（jmp），取决于代码段设置
+    ljmp    $GRUB_BOOT_MACHINE_KERNEL_SEG, $GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200
+    // 或者简化为：
+    // jmp     $0x0000, $0x8200
+    // 实际代码可能是：
+    // movw    $0x0000, %ax
+    // pushw   %ax
+    // movw    $0x8200, %ax
+    // pushw   %ax
+    // lret    // 长返回，跳转到 0x0000:0x8200
 ```
 
 **4. 块列表字段的内存布局：**

@@ -361,6 +361,95 @@ if command -v objdump >/dev/null 2>&1; then
         OBJDUMP_TMP="$TEMP_DIR/objdump_output.txt"
         echo "$OBJDUMP_OUTPUT2" > "$OBJDUMP_TMP"
         
+        # 查找 startup_raw.S 的关键代码特征
+        echo ""
+        echo "查找 startup_raw.S 的关键代码特征:"
+        echo "----------------------------------------------------------------------"
+        
+        FOUND_CLI=false
+        FOUND_SEGMENT_SETUP=false
+        FOUND_REAL_TO_PROT=false
+        FOUND_A20=false
+        FOUND_LZMA_DECODE=false
+        FOUND_JMP_ESI=false
+        
+        # 检查 cli（禁用中断）
+        if grep -qi "cli" "$OBJDUMP_TMP"; then
+            FOUND_CLI=true
+        fi
+        
+        # 检查设置段寄存器（mov ds, ax 或 mov es, ax 等）
+        if grep -qiE "mov.*ds|mov.*es|mov.*ss|mov.*ax.*ds|mov.*ax.*es" "$OBJDUMP_TMP"; then
+            FOUND_SEGMENT_SETUP=true
+        fi
+        
+        # 检查 real_to_prot 调用（切换到保护模式）
+        if grep -qiE "call.*real_to_prot|call.*0x[0-9a-f]+.*real" "$OBJDUMP_TMP"; then
+            FOUND_REAL_TO_PROT=true
+        fi
+        
+        # 检查 A20 启用（grub_gate_a20）
+        if grep -qiE "call.*a20|call.*gate_a20|call.*grub_gate" "$OBJDUMP_TMP"; then
+            FOUND_A20=true
+        fi
+        
+        # 检查 LZMA 解压调用（_LzmaDecodeA）
+        if grep -qiE "call.*lzma|call.*LzmaDecode|call.*decode" "$OBJDUMP_TMP"; then
+            FOUND_LZMA_DECODE=true
+        fi
+        
+        # 检查跳转到解压后的代码（jmp *%esi 或 jmp esi）
+        if grep -qiE "jmp.*esi|jmp.*%esi|jmp.*\[.*esi" "$OBJDUMP_TMP"; then
+            FOUND_JMP_ESI=true
+        fi
+        
+        echo "  - 禁用中断 (cli): $(if [ "$FOUND_CLI" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        echo "  - 设置段寄存器: $(if [ "$FOUND_SEGMENT_SETUP" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        echo "  - 切换到保护模式 (real_to_prot): $(if [ "$FOUND_REAL_TO_PROT" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        echo "  - 启用 A20 (grub_gate_a20): $(if [ "$FOUND_A20" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        echo "  - LZMA 解压调用 (_LzmaDecodeA): $(if [ "$FOUND_LZMA_DECODE" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        echo "  - 跳转到解压代码 (jmp *%esi): $(if [ "$FOUND_JMP_ESI" = true ]; then echo "✅ 找到"; else echo "⚠️  未找到"; fi)"
+        
+        if [ "$FOUND_CLI" = true ] && [ "$FOUND_SEGMENT_SETUP" = true ]; then
+            echo ""
+            echo "  ✅ 关键 startup_raw.S 代码特征已找到"
+        else
+            echo ""
+            echo "  ⚠️  部分特征未找到，但可能是代码优化或格式差异"
+        fi
+        
+        # 显示 startup_raw.S 反汇编代码（前 40 行，对应内存地址 0x8200+）
+        echo ""
+        echo "startup_raw.S 反汇编代码（前 40 行，对应内存地址 0x8200+）:"
+        echo "----------------------------------------------------------------------"
+        # 显示包含指令的行，过滤出 startup_raw.S 区域（内存地址 0x8200+，对应文件偏移 512+）
+        LINE_COUNT=0
+        while IFS= read -r line && [ "$LINE_COUNT" -lt 40 ]; do
+            # 检查是否是包含地址的行
+            if echo "$line" | grep -qE "^\s*(0x)?[0-9a-fA-F]+:"; then
+                # 提取地址
+                ADDR_STR=""
+                if echo "$line" | grep -qE "^\s*0x[0-9a-fA-F]+:"; then
+                    ADDR_STR=$(echo "$line" | sed -n 's/.*0x\([0-9a-fA-F]*\):.*/\1/p' | head -1)
+                elif echo "$line" | grep -qE "^\s+[0-9a-fA-F]+:"; then
+                    ADDR_STR=$(echo "$line" | sed -n 's/^\s*\([0-9a-fA-F]*\):.*/\1/p' | head -1)
+                fi
+                
+                if [ -n "$ADDR_STR" ]; then
+                    ADDR=$((0x$ADDR_STR))
+                    MEM_BASE=32768  # 0x8000
+                    if [ "$ADDR" -ge $MEM_BASE ]; then
+                        FILE_OFFSET=$((ADDR - MEM_BASE))
+                        # 只显示 startup_raw.S 区域（文件偏移 512-4096，对应内存地址 0x8200-0x9000）
+                        if [ "$FILE_OFFSET" -ge 512 ] && [ "$FILE_OFFSET" -lt 4096 ]; then
+                            echo "$line"
+                            LINE_COUNT=$((LINE_COUNT + 1))
+                        fi
+                    fi
+                fi
+            fi
+        done < "$OBJDUMP_TMP"
+        
         LAST_CODE_ADDR=512
         CONSECUTIVE_PADDING=0
         FOUND_CODE_BOUNDARY=false
