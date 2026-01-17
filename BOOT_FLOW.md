@@ -2588,6 +2588,23 @@ SYM_CODE_START_NOALIGN(startup_64)
 - **第 74 行**：调用 `__pi_startup_64_setup_gdt_idt` 设置 GDT 和早期 IDT
 - 此时内核已切换到 64 位长模式
 
+**GDT 和 IDT 的区别：**
+
+| 特性 | GDT（全局描述符表） | IDT（中断描述符表） |
+|------|------------------|------------------|
+| **全称** | Global Descriptor Table | Interrupt Descriptor Table |
+| **用途** | 定义内存段（代码段、数据段等） | 定义中断处理程序 |
+| **访问方式** | 通过段选择子（Segment Selector） | 通过中断向量号（0-255） |
+| **寄存器** | GDTR（GDT 基址和界限） | IDTR（IDT 基址和界限） |
+| **加载指令** | `LGDT` | `LIDT` |
+| **条目内容** | 段描述符（基址、界限、权限等） | 中断门/陷阱门/任务门（处理程序地址） |
+| **主要功能** | 内存分段和保护 | 中断处理和异常处理 |
+| **使用场景** | 代码段、数据段、栈段的定义 | CPU 异常、硬件中断、软件中断的处理 |
+
+**简单理解：**
+- **GDT**：定义"内存段是什么"（代码段在哪里、数据段在哪里、权限如何）
+- **IDT**：定义"中断发生时跳转到哪里"（INT 10h 跳到哪里、页故障跳到哪里）
+
 ### 早期 IDT 设置
 
 源代码位置：`linux/arch/x86/kernel/head64.c:276-292`
@@ -2727,6 +2744,16 @@ static void init_8259A(int auto_eoi)
 
 #### APIC 和中断门设置
 
+**重要说明：APIC vs 8259A PIC**
+
+- **8259A PIC**：外部芯片，用于处理硬件中断（IRQ0-15），已在前面重新编程
+- **Local APIC**：CPU 内部集成的中断控制器，用于：
+  - 多处理器系统中的处理器间中断（IPI）
+  - 本地定时器中断
+  - 性能计数器中断
+  - 热中断等
+- **两者关系**：在现代系统中，Local APIC 可以替代或配合 8259A PIC 工作
+
 源代码位置：`linux/arch/x86/kernel/idt.c:281-315`
 
 ```c
@@ -2734,7 +2761,7 @@ static void init_8259A(int auto_eoi)
  * idt_setup_apic_and_irq_gates - 设置 APIC/SMP 和普通中断门
  * 
  * 这是内核完全接管中断系统的最后一步：
- * 1. 设置 APIC 相关的中断门
+ * 1. 设置 APIC 相关的中断门（Local APIC，CPU 内部集成）
  * 2. 为所有外部中断（IRQ）设置中断门
  * 3. 加载 IDT，此时 BIOS 的 IVT 被完全取代
  */
@@ -2744,7 +2771,8 @@ void __init idt_setup_apic_and_irq_gates(void)
 	void *entry;
 
 	// 步骤 1: 从 apic_idts 表设置 APIC 相关的中断门
-	// 包括本地 APIC 中断、SMP IPI 等
+	// 包括本地 APIC 中断（CPU 内部集成）、SMP IPI 等
+	// 注意：这是 Local APIC，不是 8259A PIC
 	idt_setup_from_table(idt_table, apic_idts, ARRAY_SIZE(apic_idts), true);
 
 	// 步骤 2: 为所有外部中断（IRQ）设置中断门
@@ -2779,9 +2807,9 @@ void __init idt_setup_apic_and_irq_gates(void)
 ```
 
 **说明：**
-- **第 289 行**：设置 APIC 相关的中断门
-- **第 291-294 行**：为外部中断（IRQ）设置中断门，指向 `irq_entries_start`
-- **第 309 行**：加载新的 IDT（`load_idt(&idt_descr)`），**此时 BIOS 的 IVT 被完全取代**
+- **第 2748 行**：设置 Local APIC 相关的中断门（CPU 内部集成的 APIC，不是 8259A PIC）
+- **第 2752-2756 行**：为外部中断（IRQ）设置中断门，指向 `irq_entries_start`
+- **第 2771 行**：加载新的 IDT（`load_idt(&idt_descr)`），**此时 BIOS 的 IVT 被完全取代**
 
 > **注意**：关于 BIOS IVT 与 Kernel IDT 的详细对比，请参见 [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md)。  
 > 关于 UEFI 中断处理机制，请参见 [UEFI 中断处理机制](UEFI_INTERRUPT_HANDLING.md)。
