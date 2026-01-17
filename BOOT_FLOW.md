@@ -2256,7 +2256,59 @@ GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数�
 
 **说明**：内核从 GRUB 跳转后，首先执行的是内核镜像中的 setup 代码（实模式），然后切换到保护模式，最终到达 `startup_64`。GRUB 跳转的地址是 `code32_start`，这是 setup 代码的入口点。
 
-源代码位置：`linux/arch/x86/kernel/head_64.S:38-100`
+**执行流程：**
+
+```
+grub_relocator32_boot() 跳转到内核入口点（code32_start）
+    ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
+    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 的偏移）
+    └─ 寄存器状态：
+        ├─ ESI = boot_params 地址
+        ├─ ESP = 栈指针
+        └─ EIP = code32_start（内核入口点）
+    ↓
+Linux 内核 Setup 代码（实模式）
+    ├─ 源代码位置：linux/arch/x86/boot/header.S
+    ├─ 内存位置：0x100000（1MB）或内核指定的地址
+    ├─ 运行模式：实模式（初始阶段）
+    ├─ 验证内核签名（boot_flag = 0xAA55）
+    ├─ 初始化基本环境
+    ├─ 切换到保护模式
+    └─ 跳转到压缩内核解压代码
+        ↓
+压缩内核解压代码（startup_32）
+    ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
+    ├─ 运行模式：32 位保护模式 → 64 位长模式
+    ├─ 设置页表（身份映射：物理地址 = 线性地址）
+    ├─ 切换到 64 位长模式
+    ├─ 解压内核（gzip 解压）
+    └─ 跳转到 startup_64
+        ↓
+startup_64（64 位内核入口点）
+    ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
+    ├─ 运行模式：64 位长模式
+    ├─ 保存 boot_params 结构地址（%RSI → %R15）
+    ├─ 设置初始内核栈
+    ├─ 设置 GS 段基址（per-CPU 数据）
+    ├─ 设置 GDT 和早期 IDT
+    ├─ 切换到内核代码段（__KERNEL_CS）
+    ├─ 激活内存加密（SEV/SME，如果支持）
+    ├─ 验证和清理 CPU 配置（verify_cpu）
+    └─ 继续内核初始化流程
+        ↓
+内核继续初始化（x86_64_start_kernel）
+    ├─ 源代码位置：linux/arch/x86/kernel/head64.c
+    ├─ 设置早期中断处理程序（idt_setup_early_handler）
+    │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
+    ├─ TDX 早期初始化（tdx_early_init，如果支持）
+    ├─ 复制引导数据（copy_bootdata）
+    ├─ 加载微码更新（load_ucode_bsp）
+    ├─ 设置内核高地址映射
+    └─ 启动内核预留区域初始化（x86_64_start_reservations）
+        └─ 最终调用 start_kernel()
+```
+
+**源代码位置：`linux/arch/x86/kernel/head_64.S:38-100`**
 
 ```asm
 // Linux 内核 64 位启动入口点
