@@ -1048,25 +1048,55 @@ boot_cdrom(struct drive_s *drive)
    └─ 所有扇区加载完成后，跳转到 0x8200
     ↓
 5. startup_raw.S 执行（0x8200）
+   ├─ 源代码位置：grub/grub-core/boot/i386/pc/startup_raw.S
    ├─ 切换到保护模式（calll real_to_prot）
+   │   └─ 源代码位置：grub/grub-core/kern/i386/realmode.S
    ├─ 启用 A20 地址线（call grub_gate_a20）
    ├─ 处理 Reed-Solomon 错误纠正（如果启用）
    ├─ 解压 GRUB Core（如果使用 LZMA 压缩）
    │   └─ 调用 _LzmaDecodeA（lzma_decode.S 中的函数）
+   │       ├─ 源代码位置：grub/grub-core/boot/i386/pc/lzma_decode.S
    │       └─ **lzma_decode.S 的加载时机**：
    │           - lzma_decode.S 通过 `#include "lzma_decode.S"` 被包含到 startup_raw.S 中
    │           - 编译时，lzma_decode.S 的代码被编译到 startup_raw.S 的目标文件中
    │           - 因此，lzma_decode.S 在**阶段 2**（diskboot.S 加载 GRUB Core）时
    │             随 startup_raw.S 一起被加载到内存 0x8200+
-   │           - 源代码位置：grub/grub-core/boot/i386/pc/startup_raw.S:359（include 语句）
+   │           - 包含位置：grub/grub-core/boot/i386/pc/startup_raw.S:359（include 语句）
    └─ 跳转到解压后的代码入口点（jmp *%esi）
     ↓
 6. 解压后的代码入口点（grub_stub_init 或类似的初始化函数）
-   ├─ 初始化 GRUB 核心功能
-   └─ 调用 grub_main()
+   ├─ 源代码位置：grub/grub-core/kern/i386/pc/init.c 或类似
+   ├─ 内存位置：0x100000（1MB，如果使用 LZMA 压缩）或 0x8000+（如果不使用 LZMA 压缩）
+   ├─ 运行模式：保护模式
+   ├─ 初始化 GRUB 核心功能：
+   │   ├─ 内存管理初始化（grub_mm_init）
+   │   ├─ 设备驱动初始化
+   │   ├─ 文件系统驱动框架初始化
+   │   └─ 其他核心功能初始化
+   └─ 调用 grub_main()（grub/grub-core/kern/main.c）
     ↓
 7. grub_main() 执行
-   └─ 加载 Linux 内核并跳转
+   ├─ 源代码位置：grub/grub-core/kern/main.c
+   ├─ 解析 grub.cfg 配置文件
+   ├─ 显示启动菜单（如果配置）
+   ├─ 用户选择启动 Linux 内核
+   └─ 执行 linux 命令 → grub_cmd_linux()（grub/grub-core/loader/i386/linux.c）
+    ↓
+8. grub_cmd_linux() 加载内核镜像
+   ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
+   ├─ 加载内核镜像到内存（0x100000）
+   ├─ 设置内核启动参数（boot_params）
+   └─ 注册启动函数 grub_linux_boot()
+    ↓
+9. grub_linux_boot() → grub_relocator32_boot()
+   ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
+   └─ 跳转到内核入口点（code32_start）
+    ↓
+10. 内核开始执行
+    ├─ Setup 代码（实模式）
+    ├─ 切换到保护模式/长模式
+    ├─ 解压内核
+    └─ startup_64（64 位内核入口点）
 ```
 
 **GRUB 引导扇区代码的主要任务：**
@@ -1401,7 +1431,65 @@ LOCAL(kernel_sector_high):
 - 如果偏移 0x1b0 有有效的扇区号（1-100000），且偏移 0x5c 为 0，则使用 HYBRID_BOOT 模式
 - ISO 镜像通常使用 HYBRID_BOOT 模式
 
+**从 boot.S 到 diskboot.S 的过渡：**
+
+`boot.S` 读取 `kernel_sector` 后，会使用 BIOS INT 13h 将 GRUB Core 的第一个扇区（`diskboot.S`）加载到内存地址 `0x8000`，然后跳转到该地址执行。
+
+**diskboot.S 的作用：**
+
+`diskboot.S` 是 GRUB Core 的第一个扇区（512 字节），它的主要任务是：
+
+1. **加载 core.img 的剩余部分**：`boot.S` 只加载了 `core.img` 的第一个扇区，`diskboot.S` 需要加载剩余的扇区
+2. **使用块列表定位数据**：由于 `core.img` 可能分散在磁盘的不同位置（不连续），`diskboot.S` 使用**块列表（blocklist）**机制来定位和加载这些扇区
+3. **跳转到 startup_raw.S**：加载完成后，跳转到 `startup_raw.S`（位于 `0x8200`）继续执行
+
+**diskboot.S 的最终执行目的：**
+
+`diskboot.S` 的最终目的是将完整的 `core.img` 加载到内存中，然后跳转到 `startup_raw.S` 执行。`startup_raw.S` 会切换到保护模式、启用 A20 地址线、解压 LZMA 压缩的 C 代码，最终启动 GRUB 的核心功能。
+
+**diskboot.S 的内部执行顺序：**
+
+1. **初始化**：设置段寄存器，准备读取块列表
+2. **遍历块列表**：从扇区末尾（偏移 0x1F4）读取块列表，逐个处理每个条目
+3. **读取数据块**：对每个块列表条目：
+   - 读取 `start` 字段获取起始扇区号
+   - 读取 `len` 字段获取要读取的扇区数
+   - 使用 BIOS INT 13h 读取扇区到临时缓冲区（`0x7000:0x0000`）
+   - 读取 `segment` 字段获取目标内存段地址
+   - 将数据从临时缓冲区复制到目标地址
+4. **检查结束**：如果 `len = 0`，表示块列表结束
+5. **跳转执行**：跳转到 `startup_raw.S`（`0x8200`）继续执行
+
+**块列表机制：**
+
+块列表存储在 `diskboot.S` 扇区的末尾（偏移 0x1F4-0x1FF），每个条目包含：
+- **起始扇区号**（LBA）：要读取的数据在磁盘上的起始位置
+- **扇区数**：要读取的扇区数量
+- **目标内存段地址**：数据加载到内存的哪个段地址
+
+`diskboot.S` 会遍历块列表，使用 BIOS INT 13h 逐个读取每个块，直到遇到 `len = 0` 的条目（表示块列表结束）。
+
+**块列表中的数据内容：**
+
+块列表中指向的扇区包含 `core.img` 的剩余部分，具体包括：
+- **startup_raw.S**：实模式启动代码，负责切换到保护模式、启用 A20、解压 LZMA 压缩代码
+- **LZMA 压缩的 C 代码**：GRUB 的核心功能代码（文件系统驱动、命令解析器等），压缩后约 24KB
+- **其他模块和数据**：GRUB 运行时需要的其他二进制数据
+
+这些数据在编译时由 `grub-mkimage` 工具打包成 `core.img`，并生成相应的块列表条目，记录每个数据块在磁盘上的位置和目标内存地址。
+
+**为什么需要块列表？**
+
+在深入代码实现之前，先理解为什么需要块列表机制：
+
+- **GRUB Core 大小限制**：GRUB Core 可能很大（几 KB 到几十 KB），跨越多个扇区，无法一次性加载
+- **磁盘碎片问题**：GRUB Core 可能分散在磁盘的不同位置（由于文件系统碎片），不是连续的扇区
+- **分段加载需求**：块列表记录了每个片段的位置，允许分段加载，即使数据不连续也能正确加载
+- **引导扇区限制**：引导扇区只有 512 字节，无法包含完整的加载逻辑，所以将加载逻辑放在第一个 GRUB Core 扇区（diskboot.S）中
+
 **块列表的实际代码实现：**
+
+为了更好地理解块列表机制，下面展示块列表在源代码中的具体实现，包括数据结构定义、汇编代码中的使用方式，以及 `grub-mkimage` 工具如何生成块列表：
 
 **1. 块列表结构定义：**
 
@@ -1535,6 +1623,21 @@ save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
 }
 ```
 
+**关键设计点总结：**
+
+通过以上代码实现，可以总结出块列表机制的关键设计点：
+
+1. **自举机制**：第一个 512 字节包含加载代码（diskboot.S），可以加载剩余的扇区
+2. **块列表存储**：存储在第一个 512 字节的末尾（偏移 0x1F4），由 `grub-mkimage` 在安装时写入
+3. **分段加载**：GRUB Core 可能分散在磁盘的不同位置（由于文件系统碎片），块列表记录了每个片段的位置
+4. **内存布局**：
+   - `0x8000-0x81F3`：diskboot.S 代码（约 0.5KB）
+   - `0x81F4-0x81FF`：块列表数据（12 字节，第一个条目）
+   - `0x8200+`：GRUB Core 的剩余部分（startup_raw.S、C 代码、模块等）
+   - **压缩状态**（已验证）：
+     - 前约 4.1KB 未压缩：diskboot.S + startup_raw.S（在 0x8000+）
+     - 后约 24KB LZMA 压缩：C 代码（解压到 0x100000）
+
 **boot.S 和 diskboot.S 的区别：**
 
 | 特性 | boot.S（引导扇区） | diskboot.S（GRUB Core 第一个扇区） |
@@ -1545,7 +1648,7 @@ save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
 | **功能** | 读取 GRUB Core 第一个扇区 | 加载 GRUB Core 剩余部分 |
 | **代码来源** | `grub/grub-core/boot/i386/pc/boot.S` | `grub/grub-core/boot/i386/pc/diskboot.S` |
 | **加载者** | BIOS（通过 INT 13h） | boot.S（通过 INT 13h） |
-| **包含内容** | 引导代码（约 446 字节）+ 引导签名（2 字节） | diskboot.S 代码（约 500 字节，0x1f4 字节）+ 块列表（12 字节，0xc 字节） |
+| **包含内容** | 引导代码（约 446 字节）+ 引导签名（2 字节） | diskboot.S 代码（约 0.5KB）+ 块列表（12 字节） |
 
 **关键点：**
 - **boot.S 和 diskboot.S 各占 512 字节，但它们是两个不同的扇区**
@@ -1561,25 +1664,17 @@ save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
 - **块列表中的扇区**：是 GRUB Core 镜像在磁盘上的物理存储位置，包含编译后的二进制代码和数据（startup_raw.S、C 代码、模块等）
 - **验证结果**：通过 objdump 反汇编确认 diskboot.S 的关键代码特征（块列表读取、INT 13h 调用、跳转到 startup_raw.S）
 
-**关键设计点：**
+**从 diskboot.S 到 startup_raw.S 的过渡：**
 
-1. **自举机制**：第一个 512 字节包含加载代码（diskboot.S），可以加载剩余的扇区
-2. **块列表**：存储在第一个 512 字节的末尾，由 `grub-mkimage` 在安装时写入
-3. **分段加载**：GRUB Core 可能分散在磁盘的不同位置（由于文件系统碎片），块列表记录了每个片段的位置
-4. **内存布局**：
-   - `0x8000-0x81F3`：diskboot.S 代码（约 400 字节）
-   - `0x81F4-0x81FF`：块列表数据（12 字节，第一个条目）
-   - `0x8200+`：GRUB Core 的剩余部分（startup_raw.S、C 代码、模块等）
-   - **压缩状态**（已验证）：
-     - 前 4KB 未压缩：diskboot.S + startup_raw.S（在 0x8000+）
-     - 后 24KB LZMA 压缩：C 代码（解压到 0x100000）
+当 `diskboot.S` 完成所有块列表条目的读取后，会将控制权转移到 `startup_raw.S`。具体过程如下：
 
-**为什么需要块列表？**
-
-- GRUB Core 可能很大（几 KB 到几十 KB），跨越多个扇区
-- GRUB Core 可能分散在磁盘的不同位置（文件系统碎片）
-- 块列表记录了每个片段的位置，允许分段加载
-- 引导扇区只有 512 字节，无法包含完整的加载逻辑，所以将加载逻辑放在第一个 GRUB Core 扇区中
+1. **diskboot.S 完成加载**：`diskboot.S` 遍历完所有块列表条目（遇到 `len = 0` 的结束标记）后，所有 `core.img` 的剩余部分都已加载到内存中
+2. **内存布局**：此时内存中的布局为：
+   - `0x8000-0x81F3`：diskboot.S 代码
+   - `0x81F4-0x81FF`：块列表数据
+   - `0x8200+`：startup_raw.S 和压缩的 C 代码（已加载但未解压）
+3. **跳转执行**：`diskboot.S` 执行 `jmp` 指令跳转到 `0x8200`，这是 `startup_raw.S` 的入口点（`LOCAL(codestart)`）
+4. **startup_raw.S 接管**：`startup_raw.S` 开始执行，负责切换到保护模式、启用 A20、解压 LZMA 压缩代码等任务
 
 **阶段 3：GRUB Core 从实模式切换到保护模式（仅 BIOS）**
 
@@ -1694,12 +1789,22 @@ post_reed_solomon:
 **执行顺序：**
 ```
 startup_raw.S: jmp *%esi
+    ├─ 源代码位置：grub/grub-core/boot/i386/pc/startup_raw.S
     ↓
 解压后的代码入口点（grub_stub_init 或类似的初始化函数）
-    ├─ 初始化 GRUB 核心功能
-    └─ 调用 grub_main()（main.c）
+    ├─ 源代码位置：grub/grub-core/kern/i386/pc/init.c 或类似
+    ├─ 内存位置：0x100000（1MB，如果使用 LZMA 压缩）或 0x8000+（如果不使用 LZMA 压缩）
+    ├─ 运行模式：保护模式
+    ├─ 初始化 GRUB 核心功能：
+    │   ├─ 内存管理初始化（grub_mm_init）
+    │   ├─ 设备驱动初始化
+    │   ├─ 文件系统驱动框架初始化
+    │   └─ 其他核心功能初始化
+    └─ 调用 grub_main()（grub/grub-core/kern/main.c）
         ↓
 grub_main() 执行
+    ├─ 源代码位置：grub/grub-core/kern/main.c
+    └─ 加载 Linux 内核并跳转
 ```
 
 **关键点：**
@@ -1710,26 +1815,6 @@ grub_main() 执行
 **阶段 3.5：从 startup_raw.S 到 grub_main() 的中间过程**
 
 **源代码位置：** `grub/grub-core/kern/i386/pc/init.c` 或类似的初始化代码
-
-**执行流程：**
-
-```
-startup_raw.S: jmp *%esi
-    ↓
-【阶段 3.5】解压后的代码入口点（grub_stub_init 或类似的初始化函数）
-    ├─ 内存位置：
-    │   - 如果使用 LZMA 压缩：0x100000（1MB，解压后的代码）
-    │   - 如果不使用 LZMA 压缩：0x8000+（前 1MB，未压缩的代码）
-    ├─ 运行模式：保护模式
-    ├─ 初始化 GRUB 核心功能：
-    │   ├─ 内存管理初始化（grub_mm_init）
-    │   ├─ 设备驱动初始化
-    │   ├─ 文件系统驱动框架初始化
-    │   └─ 其他核心功能初始化
-    └─ 调用 grub_main()（grub/grub-core/kern/main.c）
-    ↓
-【阶段 4】grub_main()（GRUB Core C 代码入口，grub/grub-core/kern/main.c）
-```
 
 **关键点：**
 - **解压后的代码入口点**：`startup_raw.S` 的 `jmp *%esi` 跳转到解压后的代码（或未压缩的代码）入口点
@@ -1802,6 +1887,8 @@ startup_raw.S: jmp *%esi
 
 **模式切换的关键步骤（real_to_prot）：**
 
+`startup_raw.S` 中调用的 `real_to_prot` 函数负责从实模式切换到保护模式。这个函数在 `realmode.S` 中实现：
+
 **源代码位置：`grub/grub-core/kern/i386/realmode.S:133-195`**
 
 ```asm
@@ -1848,36 +1935,9 @@ protcseg:
     ret     // 返回，现在在保护模式下
 ```
 
-
-**模式切换的完整流程（BIOS）：**
-
-**跳转流程：**
-
-```
-grub_linux_boot() 被调用
-    ↓
-分配实模式内存（boot_params）
-    ↓
-准备 boot_params 结构
-    ├─ code32_start: 内核入口点地址
-    ├─ cmd_line_ptr: 内核命令行参数地址
-    ├─ ramdisk_image: initramfs 地址
-    └─ e820_map: 内存映射表
-    ↓
-设置寄存器状态
-    ├─ ESI = boot_params 地址（传递给内核）
-    ├─ ESP = 栈指针
-    └─ EIP = code32_start（内核入口点）
-    ↓
-grub_relocator32_boot()
-    ├─ 切换到保护模式（如果还在实模式）
-    ├─ 设置 GDT
-    └─ 跳转到 EIP（内核入口点）
-    ↓
-内核开始执行（Setup 代码 → 解压 → startup_64）
-```
-
 **完整内存布局（引导过程）：**
+
+以下是整个引导过程中内存的使用情况，从 BIOS 加载引导扇区到 GRUB 加载内核：
 
 ```
 内存地址范围              内容
@@ -1892,9 +1952,9 @@ grub_relocator32_boot()
 ...
 0x007C00 - 0x007DFF      引导扇区（MBR）← BIOS 加载到这里
 0x007E00 - 0x007FFF      引导扇区栈
-0x008000 - 0x0081F3      diskboot.S 代码（约 400 字节）← boot.S 加载
+0x008000 - 0x0081F3      diskboot.S 代码（约 0.5KB）← boot.S 加载
 0x0081F4 - 0x0081FF      块列表数据（12 字节，文件偏移 0x1F4）
-0x008200 - 0x008FFF      startup_raw.S（未压缩，已验证前 1.5KB）← diskboot.S 加载
+0x008200 - 0x009063      startup_raw.S（未压缩，约 3.6KB）← diskboot.S 加载
 0x009000 - 0x00CFFF      C 代码（LZMA 压缩状态，约 24KB，已验证）← diskboot.S 加载
 0x00D000 - 0x00FFFF      可用空间
 ...
@@ -1905,6 +1965,8 @@ grub_relocator32_boot()
 ```
 
 **关键步骤总结：**
+
+以下是整个引导过程的关键步骤，从 BIOS 加载引导扇区到 GRUB 加载内核：
 
 1. **BIOS → 引导扇区**：
    - BIOS 调用 INT 13h（AH=0x02）读取磁盘第一个扇区
@@ -1975,24 +2037,28 @@ grub_relocator32_boot()
 
 ```
 grub_main()（grub/grub-core/kern/main.c）
-    ↓
-解析 grub.cfg 配置文件
-    ↓
-显示启动菜单（如果配置）
-    ↓
-用户选择启动 Linux 内核
-    ↓
-执行 linux 命令 → grub_cmd_linux()
-    ↓
-加载内核镜像到内存（0x100000）
-    ↓
-设置内核启动参数（boot_params）
-    ↓
+    ├─ 源代码位置：grub/grub-core/kern/main.c
+    ├─ 解析 grub.cfg 配置文件
+    ├─ 显示启动菜单（如果配置）
+    ├─ 用户选择启动 Linux 内核
+    └─ 执行 linux 命令 → grub_cmd_linux()
+        ↓
+grub_cmd_linux()（grub/grub-core/loader/i386/linux.c）
+    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
+    ├─ 加载内核镜像到内存（0x100000）
+    ├─ 设置内核启动参数（boot_params）
+    └─ 注册启动函数 grub_linux_boot()
+        ↓
 grub_linux_boot() → grub_relocator32_boot()
-    ↓
-跳转到内核入口点（code32_start）
-    ↓
-内核开始执行（Setup 代码 → 解压 → startup_64）
+    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
+    └─ 跳转到内核入口点（code32_start）
+        ↓
+内核开始执行
+    ├─ Setup 代码（实模式）
+    ├─ 切换到保护模式/长模式
+    ├─ 解压内核
+    └─ startup_64（64 位内核入口点）
+        └─ 源代码位置：linux/arch/x86/kernel/head_64.S
 ```
 
 ### GRUB 如何加载内核到 head_64.S 入口点
@@ -2019,6 +2085,7 @@ Linux 内核镜像（bzImage）包含两部分：
 **执行顺序说明：**
 
 1. **grub_main()**（`grub/grub-core/kern/main.c`）：
+   - 源代码位置：`grub/grub-core/kern/main.c`
    - GRUB 的主入口函数
    - 解析 `grub.cfg` 配置文件
    - 显示启动菜单（如果配置）
@@ -2029,11 +2096,13 @@ Linux 内核镜像（bzImage）包含两部分：
    - `grub_cmd_linux()` 在 `linux.c` 中定义，负责加载内核镜像
 
 3. **grub_cmd_linux()**（`grub/grub-core/loader/i386/linux.c`）：
+   - 源代码位置：`grub/grub-core/loader/i386/linux.c`
    - 加载内核镜像到内存
    - 设置内核启动参数
    - 注册启动函数 `grub_linux_boot()`
 
 4. **grub_linux_boot()**（`grub/grub-core/loader/i386/linux.c`）：
+   - 源代码位置：`grub/grub-core/loader/i386/linux.c`
    - 准备跳转到内核入口点
    - 通过 `grub_relocator32_boot()` 执行跳转
 
