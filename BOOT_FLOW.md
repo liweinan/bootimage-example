@@ -1093,10 +1093,44 @@ boot_cdrom(struct drive_s *drive)
    └─ 跳转到内核入口点（code32_start）
     ↓
 10. 内核开始执行
-    ├─ Setup 代码（实模式）
-    ├─ 切换到保护模式/长模式
-    ├─ 解压内核
-    └─ startup_64（64 位内核入口点）
+    ├─ Linux 内核 Setup 代码（实模式）
+    │   ├─ 源代码位置：linux/arch/x86/boot/header.S
+    │   ├─ 内存位置：0x100000（1MB）或内核指定的地址
+    │   ├─ 运行模式：实模式（初始阶段）
+    │   ├─ 验证内核签名（boot_flag = 0xAA55）
+    │   ├─ 初始化基本环境
+    │   ├─ 切换到保护模式
+    │   └─ 跳转到压缩内核解压代码
+    │       ↓
+    ├─ 压缩内核解压代码（startup_32）
+    │   ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
+    │   ├─ 运行模式：32 位保护模式 → 64 位长模式
+    │   ├─ 设置页表（身份映射：物理地址 = 线性地址）
+    │   ├─ 切换到 64 位长模式
+    │   ├─ 解压内核（gzip 解压）
+    │   └─ 跳转到 startup_64
+    │       ↓
+    ├─ startup_64（64 位内核入口点）
+    │   ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
+    │   ├─ 运行模式：64 位长模式
+    │   ├─ 保存 boot_params 结构地址（%RSI → %R15）
+    │   ├─ 设置初始内核栈
+    │   ├─ 设置 GS 段基址（per-CPU 数据）
+    │   ├─ 设置 GDT 和早期 IDT
+    │   ├─ 切换到内核代码段（__KERNEL_CS）
+    │   ├─ 激活内存加密（SEV/SME，如果支持）
+    │   └─ 验证和清理 CPU 配置（verify_cpu）
+    │       ↓
+    └─ 内核继续初始化（x86_64_start_kernel）
+        ├─ 源代码位置：linux/arch/x86/kernel/head64.c
+        ├─ 设置早期中断处理程序（idt_setup_early_handler）
+        │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
+        ├─ TDX 早期初始化（tdx_early_init，如果支持）
+        ├─ 复制引导数据（copy_bootdata）
+        ├─ 加载微码更新（load_ucode_bsp）
+        ├─ 设置内核高地址映射
+        └─ 启动内核预留区域初始化（x86_64_start_reservations）
+            └─ 最终调用 start_kernel()
 ```
 
 **GRUB 引导扇区代码的主要任务：**
