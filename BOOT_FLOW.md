@@ -1064,8 +1064,8 @@ boot_cdrom(struct drive_s *drive)
    │           - 包含位置：grub/grub-core/boot/i386/pc/startup_raw.S:359（include 语句）
    └─ 跳转到解压后的代码入口点（jmp *%esi）
     ↓
-6. 解压后的代码入口点（grub_stub_init 或类似的初始化函数）
-   ├─ 源代码位置：grub/grub-core/kern/i386/pc/init.c 或类似
+6. 解压后的代码入口点（grub_stub_init）
+   ├─ 源代码位置：grub/grub-core/kern/i386/pc/init.c
    ├─ 内存位置：0x100000（1MB，如果使用 LZMA 压缩）或 0x8000+（如果不使用 LZMA 压缩）
    ├─ 运行模式：保护模式
    ├─ 初始化 GRUB 核心功能：
@@ -1852,7 +1852,7 @@ post_reed_solomon:
     // 默认情况（使用 LZMA 压缩）：%esi 指向解压后的代码入口点（0x100000）
     // 特殊情况（不使用 LZMA 压缩）：代码未压缩，直接在前 1MB 中（0x8000+）
     //   - 此时 %esi 可能未设置，或者指向 LOCAL(decompressor_end) 之后的位置
-    //   - 代码入口点通常是 grub_stub_init() 或类似的初始化函数
+    //   - 代码入口点是 grub_stub_init() 函数（grub/grub-core/kern/i386/pc/init.c）
     //   - 如果没有 LZMA，代码可能已经在正确的位置，直接跳转即可
     jmp     *%esi  // 间接跳转：跳转到代码入口点（默认：0x100000，解压后的代码）
 ```
@@ -1872,15 +1872,15 @@ post_reed_solomon:
 
 **代码入口点（解压后或未压缩）：**
 
-`jmp *%esi` 跳转后的代码入口点**不是直接到 `main.c` 的 `grub_main()`**，而是先到一个初始化函数（通常是 `grub_stub_init()` 或类似的函数），该函数位于解压后的 GRUB Core 代码中。
+`jmp *%esi` 跳转后的代码入口点**不是直接到 `main.c` 的 `grub_main()`**，而是先到 `grub_stub_init()` 初始化函数，该函数位于解压后的 GRUB Core 代码中。
 
 **执行顺序：**
 ```
 startup_raw.S: jmp *%esi
     ├─ 源代码位置：grub/grub-core/boot/i386/pc/startup_raw.S
     ↓
-解压后的代码入口点（grub_stub_init 或类似的初始化函数）
-    ├─ 源代码位置：grub/grub-core/kern/i386/pc/init.c 或类似
+解压后的代码入口点（grub_stub_init）
+    ├─ 源代码位置：grub/grub-core/kern/i386/pc/init.c
     ├─ 内存位置：0x100000（1MB，如果使用 LZMA 压缩）或 0x8000+（如果不使用 LZMA 压缩）
     ├─ 运行模式：保护模式
     ├─ 初始化 GRUB 核心功能：
@@ -1902,11 +1902,11 @@ grub_main() 执行
 
 **阶段 3.5：从 startup_raw.S 到 grub_main() 的中间过程**
 
-**源代码位置：** `grub/grub-core/kern/i386/pc/init.c` 或类似的初始化代码
+**源代码位置：** `grub/grub-core/kern/i386/pc/init.c`
 
 **关键点：**
 - **解压后的代码入口点**：`startup_raw.S` 的 `jmp *%esi` 跳转到解压后的代码（或未压缩的代码）入口点
-- **初始化函数**：通常是 `grub_stub_init()` 或类似的函数，负责初始化 GRUB 核心功能
+- **初始化函数**：`grub_stub_init()` 函数，负责初始化 GRUB 核心功能
 - **调用 grub_main()**：初始化完成后，调用 `grub_main()` 进入 GRUB 主程序
 
 **两种情况对比：**
@@ -2092,7 +2092,7 @@ protcseg:
 
 3. **GRUB Core → grub_main()**：
    - startup_raw.S 解压 GRUB Core（如果使用 LZMA 压缩）到 `0x100000`（1MB）
-   - 跳转到解压后的代码入口点（`grub_stub_init()` 或类似的初始化函数）
+   - 跳转到解压后的代码入口点（`grub_stub_init()`）
    - 初始化函数初始化 GRUB 核心功能（内存管理、设备驱动等）
    - 调用 `grub_main()`（`grub/grub-core/kern/main.c`）
    - **此时 GRUB Core 已完全初始化，准备加载内核**
@@ -2141,169 +2141,80 @@ grub_linux_boot() → grub_relocator32_boot()
     ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
     └─ 跳转到内核入口点（code32_start）
         ↓
-内核开始执行
-    ├─ Setup 代码（实模式）
-    ├─ 切换到保护模式/长模式
-    ├─ 解压内核
-    └─ startup_64（64 位内核入口点）
-        └─ 源代码位置：linux/arch/x86/kernel/head_64.S
+grub_relocator32_boot() 跳转到内核入口点（code32_start）
+    ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
+    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 的偏移）
+    └─ 寄存器状态：
+        ├─ ESI = boot_params 地址
+        ├─ ESP = 栈指针
+        └─ EIP = code32_start（内核入口点）
+    ↓
+Linux 内核 Setup 代码（实模式）
+    ├─ 源代码位置：linux/arch/x86/boot/header.S
+    ├─ 内存位置：0x100000（1MB）或内核指定的地址
+    ├─ 运行模式：实模式（初始阶段）
+    ├─ 验证内核签名（boot_flag = 0xAA55）
+    ├─ 初始化基本环境
+    ├─ 切换到保护模式
+    └─ 跳转到压缩内核解压代码
+        ↓
+压缩内核解压代码（startup_32）
+    ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
+    ├─ 运行模式：32 位保护模式 → 64 位长模式
+    ├─ 设置页表（身份映射：物理地址 = 线性地址）
+    ├─ 切换到 64 位长模式
+    ├─ 解压内核（gzip 解压）
+    └─ 跳转到 startup_64
+        ↓
+startup_64（64 位内核入口点）
+    ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
+    ├─ 运行模式：64 位长模式
+    ├─ 保存 boot_params 结构地址（%RSI → %R15）
+    ├─ 设置初始内核栈
+    ├─ 设置 GS 段基址（per-CPU 数据）
+    ├─ 设置 GDT 和早期 IDT
+    ├─ 切换到内核代码段（__KERNEL_CS）
+    ├─ 激活内存加密（SEV/SME，如果支持）
+    ├─ 验证和清理 CPU 配置（verify_cpu）
+    └─ 继续内核初始化流程
+        ↓
+内核继续初始化（x86_64_start_kernel）
+    ├─ 源代码位置：linux/arch/x86/kernel/head64.c
+    ├─ 设置早期中断处理程序（idt_setup_early_handler）
+    │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
+    ├─ TDX 早期初始化（tdx_early_init，如果支持）
+    ├─ 复制引导数据（copy_bootdata）
+    ├─ 加载微码更新（load_ucode_boot）
+    ├─ 设置内核高地址映射
+    └─ 启动内核预留区域初始化（x86_64_start_reservations）
+        └─ 最终调用 start_kernel()
 ```
 
-### GRUB 如何加载内核到 head_64.S 入口点
+### GRUB 加载内核的详细流程
 
-在 GRUB 跳转到内核之前，需要完成以下步骤：
+**源代码位置：** `grub/grub-core/loader/i386/linux.c`
 
-**源代码位置：`grub/grub-core/loader/i386/linux.c`**
+GRUB 加载 Linux 内核的过程包括以下步骤：
 
-#### 内核镜像结构
+1. **grub_main()** 解析 `grub.cfg` 配置文件，执行 `linux` 命令
+2. **grub_cmd_linux()** 打开内核文件（如 `/boot/vmlinuz-5.x.x`），解析内核头部，加载内核镜像到内存
+3. **grub_linux_boot()** 设置启动参数，通过 `grub_relocator32_boot()` 跳转到内核入口点
+
+**内核镜像结构概述：**
 
 Linux 内核镜像（bzImage/vmlinuz）包含两部分：
 
 1. **Setup 代码**（实模式代码）：
    - 大小：通常 4-64 个扇区（由 `setup_sects` 字段指定）
    - 功能：切换到保护模式/长模式，解压内核
+   - 源代码：`linux/arch/x86/boot/header.S`
 
 2. **压缩的内核代码**：
    - 位置：setup 代码之后
    - 格式：gzip 压缩的 vmlinux
    - 加载地址：`0x100000`（1MB）或内核指定的地址
 
-#### vmlinuz 文件详细结构分析
-
-**文件格式概述：**
-
-`vmlinuz`（或 `bzImage`）是 Linux 内核的压缩镜像文件，采用特殊的二进制格式，包含引导所需的所有信息。文件结构如下：
-
-```
-vmlinuz 文件结构：
-┌─────────────────────────────────────────┐
-│ 偏移 0x0000 - 0x01FF (512 字节)        │
-│ 内核头部（boot_params 结构）             │
-│ ├─ boot_flag: 0xAA55（引导扇区签名）    │
-│ ├─ header: "HdrS" (0x53726448)         │
-│ ├─ setup_sects: Setup 代码扇区数        │
-│ ├─ code32_start: 32 位代码入口点偏移    │
-│ ├─ pref_address: 首选加载地址          │
-│ └─ 其他启动参数...                      │
-├─────────────────────────────────────────┤
-│ 偏移 0x0200 - (setup_sects * 512)      │
-│ Setup 代码（实模式代码）                 │
-│ ├─ 源代码：linux/arch/x86/boot/header.S │
-│ ├─ 验证内核签名                         │
-│ ├─ 初始化基本环境                       │
-│ ├─ 切换到保护模式/长模式                │
-│ └─ 跳转到压缩内核解压代码               │
-├─────────────────────────────────────────┤
-│ Setup 代码之后                          │
-│ 压缩的内核代码（gzip 压缩的 vmlinux）   │
-│ ├─ 格式：gzip 压缩                      │
-│ ├─ 内容：完整的 vmlinux（未压缩的内核） │
-│ ├─ 解压目标：0x100000 (1MB) 或更高      │
-│ └─ 解压后：startup_32 → startup_64     │
-└─────────────────────────────────────────┘
-```
-
-**1. 内核头部（boot_params 结构）**
-
-**源代码位置：** `linux/arch/x86/include/uapi/asm/bootparam.h`
-
-内核文件的前 512 字节包含 `boot_params` 结构（也称为 `zero_page`），这是引导加载程序和内核之间的通信接口：
-
-```c
-// linux/arch/x86/include/uapi/asm/bootparam.h
-struct boot_params {
-    // 偏移 0x0000: 引导扇区签名
-    __u8  boot_flag;        // 0xAA55（小端序：0x55 0xAA）
-    
-    // 偏移 0x0001-0x0003: 保留
-    __u8  pad1[3];
-    
-    // 偏移 0x0004-0x0007: 内核头部签名
-    __u32 header;           // "HdrS" (0x53726448)
-    
-    // 偏移 0x0008-0x000B: 内核版本
-    __u16 version;          // 内核头部版本
-    __u16 compat_version;   // 兼容版本
-    
-    // 偏移 0x000C-0x000D: 实模式加载地址
-    __u16 loader_type;     // 引导加载程序类型（GRUB = 0x72）
-    __u16 loadflags;       // 加载标志
-    
-    // 偏移 0x000E-0x000F: 实模式代码大小
-    __u16 setup_sects;     // Setup 代码扇区数（通常 4-64）
-    
-    // 偏移 0x0010-0x0013: 根设备号
-    __u16 root_dev;        // 根设备号（已废弃）
-    __u16 boot_flag_old;   // 旧引导标志（已废弃）
-    
-    // 偏移 0x0014-0x0017: 内核命令行
-    __u32 cmd_line_ptr;    // 内核命令行参数地址（实模式地址）
-    
-    // 偏移 0x0018-0x001B: RAM 磁盘信息
-    __u32 ramdisk_image;   // initramfs 地址
-    __u32 ramdisk_size;    // initramfs 大小
-    
-    // 偏移 0x001C-0x001F: 硬件子架构
-    __u32 hardware_subarch; // 硬件子架构（x86_64 = 0）
-    
-    // 偏移 0x0020-0x0023: 硬件子架构数据
-    __u64 hardware_subarch_data;
-    
-    // 偏移 0x0028-0x002B: 32 位代码入口点
-    __u32 code32_start;     // 32 位保护模式代码入口点（相对于 0x100000 的偏移）
-    
-    // 偏移 0x002C-0x002F: 64 位代码入口点
-    __u64 code64_start;     // 64 位长模式代码入口点（相对于 0x100000 的偏移）
-    
-    // 偏移 0x0030-0x0037: 首选加载地址
-    __u64 pref_address;     // 内核首选加载地址（通常 0x100000）
-    
-    // 偏移 0x0038-0x003B: 初始化大小
-    __u32 init_size;        // 初始化代码大小（包括 setup + 压缩内核）
-    
-    // 偏移 0x003C-0x003F: 握手
-    __u32 handover_offset;  // 握手偏移（用于 EFI 启动）
-    
-    // ... 更多字段（总共 4096 字节，但前 512 字节最重要）
-};
-```
-
-**关键字段说明：**
-
-- **`boot_flag`**（偏移 0x0000）：必须是 `0xAA55`，用于验证这是有效的内核镜像
-- **`header`**（偏移 0x0004）：必须是 `"HdrS"` (0x53726448)，用于验证内核头部格式
-- **`setup_sects`**（偏移 0x000E）：Setup 代码的扇区数（512 字节/扇区），通常为 4-64
-- **`code32_start`**（偏移 0x0028）：32 位保护模式代码入口点，相对于 `0x100000` 的偏移
-- **`pref_address`**（偏移 0x0030）：内核首选加载地址，通常为 `0x100000` (1MB)
-- **`init_size`**（偏移 0x0038）：初始化代码总大小（setup + 压缩内核）
-
-**2. Setup 代码部分**
-
-**源代码位置：** `linux/arch/x86/boot/header.S`
-
-Setup 代码紧跟在 512 字节头部之后，大小由 `setup_sects` 字段指定（通常 4-64 个扇区，即 2-32 KB）：
-
-- **功能**：
-  - 验证内核签名（`boot_flag = 0xAA55`）
-  - 初始化基本环境（段寄存器、栈等）
-  - 切换到保护模式或长模式
-  - 解压压缩的内核代码
-  - 跳转到解压后的内核入口点（`startup_32` 或 `startup_64`）
-
-- **内存位置**：加载到 `0x100000` (1MB) 或内核指定的地址
-
-**3. 压缩的内核代码部分**
-
-**源代码位置：** `linux/arch/x86/boot/compressed/head_64.S`
-
-压缩的内核代码位于 Setup 代码之后，是 gzip 压缩的完整 vmlinux：
-
-- **格式**：gzip 压缩
-- **内容**：完整的 vmlinux（未压缩的内核二进制文件）
-- **解压目标**：`0x100000` (1MB) 或更高地址
-- **解压后**：包含 `startup_32`（32 位保护模式入口）和 `startup_64`（64 位长模式入口）
-
-**GRUB 如何解析 vmlinuz 文件：**
+**GRUB 加载内核的详细代码流程：**
 
 **源代码位置：** `grub/grub-core/loader/i386/linux.c:680-725`
 
@@ -2311,10 +2222,15 @@ Setup 代码紧跟在 512 字节头部之后，大小由 `setup_sects` 字段指
 // grub/grub-core/loader/i386/linux.c
 grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
 {
-    // 步骤 1: 打开内核文件
-    file = grub_file_open (argv[0]);  // 例如：/boot/vmlinuz-5.x.x
+    // 步骤 1: 打开内核文件（如 /boot/vmlinuz-5.x.x）
+    file = grub_file_open (argv[0]);
     
-    // 步骤 2: 读取整个文件到内存
+    // 步骤 2: 读取整个文件到内存（注意：这里只是复制文件，不解压）
+    // vmlinuz 文件包含：
+    //   - 内核头部（512字节，未压缩）
+    //   - Setup 代码（未压缩，可以直接执行）
+    //   - 压缩的内核代码（gzip 压缩的 vmlinux）
+    // GRUB 只是将整个文件从磁盘复制到内存，不解压
     len = grub_file_size (file);
     kernel = grub_malloc (len);
     grub_file_read (file, kernel, len);
@@ -2348,9 +2264,12 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
                                        relocatable, preferred_address);
     
     // 步骤 9: 复制 Setup 代码和压缩内核到目标地址
-    grub_memcpy (prot_mode_mem, kernel, setup_size);  // Setup 代码
+    // 注意：这里只是复制文件内容到内存，不解压
+    // Setup 代码是未压缩的，可以直接执行
+    // 压缩的内核代码需要由 Setup 代码解压
+    grub_memcpy (prot_mode_mem, kernel, setup_size);  // Setup 代码（未压缩）
     grub_memcpy (prot_mode_mem + setup_size, 
-                 kernel + setup_size, kernel_size);    // 压缩内核
+                 kernel + setup_size, kernel_size);    // 压缩内核（gzip 压缩）
     
     // 步骤 10: 设置 boot_params 结构
     linux_params.code32_start = prot_mode_target + 
@@ -2360,9 +2279,165 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
     linux_params.ramdisk_image = ...; // initramfs 地址
     
     // 步骤 11: 注册启动函数
+    // 注意：这里只是注册，并不立即执行跳转
+    // 当用户在 GRUB 菜单中选择启动该项时，才会调用 grub_linux_boot()
     grub_loader_set (grub_linux_boot, grub_linux_unload, 0);
 }
 ```
+
+**GRUB 菜单选择与启动函数的关系：**
+
+**执行时机说明：**
+
+1. **解析 `grub.cfg` 时**（`grub_main()` → `grub_cmd_linux()`）：
+   - 当 GRUB 解析 `grub.cfg` 配置文件时，遇到 `linux` 命令会调用 `grub_cmd_linux()`
+   - `grub_cmd_linux()` 加载内核镜像到内存，设置启动参数
+   - **关键**：此时只是**注册**启动函数 `grub_linux_boot()`，**并不立即执行跳转**
+   - 用户可以继续浏览菜单，选择其他启动项，或修改内核参数
+
+2. **用户选择启动项时**（菜单交互 → `grub_linux_boot()`）：
+   - 当用户在 GRUB 菜单中选择启动该项（按 Enter 键）时
+   - GRUB 会调用之前注册的启动函数 `grub_linux_boot()`
+   - `grub_linux_boot()` 通过 `grub_relocator32_boot()` 执行跳转到内核入口点
+
+**示例 `grub.cfg` 配置：**
+
+```bash
+# /boot/grub/grub.cfg
+menuentry "Linux 5.x.x" {
+    linux /boot/vmlinuz-5.x.x root=/dev/sda1 ro
+    # ↑ 执行 linux 命令时，调用 grub_cmd_linux()
+    #   此时加载内核到内存，注册 grub_linux_boot()
+    #   但不会立即跳转，用户可以继续选择或修改
+    
+    initrd /boot/initrd.img-5.x.x
+    # ↑ 加载 initramfs（可选）
+}
+
+# 用户按 Enter 选择 "Linux 5.x.x" 时：
+# → GRUB 调用 grub_linux_boot()
+# → grub_linux_boot() 调用 grub_relocator32_boot()
+# → 跳转到内核入口点（code32_start）
+```
+
+**关键点：**
+- **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
+- **用户交互触发**：跳转由用户在菜单中选择启动项时触发
+- **灵活性**：用户可以在加载内核后继续浏览菜单、修改参数或选择其他启动项
+
+**步骤 12：grub_linux_boot() 执行跳转**
+
+当用户选择启动内核时，GRUB 会调用注册的 `grub_linux_boot()` 函数，该函数通过 `grub_relocator32_boot()` 跳转到内核入口点：
+
+**源代码位置：** `grub/grub-core/loader/i386/linux.c:446-667`
+
+```c
+// grub/grub-core/loader/i386/linux.c
+grub_linux_boot (void)
+{
+    // 准备 boot_params 结构（包含 code32_start）
+    *ctx.params = linux_params;
+    
+    // 设置寄存器状态
+    struct grub_relocator32_state state;
+    state.esi = ctx.real_mode_target;        // ESI = boot_params 地址
+    state.esp = ctx.real_mode_target;        // ESP = 栈指针
+    state.eip = ctx.params->code32_start;    // EIP = 内核入口点（code32_start）
+    
+    // 跳转到内核（通过 relocator 切换到保护模式并跳转）
+    return grub_relocator32_boot (relocator, state, 0);
+}
+```
+
+**步骤 13：grub_relocator32_boot() 执行跳转**
+
+**源代码位置：** `grub/grub-core/lib/i386/relocator.c:75-117`
+
+```c
+// grub/grub-core/lib/i386/relocator.c
+grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state state, ...)
+{
+    // 设置寄存器值
+    // grub_relocator32_eip 是 relocator 代码中的一个全局变量
+    // 用于存储目标跳转地址，relocator 代码执行时会读取这个变量并加载到 EIP
+    grub_relocator32_eip = state.eip;  // 内核入口点地址（code32_start）
+    grub_relocator32_esi = state.esi;  // boot_params 地址
+    
+    // 准备 relocator 代码（切换到保护模式并跳转）
+    // 将 relocator 代码复制到 relocator_mem 内存区域
+    grub_memmove (relocator_mem, &grub_relocator32_start, ...);
+    
+    // 执行跳转（关闭中断，切换到保护模式，跳转到 state.eip）
+    asm volatile ("cli");
+    ((void (*) (void)) relst) ();  // 跳转到 relocator 代码
+    // relocator 代码会：
+    //   1. 切换到保护模式
+    //   2. 设置 GDT
+    //   3. 从 grub_relocator32_eip 读取地址并加载到 EIP 寄存器
+    //   4. 跳转到内核入口点（code32_start）
+    //   5. 此时 ESI 寄存器包含 boot_params 的地址
+}
+```
+
+**地址来源和加载过程：**
+
+**1. `code32_start` 的来源：**
+
+在 `grub_cmd_linux()` 中计算（步骤 10）：
+
+```c
+// grub/grub-core/loader/i386/linux.c
+// code32_start 的计算：
+linux_params.code32_start = prot_mode_target + 
+                            grub_le_to_cpu32 (lh.code32_start) - 
+                            GRUB_LINUX_BZIMAGE_ADDR;
+// 其中：
+// - prot_mode_target: 内核实际加载地址（通常是 0x100000）
+// - lh.code32_start: 内核头部中的字段，表示相对于 0x100000 的偏移
+// - GRUB_LINUX_BZIMAGE_ADDR: 0x100000（1MB）
+```
+
+**2. `state.eip` 的设置：**
+
+在 `grub_linux_boot()` 中设置（步骤 12）：
+
+```c
+state.eip = ctx.params->code32_start;  // 从 boot_params 中读取 code32_start
+```
+
+**3. `grub_relocator32_eip` 的存储：**
+
+- **存储位置**：`grub_relocator32_eip` 是 relocator 代码中的一个全局变量
+- **赋值时机**：在 `grub_relocator32_boot()` 中赋值（第 2353 行）
+- **用途**：relocator 代码执行时会读取这个变量
+
+**4. 何时加载到 EIP 寄存器：**
+
+在 relocator 代码执行时（`((void (*) (void)) relst)()` 调用后）：
+
+```asm
+; relocator 代码（伪代码，实际在 grub/grub-core/lib/i386/relocator32.S）
+relocator32_start:
+    ; 1. 切换到保护模式
+    ; 2. 设置 GDT
+    ; 3. 从 grub_relocator32_eip 读取地址
+    mov eax, [grub_relocator32_eip]  ; 读取目标地址
+    mov [esp], eax                    ; 准备跳转
+    ; 4. 跳转到内核入口点（此时 EIP = code32_start）
+    jmp eax                           ; 跳转，EIP 寄存器被设置为 code32_start
+```
+
+**关键点总结：**
+- **地址来源**：`code32_start` 在 `grub_cmd_linux()` 中计算，存储在 `boot_params` 中
+- **传递路径**：`boot_params.code32_start` → `state.eip` → `grub_relocator32_eip`
+- **加载时机**：relocator 代码执行时，从 `grub_relocator32_eip` 读取并加载到 EIP 寄存器
+- **最终结果**：CPU 的 EIP 寄存器指向内核入口点（`code32_start`），开始执行内核代码
+
+**关键点：**
+- **`grub_cmd_linux()`** 只负责加载内核镜像到内存，注册启动函数，不执行跳转
+- **`grub_linux_boot()`** 在用户选择启动时被调用，准备跳转参数
+- **`grub_relocator32_boot()`** 实际执行跳转，切换到保护模式并跳转到内核入口点（`code32_start`）
+- **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点
 
 **内存布局（加载后）：**
 
@@ -2379,189 +2454,7 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
 └─ startup_64           64 位长模式入口点
 ```
 
-**验证 vmlinuz 文件的方法：**
-
-可以使用以下命令验证 vmlinuz 文件结构：
-
-```bash
-# 1. 检查文件大小
-ls -lh /boot/vmlinuz-*
-
-# 2. 查看前 512 字节（内核头部）
-hexdump -C /boot/vmlinuz-* | head -20
-
-# 3. 验证引导扇区签名（偏移 0x1FE-0x1FF 应该是 55 AA）
-dd if=/boot/vmlinuz-* bs=1 skip=510 count=2 | od -An -tx1
-
-# 4. 验证头部签名（偏移 0x0004-0x0007 应该是 "HdrS"）
-dd if=/boot/vmlinuz-* bs=1 skip=4 count=4 | od -An -tx1
-
-# 5. 查看 setup_sects 字段（偏移 0x000E-0x000F）
-dd if=/boot/vmlinuz-* bs=1 skip=14 count=2 | od -An -tu2
-```
-
-#### GRUB 加载内核的完整流程
-
-**执行顺序说明：**
-
-1. **grub_main()**（`grub/grub-core/kern/main.c`）：
-   - 源代码位置：`grub/grub-core/kern/main.c`
-   - GRUB 的主入口函数
-   - 解析 `grub.cfg` 配置文件
-   - 显示启动菜单（如果配置）
-   - 当用户选择启动 Linux 内核时，执行命令处理机制
-
-2. **命令处理机制**：
-   - `grub.cfg` 中的 `linux` 命令会调用 `grub_cmd_linux()` 函数
-   - `grub_cmd_linux()` 在 `linux.c` 中定义，负责加载内核镜像
-
-3. **grub_cmd_linux()**（`grub/grub-core/loader/i386/linux.c`）：
-   - 源代码位置：`grub/grub-core/loader/i386/linux.c`
-   - 加载内核镜像到内存
-   - 设置内核启动参数
-   - 注册启动函数 `grub_linux_boot()`
-
-4. **grub_linux_boot()**（`grub/grub-core/loader/i386/linux.c`）：
-   - 源代码位置：`grub/grub-core/loader/i386/linux.c`
-   - 准备跳转到内核入口点
-   - 通过 `grub_relocator32_boot()` 执行跳转
-
-**详细代码流程：**
-
-**步骤 1：grub_main() 解析配置文件并执行命令**
-
-```c
-// grub/grub-core/kern/main.c
-void
-grub_main (void)
-{
-    // 初始化 GRUB 核心功能
-    grub_mm_init ();
-    
-    // 解析 grub.cfg 配置文件
-    grub_config_file = grub_file_open (GRUB_CONFIG_FILE);
-    grub_script_execute_sourcecode (grub_config_file);
-    
-    // 执行配置文件中的命令（例如：linux /boot/vmlinuz-5.x.x）
-    // 这会调用 grub_cmd_linux() 函数
-}
-```
-
-**步骤 2：grub_cmd_linux() 加载内核镜像**
-
-```c
-// grub/grub-core/loader/i386/linux.c:680-725
-grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
-{
-    // 打开内核文件（如 /boot/vmlinuz-5.x.x）
-    file = grub_file_open (argv[0]);
-    
-    // 读取整个文件到内存
-    len = grub_file_size (file);
-    kernel = grub_malloc (len);
-    grub_file_read (file, kernel, len);
-    
-    // 解析内核头部（前 512+ 字节）
-    grub_memcpy (&lh, kernel, sizeof (lh));
-    
-    // 验证内核签名
-    // lh.header 必须是 "HdrS" (0x53726448)
-    // lh.boot_flag 必须是 0xAA55
-}
-```
-
-**步骤 2：计算内核加载地址**
-
-```c
-// grub/grub-core/loader/i386/linux.c:691-823
-// 默认加载地址：0x100000 (1MB)
-grub_uint64_t preferred_address = GRUB_LINUX_BZIMAGE_ADDR;  // 0x100000
-
-// 如果内核支持重定位，使用内核指定的地址
-if (relocatable)
-    preferred_address = grub_le_to_cpu64 (lh.pref_address);
-else
-    preferred_address = GRUB_LINUX_BZIMAGE_ADDR;
-
-// 分配内存并加载内核
-allocate_pages (prot_size, &align, min_align, relocatable, preferred_address);
-// prot_mode_target 是内核实际加载的物理地址
-```
-
-**步骤 3：设置内核启动参数**
-
-```c
-// grub/grub-core/loader/i386/linux.c:820-823
-// code32_start 是内核的入口点地址
-// lh.code32_start 是内核头部中的字段，表示相对于 0x100000 的偏移
-linux_params.code32_start = prot_mode_target + lh.code32_start - GRUB_LINUX_BZIMAGE_ADDR;
-
-// 设置其他参数
-linux_params.type_of_loader = GRUB_LINUX_BOOT_LOADER_TYPE;  // 0x72
-linux_params.cmd_line_ptr = ...;  // 内核命令行参数
-linux_params.ramdisk_image = ...;  // initramfs 地址
-```
-
-**步骤 4：复制内核镜像到目标地址**
-
-```c
-// grub/grub-core/loader/i386/linux.c:1037-1039
-// 将内核镜像（压缩部分）复制到目标地址
-len = prot_file_size;
-grub_memcpy (prot_mode_mem, kernel + kernel_offset, len);
-// prot_mode_mem 指向 prot_mode_target（通常是 0x100000）
-```
-
-**步骤 5：跳转到内核入口点**
-
-```c
-// grub/grub-core/loader/i386/linux.c:446-667
-grub_linux_boot (void)
-{
-    // 准备 boot_params 结构（包含 code32_start）
-    *ctx.params = linux_params;
-    
-    // 设置寄存器状态
-    struct grub_relocator32_state state;
-    state.esi = ctx.real_mode_target;        // ESI = boot_params 地址
-    state.esp = ctx.real_mode_target;        // ESP = 栈指针
-    state.eip = ctx.params->code32_start;    // EIP = 内核入口点
-    
-    // 跳转到内核（通过 relocator 切换到保护模式并跳转）
-    return grub_relocator32_boot (relocator, state, 0);
-}
-```
-
-**步骤 6：Relocator 执行跳转**
-
-```c
-// grub/grub-core/lib/i386/relocator.c:75-117
-grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state state, ...)
-{
-    // 设置寄存器值
-    grub_relocator32_eip = state.eip;  // 内核入口点地址
-    grub_relocator32_esi = state.esi;  // boot_params 地址
-    
-    // 准备 relocator 代码（切换到保护模式并跳转）
-    grub_memmove (relocator_mem, &grub_relocator32_start, ...);
-    
-    // 执行跳转（关闭中断，切换到保护模式，跳转到 state.eip）
-    asm volatile ("cli");
-    ((void (*) (void)) relst) ();  // 跳转到 relocator 代码
-    // relocator 代码会：
-    //   1. 切换到保护模式
-    //   2. 设置 GDT
-    //   3. 跳转到 state.eip（内核入口点）
-}
-```
-
-**内核入口点说明：**
-
-- **`code32_start`**：内核头部字段，表示内核入口点相对于 `0x100000` 的偏移
-- **实际入口地址**：`prot_mode_target + code32_start - 0x100000`
-- **对于 64 位内核**：入口点通常是 `startup_32`（32 位保护模式代码），然后切换到长模式，最终跳转到 `startup_64`
-
-#### 内核启动参数传递
+**内核启动参数传递：**
 
 GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数：
 
@@ -2572,11 +2465,21 @@ GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数�
 - **`e820_map`**：系统内存映射表
 - **`esi` 寄存器**：包含 `boot_params` 的地址（内核通过 `%esi` 访问）
 
+> **详细说明**：关于 vmlinuz 文件结构的完整分析，请参见 [附录：vmlinuz 文件详细结构分析](#附录vmlinuz-文件详细结构分析)。
+
 ### 内核早期启动（64 位）
 
 **说明**：内核从 GRUB 跳转后，首先执行的是内核镜像中的 setup 代码（实模式），然后切换到保护模式，最终到达 `startup_64`。GRUB 跳转的地址是 `code32_start`，这是 setup 代码的入口点。
 
-**执行流程：**
+**重要澄清：vmlinuz 文件的压缩结构**
+
+- **vmlinuz 文件包含两部分**：
+  1. **Setup 代码**（未压缩）：可以直接执行，GRUB 只是将其从磁盘复制到内存
+  2. **压缩的内核代码**（gzip 压缩）：需要由 Setup 代码解压
+- **GRUB 的作用**：只是将整个 vmlinuz 文件从磁盘复制到内存，**不解压**
+- **解压时机**：由内核自己的 Setup 代码完成解压，不是 GRUB
+
+**详细执行流程：**
 
 ```
 grub_relocator32_boot() 跳转到内核入口点（code32_start）
@@ -2591,6 +2494,7 @@ Linux 内核 Setup 代码（实模式）
     ├─ 源代码位置：linux/arch/x86/boot/header.S
     ├─ 内存位置：0x100000（1MB）或内核指定的地址
     ├─ 运行模式：实模式（初始阶段）
+    ├─ **状态说明**：Setup 代码是未压缩的，可以直接执行
     ├─ 验证内核签名（boot_flag = 0xAA55）
     ├─ 初始化基本环境
     ├─ 切换到保护模式
@@ -2601,7 +2505,10 @@ Linux 内核 Setup 代码（实模式）
     ├─ 运行模式：32 位保护模式 → 64 位长模式
     ├─ 设置页表（身份映射：物理地址 = 线性地址）
     ├─ 切换到 64 位长模式
-    ├─ 解压内核（gzip 解压）
+    ├─ **解压内核（gzip 解压）**：
+    │   ├─ 解压 vmlinuz 文件中的压缩内核代码部分
+    │   ├─ 解压目标：0x100000+（覆盖压缩代码区域）
+    │   └─ 这是**第一次解压**，由内核自己的代码完成
     └─ 跳转到 startup_64
         ↓
 startup_64（64 位内核入口点）
@@ -2962,9 +2869,9 @@ boot_disk() 读取引导扇区
     ├─ 解压 GRUB Core（如果使用 LZMA 压缩）
     │   └─ 解压到 GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR
     └─ 跳转到解压后的代码入口点（jmp *%esi）
-    │   └─ %esi 指向解压后的代码（通常是 grub_stub_init() 或类似的初始化函数）
+    │   └─ %esi 指向解压后的代码（grub_stub_init()）
     ↓
-【阶段 3.5】解压后的代码入口点（grub_stub_init 或类似的初始化函数）
+【阶段 3.5】解压后的代码入口点（grub_stub_init）
     ├─ 运行模式：保护模式
     ├─ 初始化 GRUB 核心功能
     │   ├─ 内存管理（grub_mm_init）
@@ -3080,6 +2987,164 @@ boot_disk() 读取引导扇区
 | **IDT 接管** | 内核建立自己的 IDT | `load_idt(&idt_descr)` |
 | **PIC 重新编程** | 中断路由到内核 | `init_8259A()` |
 | **完全接管** | BIOS 不再处理中断 | 所有中断由内核处理 |
+
+---
+
+### 附录：vmlinuz 文件详细结构分析
+
+**文件格式概述：**
+
+`vmlinuz`（或 `bzImage`）是 Linux 内核的压缩镜像文件，采用特殊的二进制格式，包含引导所需的所有信息。文件结构如下：
+
+```
+vmlinuz 文件结构：
+┌─────────────────────────────────────────┐
+│ 偏移 0x0000 - 0x01FF (512 字节)        │
+│ 内核头部（boot_params 结构）             │
+│ ├─ boot_flag: 0xAA55（引导扇区签名）    │
+│ ├─ header: "HdrS" (0x53726448)         │
+│ ├─ setup_sects: Setup 代码扇区数        │
+│ ├─ code32_start: 32 位代码入口点偏移    │
+│ ├─ pref_address: 首选加载地址          │
+│ └─ 其他启动参数...                      │
+├─────────────────────────────────────────┤
+│ 偏移 0x0200 - (setup_sects * 512)      │
+│ Setup 代码（实模式代码）                 │
+│ ├─ 源代码：linux/arch/x86/boot/header.S │
+│ ├─ 验证内核签名                         │
+│ ├─ 初始化基本环境                       │
+│ ├─ 切换到保护模式/长模式                │
+│ └─ 跳转到压缩内核解压代码               │
+├─────────────────────────────────────────┤
+│ Setup 代码之后                          │
+│ 压缩的内核代码（gzip 压缩的 vmlinux）   │
+│ ├─ 格式：gzip 压缩                      │
+│ ├─ 内容：完整的 vmlinux（未压缩的内核） │
+│ ├─ 解压目标：0x100000 (1MB) 或更高      │
+│ └─ 解压后：startup_32 → startup_64     │
+└─────────────────────────────────────────┘
+```
+
+**1. 内核头部（boot_params 结构）**
+
+**源代码位置：** `linux/arch/x86/include/uapi/asm/bootparam.h`
+
+内核文件的前 512 字节包含 `boot_params` 结构（也称为 `zero_page`），这是引导加载程序和内核之间的通信接口：
+
+```c
+// linux/arch/x86/include/uapi/asm/bootparam.h
+struct boot_params {
+    // 偏移 0x0000: 引导扇区签名
+    __u8  boot_flag;        // 0xAA55（小端序：0x55 0xAA）
+    
+    // 偏移 0x0001-0x0003: 保留
+    __u8  pad1[3];
+    
+    // 偏移 0x0004-0x0007: 内核头部签名
+    __u32 header;           // "HdrS" (0x53726448)
+    
+    // 偏移 0x0008-0x000B: 内核版本
+    __u16 version;          // 内核头部版本
+    __u16 compat_version;   // 兼容版本
+    
+    // 偏移 0x000C-0x000D: 实模式加载地址
+    __u16 loader_type;     // 引导加载程序类型（GRUB = 0x72）
+    __u16 loadflags;       // 加载标志
+    
+    // 偏移 0x000E-0x000F: 实模式代码大小
+    __u16 setup_sects;     // Setup 代码扇区数（通常 4-64）
+    
+    // 偏移 0x0010-0x0013: 根设备号
+    __u16 root_dev;        // 根设备号（已废弃）
+    __u16 boot_flag_old;   // 旧引导标志（已废弃）
+    
+    // 偏移 0x0014-0x0017: 内核命令行
+    __u32 cmd_line_ptr;    // 内核命令行参数地址（实模式地址）
+    
+    // 偏移 0x0018-0x001B: RAM 磁盘信息
+    __u32 ramdisk_image;   // initramfs 地址
+    __u32 ramdisk_size;    // initramfs 大小
+    
+    // 偏移 0x001C-0x001F: 硬件子架构
+    __u32 hardware_subarch; // 硬件子架构（x86_64 = 0）
+    
+    // 偏移 0x0020-0x0023: 硬件子架构数据
+    __u64 hardware_subarch_data;
+    
+    // 偏移 0x0028-0x002B: 32 位代码入口点
+    __u32 code32_start;     // 32 位保护模式代码入口点（相对于 0x100000 的偏移）
+    
+    // 偏移 0x002C-0x002F: 64 位代码入口点
+    __u64 code64_start;     // 64 位长模式代码入口点（相对于 0x100000 的偏移）
+    
+    // 偏移 0x0030-0x0037: 首选加载地址
+    __u64 pref_address;     // 内核首选加载地址（通常 0x100000）
+    
+    // 偏移 0x0038-0x003B: 初始化大小
+    __u32 init_size;        // 初始化代码大小（包括 setup + 压缩内核）
+    
+    // 偏移 0x003C-0x003F: 握手
+    __u32 handover_offset;  // 握手偏移（用于 EFI 启动）
+    
+    // ... 更多字段（总共 4096 字节，但前 512 字节最重要）
+};
+```
+
+**关键字段说明：**
+
+- **`boot_flag`**（偏移 0x0000）：必须是 `0xAA55`，用于验证这是有效的内核镜像
+- **`header`**（偏移 0x0004）：必须是 `"HdrS"` (0x53726448)，用于验证内核头部格式
+- **`setup_sects`**（偏移 0x000E）：Setup 代码的扇区数（512 字节/扇区），通常为 4-64
+- **`code32_start`**（偏移 0x0028）：32 位保护模式代码入口点，相对于 `0x100000` 的偏移
+- **`pref_address`**（偏移 0x0030）：内核首选加载地址，通常为 `0x100000` (1MB)
+- **`init_size`**（偏移 0x0038）：初始化代码总大小（setup + 压缩内核）
+
+**2. Setup 代码部分**
+
+**源代码位置：** `linux/arch/x86/boot/header.S`
+
+Setup 代码紧跟在 512 字节头部之后，大小由 `setup_sects` 字段指定（通常 4-64 个扇区，即 2-32 KB）：
+
+- **功能**：
+  - 验证内核签名（`boot_flag = 0xAA55`）
+  - 初始化基本环境（段寄存器、栈等）
+  - 切换到保护模式或长模式
+  - 解压压缩的内核代码
+  - 跳转到解压后的内核入口点（`startup_32` 或 `startup_64`）
+
+- **内存位置**：加载到 `0x100000` (1MB) 或内核指定的地址
+
+**3. 压缩的内核代码部分**
+
+**源代码位置：** `linux/arch/x86/boot/compressed/head_64.S`
+
+压缩的内核代码位于 Setup 代码之后，是 gzip 压缩的完整 vmlinux：
+
+- **格式**：gzip 压缩
+- **内容**：完整的 vmlinux（未压缩的内核二进制文件）
+- **解压目标**：`0x100000` (1MB) 或更高地址
+- **解压后**：包含 `startup_32`（32 位保护模式入口）和 `startup_64`（64 位长模式入口）
+
+**验证 vmlinuz 文件的方法：**
+
+可以使用以下命令验证 vmlinuz 文件结构：
+
+```bash
+# 1. 检查文件大小
+ls -lh /boot/vmlinuz-*
+
+# 2. 查看前 512 字节（内核头部）
+hexdump -C /boot/vmlinuz-* | head -20
+
+# 3. 验证引导扇区签名（偏移 0x1FE-0x1FF 应该是 55 AA）
+dd if=/boot/vmlinuz-* bs=1 skip=510 count=2 | od -An -tx1
+
+# 4. 验证头部签名（偏移 0x0004-0x0007 应该是 "HdrS"）
+dd if=/boot/vmlinuz-* bs=1 skip=4 count=4 | od -An -tx1
+
+# 5. 查看 setup_sects 字段（偏移 0x000E-0x000F）
+dd if=/boot/vmlinuz-* bs=1 skip=14 count=2 | od -An -tu2
+```
 
 ---
 
