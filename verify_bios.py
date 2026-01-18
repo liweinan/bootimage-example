@@ -716,28 +716,28 @@ def main():
             sys.exit(1)
         
         address_results = []
-        for name, info in KEY_ADDRESSES.items():
-            result = verify_address(
-                name,
-                info['phys'],
-                info['expected'],
+    for name, info in KEY_ADDRESSES.items():
+        result = verify_address(
+            name,
+            info['phys'],
+            info['expected'],
                 info['description'],
                 bios_file
-            )
+        )
             address_results.append((name, result))
-        
+    
         reset_result = analyze_reset_vector(bios_file)
         find_0xff_padding(bios_file)
-        
+    
         passed = sum(1 for _, result in address_results if result)
         total = len(address_results)
         results.append(('addresses', passed == total and reset_result))
-        
-        print(f"\n{'='*70}")
+    
+    print(f"\n{'='*70}")
         print("固定地址验证总结")
-        print(f"{'='*70}")
-        print(f"关键地址验证: {passed}/{total} 通过")
-        print(f"Reset Vector 分析: {'✅ 通过' if reset_result else '❌ 失败'}")
+    print(f"{'='*70}")
+    print(f"关键地址验证: {passed}/{total} 通过")
+    print(f"Reset Vector 分析: {'✅ 通过' if reset_result else '❌ 失败'}")
     
     # 最终总结
     if len(results) > 1:

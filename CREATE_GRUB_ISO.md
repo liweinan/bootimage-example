@@ -2,7 +2,7 @@
 
 **目标**：在 QEMU 中启动 GRUB2（BIOS 模式），无需完整操作系统，常用于 bootloader 开发、测试或学习。
 
-**适用系统**：Ubuntu / Debian / Pop!_OS 等使用 apt 的发行版
+**适用系统**：Ubuntu / Debian / Pop!_OS 等使用 apt 的发行版  
 **当前日期参考**：2026 年 1 月（包名与安装方式基本保持稳定）
 
 ## 1. 安装所有必要依赖包
@@ -192,7 +192,7 @@ grub-mkrescue -o grub.iso iso
 qemu-system-x86_64 -cdrom grub.iso -boot d -m 512
 ```
 
-完成以上步骤，你就可以自由地在 QEMU 中玩转 GRUB2 了！
+完成以上步骤，你就可以自由地在 QEMU 中玩转 GRUB2 了！  
 
 后续如果要加载自己的 kernel/initrd，可直接在 `grub.cfg` 中添加 `multiboot` / `linux` / `initrd` 条目。
 

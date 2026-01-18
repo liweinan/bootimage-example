@@ -1188,9 +1188,9 @@ boot.S 通过 `kernel_sector` 字段知道 GRUB Core 第一个扇区的位置，
    - diskboot.S 读取块列表（从内存地址 `0x81F4` 开始，对应文件偏移 `0x1F4`）
    - **块列表结构**（已验证）：
      - 每个条目 12 字节：start（8 字节，LBA 扇区号）+ len（2 字节，扇区数）+ segment（2 字节，目标段地址）
-     - 第一个条目示例（ISO 镜像）：start=11917, len=56, segment=0x0820
-     - 最后一个条目 len=0 表示结束
-   - 循环处理每个块列表条目：
+     - **实际只有一个条目**（由于第一个扇区只有 12 字节空间，详见下文）
+     - 条目示例（ISO 镜像）：start=11917, len=56, segment=0x0820
+   - 处理块列表条目：
      - 读取条目指定的扇区（使用 INT 13h，先读到临时缓冲区 `0x7000:0x0000`）
      - 复制到目标内存地址（由 segment 字段指定，例如 segment=0x0820 对应物理地址 `0x8200`）
    - 所有扇区加载完成后，跳转到 0x8200（startup_raw.S 入口点）
@@ -1570,6 +1570,41 @@ struct grub_pc_bios_boot_blocklist
 } GRUB_PACKED;
 ```
 
+**`GRUB_BOOT_MACHINE_LIST_SIZE` 的计算逻辑：**
+
+`GRUB_BOOT_MACHINE_LIST_SIZE` 宏定义为块列表结构体的大小，计算方式如下：
+
+1. **结构体字段大小**：
+   - `grub_uint64_t start`：64 位无符号整数 = **8 字节**
+   - `grub_uint16_t len`：16 位无符号整数 = **2 字节**
+   - `grub_uint16_t segment`：16 位无符号整数 = **2 字节**
+
+2. **`GRUB_PACKED` 的作用**：
+   - `GRUB_PACKED` 是一个编译器属性（`__attribute__((packed))`），确保结构体字段紧密排列，**无填充字节**
+   - 如果没有 `GRUB_PACKED`，编译器可能会在字段之间插入填充字节以对齐内存边界
+   - 使用 `GRUB_PACKED` 后，结构体大小 = 各字段大小之和
+
+3. **计算过程**：
+   ```
+   GRUB_BOOT_MACHINE_LIST_SIZE = sizeof(struct grub_pc_bios_boot_blocklist)
+                                = sizeof(grub_uint64_t) + sizeof(grub_uint16_t) + sizeof(grub_uint16_t)
+                                = 8 + 2 + 2
+                                = 12 字节
+   ```
+
+4. **在 GRUB 源代码中的定义**（通常在 `grub/include/grub/offsets.h` 或类似文件中）：
+   ```c
+   #define GRUB_BOOT_MACHINE_LIST_SIZE \
+       (sizeof (struct grub_pc_bios_boot_blocklist))
+   // 或者直接定义为：
+   #define GRUB_BOOT_MACHINE_LIST_SIZE 12
+   ```
+
+5. **验证方法**：
+   - 从汇编代码中可以看到：`.org 0x200 - GRUB_BOOT_MACHINE_LIST_SIZE` 定位到 `0x1F4`（512 - 12 = 500 字节）
+   - 从内存布局验证：块列表在 `0x81F4-0x81FF`，正好是 12 字节（0x1FF - 0x1F4 + 1 = 12）
+   - 从汇编代码中可以看到：`subw $GRUB_BOOT_MACHINE_LIST_SIZE, %di` 每次移动 12 字节到下一个条目
+
 **2. 块列表在 diskboot.S 中的汇编定义：**
 
 ```asm
@@ -1692,6 +1727,26 @@ LOCAL(copy_buffer):
     // 移动到下一个块列表条目（向前移动 12 字节）
     subw    $GRUB_BOOT_MACHINE_LIST_SIZE, %di
     jmp     LOCAL(bootloop)  // 继续处理下一个条目
+```
+
+**从汇编代码中验证 `GRUB_BOOT_MACHINE_LIST_SIZE = 12` 字节：**
+
+1. **字段偏移位置验证**：
+   - `movl (%di), %ebx`：读取 `start` 字段的低 32 位，偏移 0 字节
+   - `movl 4(%di), %ecx`：读取 `start` 字段的高 32 位，偏移 4 字节
+   - `movw 8(%di), %ax`：读取 `len` 字段，偏移 8 字节（`start` 字段 8 字节后）
+   - `movw 10(%di), %es`：读取 `segment` 字段，偏移 10 字节（`len` 字段 2 字节后）
+   - **字段布局**：`start`(0-7) + `len`(8-9) + `segment`(10-11) = **12 字节**
+
+2. **指针移动验证**：
+   - `subw $GRUB_BOOT_MACHINE_LIST_SIZE, %di`：每次处理完一个条目后，将 `%di` 减少 `GRUB_BOOT_MACHINE_LIST_SIZE`
+   - 由于块列表是从高地址向低地址排列（`%di` 递减），每次减少 12 字节正好移动到下一个条目
+   - **验证**：如果 `GRUB_BOOT_MACHINE_LIST_SIZE` 不是 12，指针移动会错位
+
+3. **内存布局验证**：
+   - `.org 0x200 - GRUB_BOOT_MACHINE_LIST_SIZE`：定位到 `0x1F4`（512 - 12 = 500 字节）
+   - 块列表在 `0x81F4-0x81FF`，正好是 12 字节（0x1FF - 0x1F4 + 1 = 12）
+   - **验证**：如果 `GRUB_BOOT_MACHINE_LIST_SIZE` 不是 12，块列表位置会不正确
 
 // ========== 跳转到 startup_raw.S ==========
 LOCAL(bootit):
@@ -1728,14 +1783,31 @@ LOCAL(bootit):
 - 8(%di)     → len
 - 10(%di)    → segment
 
-实际验证示例（ISO 镜像）：
+**块列表条目的数量和存储限制：**
+
+**实际验证结果（来自 verify_grub_boot_sector.sh）：**
+
 - 块列表位置：文件偏移 0x1F4，内存地址 0x81F4（在 diskboot.S 扇区的末尾）
-- 第一个条目：start=11917 (0x2e8d), len=56, segment=0x0820
+- **只有一个条目**：start=11917 (0x2e8d), len=56, segment=0x0820
   - start=11917：表示从扇区 11917 开始读取（kernel_sector + 1）
   - len=56：需要读取 56 个扇区（约 28KB）
   - segment=0x0820：目标内存段，对应物理地址 0x8200（startup_raw.S 入口点）
-- 最后一个条目：len=0，表示块列表结束
-```
+
+**为什么只有一个条目：**
+
+1. **存储限制**：第一个扇区只有 12 字节空间（0x81F4-0x81FF），只能存储一个块列表条目
+   - 如果有多个条目，它们需要存储在代码区域（0x8000-0x81F3），这会覆盖 `diskboot.S` 的代码，导致无法执行
+   - 因此，**实际上无法存储多个条目**
+
+2. **grub-mkimage 的行为**：
+   - `grub-mkimage` 在生成 `core.img` 时，**尽量将 core.img 放在连续扇区中**
+   - 如果 `core.img` 被碎片化，`grub-mkimage` 会尽量重新组织，确保连续，避免需要多个条目
+   - 因此，**总是只需要一个条目**
+
+3. **diskboot.S 的循环逻辑**：
+   - 虽然代码中有处理多个条目的循环逻辑（`cmpw $0, 8(%di)` 检查 `len` 字段，`subw $GRUB_BOOT_MACHINE_LIST_SIZE, %di` 移动到下一个条目）
+   - 但由于存储限制，**循环逻辑实际上用不上**
+   - 可能是历史遗留代码或为了代码的通用性而保留
 
 **5. 块列表的生成代码（grub-install）：**
 
@@ -1777,15 +1849,12 @@ save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
 通过以上代码实现，可以总结出块列表机制的关键设计点：
 
 1. **自举机制**：第一个 512 字节包含加载代码（diskboot.S），可以加载剩余的扇区
-2. **块列表存储**：存储在第一个 512 字节的末尾（偏移 0x1F4），由 `grub-mkimage` 在安装时写入
-3. **分段加载**：GRUB Core 可能分散在磁盘的不同位置（由于文件系统碎片），块列表记录了每个片段的位置
-4. **内存布局**：
+2. **块列表存储**：存储在第一个 512 字节的末尾（偏移 0x1F4，内存地址 0x81F4），由 `grub-mkimage` 在安装时写入
+3. **连续加载**：虽然代码支持多个条目，但由于存储限制，实际只有一个条目，`grub-mkimage` 会确保 `core.img` 连续存放
+4. **内存布局**（详见上文）：
    - `0x8000-0x81F3`：diskboot.S 代码（约 0.5KB）
-   - `0x81F4-0x81FF`：块列表数据（12 字节，第一个条目）
+   - `0x81F4-0x81FF`：块列表数据（12 字节，一个条目）
    - `0x8200+`：GRUB Core 的剩余部分（startup_raw.S、C 代码、模块等）
-   - **压缩状态**（已验证）：
-     - 前约 4.1KB 未压缩：diskboot.S + startup_raw.S（在 0x8000+）
-     - 后约 24KB LZMA 压缩：C 代码（解压到 0x100000）
 
 **boot.S 和 diskboot.S 的区别：**
 
