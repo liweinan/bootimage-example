@@ -1545,6 +1545,115 @@ LOCAL(bootit):
 
 这些数据在编译时由 `grub-mkimage` 工具打包成 `core.img`，并生成相应的块列表条目，记录每个数据块在磁盘上的位置和目标内存地址。
 
+**`core.img` 在源代码中的体现：**
+
+`core.img` 不是单个源文件，而是由 `grub-mkimage` 工具组合多个源文件生成的二进制镜像。在源代码中的体现位置：
+
+**1. 生成工具：**
+
+```c
+// grub/util/grub-mkimage.c
+// 这是生成 core.img 的主要工具
+// 功能：
+// - 解析命令行参数（指定模块、配置文件等）
+// - 收集启动汇编代码（diskboot.S, startup_raw.S）
+// - 收集 C 代码模块（kern/*.c, modules/*.c）
+// - 生成块列表（blocklist）
+// - 压缩（如果启用 LZMA）
+// - 输出 core.img 文件
+```
+
+**2. 组成 core.img 的源文件：**
+
+```
+core.img 的组成：
+├─ 第一个扇区（512 字节）：
+│  └─ grub/grub-core/boot/i386/pc/diskboot.S
+│     └─ 源代码位置：grub/grub-core/boot/i386/pc/diskboot.S
+│
+├─ 第二个扇区开始：
+│  ├─ grub/grub-core/boot/i386/pc/startup_raw.S
+│  │  └─ 源代码位置：grub/grub-core/boot/i386/pc/startup_raw.S
+│  │  └─ 入口点：LOCAL(codestart)，位于 0x8200
+│  │
+│  └─ C 代码部分（LZMA 压缩）：
+│     ├─ grub/grub-core/kern/main.c（grub_main()）
+│     ├─ grub/grub-core/kern/disk.c（磁盘驱动）
+│     ├─ grub/grub-core/kern/file.c（文件操作）
+│     ├─ grub/grub-core/kern/fs.c（文件系统框架）
+│     └─ 其他核心模块...
+```
+
+**3. 生成过程（grub-mkimage）：**
+
+```c
+// grub/util/grub-mkimage.c 的主要流程：
+// 
+// 1. 解析命令行参数
+//    - 指定输出文件：--output /boot/grub/i386-pc/core.img
+//    - 指定模块：--modules "ext2 part_msdos"
+//    - 指定压缩：--compress=xz（或 lzma）
+//
+// 2. 收集启动代码
+//    - 加载 diskboot.S（第一个扇区）
+//    - 加载 startup_raw.S（第二个扇区开始）
+//
+// 3. 收集 C 代码模块
+//    - 链接 kern/*.c 的目标文件
+//    - 链接指定的模块（modules/*.c）
+//
+// 4. 生成块列表
+//    - 调用 save_blocklists()（grub/util/setup.c）
+//    - 记录每个数据块在磁盘上的位置
+//    - 写入 diskboot.S 的末尾（偏移 0x1F4）
+//
+// 5. 压缩（如果启用）
+//    - 使用 LZMA 压缩 C 代码部分
+//    - 保留 diskboot.S 和 startup_raw.S 未压缩
+//
+// 6. 输出 core.img
+//    - 写入 /boot/grub/i386-pc/core.img
+```
+
+**4. 安装过程（grub-install）：**
+
+```c
+// grub/util/grub-install.c 的主要流程：
+//
+// 1. 读取 core.img
+//    - 从 /boot/grub/i386-pc/core.img 读取
+//
+// 2. 确定安装位置
+//    - 传统磁盘：MBR 之后（通常扇区 2048）
+//    - ISO 镜像：El Torito 引导扇区（例如扇区 11916）
+//
+// 3. 写入 core.img
+//    - 将 core.img 写入磁盘的指定扇区
+//    - 记录扇区号到 boot.S 的 kernel_sector 字段
+//
+// 4. 写入 boot.S
+//    - 将 boot.S 写入 MBR（扇区 0）或 El Torito 引导扇区
+//    - 更新 kernel_sector 字段为 core.img 的实际位置
+```
+
+**5. 源代码中的关键文件路径：**
+
+| 文件 | 源代码位置 | 说明 |
+|------|-----------|------|
+| **生成工具** | `grub/util/grub-mkimage.c` | 生成 core.img 的工具 |
+| **安装工具** | `grub/util/grub-install.c` | 安装 core.img 到磁盘的工具 |
+| **块列表生成** | `grub/util/setup.c:save_blocklists()` | 生成块列表的函数 |
+| **diskboot.S** | `grub/grub-core/boot/i386/pc/diskboot.S` | core.img 第一个扇区 |
+| **startup_raw.S** | `grub/grub-core/boot/i386/pc/startup_raw.S` | core.img 第二个扇区开始 |
+| **C 代码** | `grub/grub-core/kern/*.c` | core.img 的 C 代码部分 |
+
+**6. 输出文件位置：**
+
+- **生成后**：`/boot/grub/i386-pc/core.img`（在构建系统中）
+- **安装后**：
+  - 传统磁盘：写入磁盘的 MBR 之后（例如扇区 2048）
+  - ISO 镜像：嵌入到 El Torito 引导扇区中（不在文件系统里）
+
 **为什么需要块列表？**
 
 在深入代码实现之前，先理解为什么需要块列表机制：
@@ -1811,6 +1920,66 @@ LOCAL(bootit):
 
 **5. 块列表的生成代码（grub-install）：**
 
+**grub_boot_blocklist 结构体定义：**
+
+```c
+// grub/include/grub/offsets.h:151-156
+struct grub_pc_bios_boot_blocklist
+{
+    grub_uint64_t start;    // 起始扇区号（LBA，8 字节）
+    grub_uint16_t len;      // 要读取的扇区数（2 字节）
+    grub_uint16_t segment;  // 目标内存段地址（2 字节）
+} GRUB_PACKED;
+
+// 在 grub/util/setup.c 中通常使用类型定义：
+// typedef struct grub_pc_bios_boot_blocklist grub_boot_blocklist;
+```
+
+**结构体字段说明：**
+
+1. **`start`（grub_uint64_t，8 字节）**：
+   - **作用**：存储要读取的数据在磁盘上的起始扇区号（LBA，Logical Block Address）
+   - **大小**：64 位无符号整数，支持大容量磁盘（最大 2^64 扇区）
+   - **示例**：11917（0x2e8d），表示从扇区 11917 开始读取
+   - **在代码中的使用**：
+     - `bl->block->start = grub_host_to_target64 (sector)`：设置起始扇区号
+     - `grub_target_to_host64 (prev->start)`：读取前一个条目的起始扇区号
+
+2. **`len`（grub_uint16_t，2 字节）**：
+   - **作用**：存储要读取的扇区数量
+   - **大小**：16 位无符号整数，最大支持 65535 个扇区（约 32MB）
+   - **示例**：56，表示需要读取 56 个扇区（约 28KB）
+   - **特殊值**：`len = 0` 表示块列表结束（虽然实际使用中只有一个条目）
+   - **在代码中的使用**：
+     - `bl->block->len = grub_host_to_target16 (seclen)`：设置扇区数
+     - `grub_target_to_host16 (prev->len)`：读取前一个条目的扇区数
+     - `cmpw $0, 8(%di)`：在汇编代码中检查 `len` 字段是否为 0
+
+3. **`segment`（grub_uint16_t，2 字节）**：
+   - **作用**：存储目标内存段地址（实模式下的段地址）
+   - **大小**：16 位无符号整数
+   - **物理地址计算**：物理地址 = segment × 16 + offset
+   - **示例**：0x0820，对应物理地址 0x8200（startup_raw.S 入口点）
+     - 计算：0x0820 × 16 = 0x8200
+   - **在代码中的使用**：
+     - `bl->block->segment = grub_host_to_target16 (bl->current_segment)`：设置目标段地址
+     - `movw 10(%di), %es`：在汇编代码中读取 `segment` 字段并设置 ES 寄存器
+
+**GRUB_PACKED 的作用：**
+
+- **`GRUB_PACKED`** 是一个编译器属性（`__attribute__((packed))`），确保结构体字段紧密排列，**无填充字节**
+- **为什么需要**：如果没有 `GRUB_PACKED`，编译器可能会在字段之间插入填充字节以对齐内存边界（例如，在 64 位系统上，`start` 字段后可能会插入 4 字节填充）
+- **结构体大小**：使用 `GRUB_PACKED` 后，结构体大小 = 各字段大小之和 = 8 + 2 + 2 = **12 字节**
+- **验证**：`GRUB_BOOT_MACHINE_LIST_SIZE = sizeof(struct grub_pc_bios_boot_blocklist) = 12`
+
+**类型定义关系：**
+
+- **`grub_pc_bios_boot_blocklist`**：完整的结构体名称，定义在 `grub/include/grub/offsets.h`
+- **`grub_boot_blocklist`**：通常是通过 `typedef` 定义的类型别名，用于简化代码
+- **在 `grub/util/setup.c` 中的使用**：`struct grub_boot_blocklist *prev` 实际上就是 `struct grub_pc_bios_boot_blocklist *prev`
+
+**块列表的生成代码（grub-install）：**
+
 ```c
 // grub/util/setup.c:147-199
 static void
@@ -1843,6 +2012,330 @@ save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
     bl->current_segment += seclen << (GRUB_DISK_SECTOR_BITS - 4);
 }
 ```
+
+**`current_segment` 的计算逻辑：**
+
+**1. 初始化值：**
+
+`bl->current_segment` 的初始值通常设置为 `GRUB_BOOT_MACHINE_KERNEL_SEG + 0x20`：
+
+```c
+// 初始化 current_segment
+// GRUB_BOOT_MACHINE_KERNEL_SEG = 0x0000（或 0x800，取决于平台）
+// 第一个块列表条目的目标地址是 0x8200
+// 段地址 = 物理地址 / 16 = 0x8200 / 16 = 0x0820
+bl->current_segment = GRUB_BOOT_MACHINE_KERNEL_SEG + 0x20;  // 0x0000 + 0x20 = 0x0820
+```
+
+**如何从源代码推断入口点是 startup_raw.S：**
+
+虽然 `setup.c` 中没有明确的注释说明"这就是 startup_raw.S 的入口点"，但可以通过以下方式推断：
+
+**1. diskboot.S 的跳转目标：**
+
+```asm
+// grub/grub-core/boot/i386/pc/diskboot.S:310-320
+ljmp    $GRUB_BOOT_MACHINE_KERNEL_SEG, $(GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
+// 等价于：ljmp $0x0000, $0x8200
+// 跳转到物理地址 0x8200
+```
+
+**2. startup_raw.S 的入口点定义：**
+
+```asm
+// grub/grub-core/boot/i386/pc/startup_raw.S:76-104
+LOCAL (codestart):  // 这是 startup_raw.S 的入口点
+    cli     // 禁用中断，准备模式切换
+    // ...
+```
+
+**为什么 `LOCAL(codestart)` 标签位于 0x8200：**
+
+`LOCAL(codestart)` 位于 0x8200 的原因是由 `core.img` 的文件布局和加载地址决定的：
+
+**1. core.img 的文件布局（由 grub-mkimage 构建）：**
+
+```
+core.img 文件布局：
+├─ 文件偏移 0x0000 - 0x01FF（第一个扇区，512 字节）：
+│  └─ diskboot.S 代码 + 块列表
+│
+└─ 文件偏移 0x0200+（第二个扇区开始）：
+   └─ startup_raw.S（LOCAL(codestart) 标签在文件偏移 0x0200）
+      └─ 紧接其后：C 代码部分（LZMA 压缩）
+```
+
+**2. core.img 加载到内存后的地址映射：**
+
+```
+core.img 加载到内存 0x8000 后：
+├─ 内存地址 0x8000 - 0x81FF（对应文件偏移 0x0000 - 0x01FF）：
+│  └─ diskboot.S 代码 + 块列表
+│
+└─ 内存地址 0x8200+（对应文件偏移 0x0200+）：
+   └─ startup_raw.S（LOCAL(codestart) 标签在内存地址 0x8200）
+```
+
+**3. 地址计算过程：**
+
+- **core.img 加载地址**：`GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000`
+- **startup_raw.S 在 core.img 中的文件偏移**：0x0200（第二个扇区开始）
+- **startup_raw.S 在内存中的地址**：0x8000 + 0x0200 = **0x8200**
+- **`LOCAL(codestart)` 标签**：位于 `startup_raw.S` 的开头，所以也在 0x8200
+
+**4. 在源代码中的体现：**
+
+虽然 `startup_raw.S` 源代码中没有明确的 ORG 指令指定它在 0x8200，但通过以下方式可以确定：
+
+**方法 1：通过 diskboot.S 的跳转目标**
+
+```asm
+// grub/grub-core/boot/i386/pc/diskboot.S:310-320
+ljmp    $GRUB_BOOT_MACHINE_KERNEL_SEG, $(GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
+// 跳转到：0x8000 + 0x200 = 0x8200
+```
+
+- `diskboot.S` 跳转到 `GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200 = 0x8200`
+- 说明下一个代码段（startup_raw.S）从 0x8200 开始
+
+**方法 2：通过 core.img 的文件布局**
+
+- `diskboot.S` 是 `core.img` 的第一个扇区（文件偏移 0x0000-0x01FF）
+- `startup_raw.S` 紧接其后（文件偏移 0x0200+）
+- 加载到内存 0x8000 后，文件偏移对应内存偏移
+- 所以 `startup_raw.S` 在内存中的地址 = 0x8000 + 0x0200 = 0x8200
+
+**方法 3：通过块列表的 segment 字段**
+
+```c
+// grub/util/setup.c
+bl->current_segment = GRUB_BOOT_MACHINE_KERNEL_SEG + 0x20;  // 0x0820
+// segment = 0x0820 → 物理地址 = 0x0820 × 16 = 0x8200
+```
+
+- 块列表的 segment = 0x0820，对应物理地址 0x8200
+- 这正好是 `startup_raw.S` 的入口点位置
+
+**结论：**
+
+`LOCAL(codestart)` 位于 0x8200 是因为：
+1. **`core.img` 的文件布局**：`startup_raw.S` 在文件偏移 0x0200（第二个扇区开始）
+2. **加载地址**：`core.img` 加载到内存 0x8000
+3. **地址映射**：文件偏移 0x0200 → 内存地址 0x8000 + 0x0200 = 0x8200
+4. **标签位置**：`LOCAL(codestart)` 位于 `startup_raw.S` 的开头，所以也在 0x8200
+
+这是由 `grub-mkimage` 构建 `core.img` 时的文件布局和加载地址共同决定的，而不是 `startup_raw.S` 源代码中的明确指定。
+
+**源代码确认：**
+
+通过查看 GRUB 源代码，可以确认 `startup_raw.S` 位于 0x8200 是**源代码中明确指定的**：
+
+**1. `startup_raw.S` 源代码中的明确说明：**
+
+```asm
+// grub/grub-core/boot/i386/pc/startup_raw.S:26
+#define ABS(x)	((x) - LOCAL (base) + GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
+```
+
+这个宏定义明确显示了地址计算：`GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200`，也就是 `0x8000 + 0x200 = 0x8200`。
+
+```asm
+// grub/grub-core/boot/i386/pc/startup_raw.S:41
+/*
+ *  Guarantee that "main" is loaded at 0x0:0x8200.
+ */
+```
+
+这个注释明确说明了 `startup_raw.S` 被保证加载到 `0x8200`。
+
+**2. `diskboot.S` 源代码中的跳转目标：**
+
+```asm
+// grub/grub-core/boot/i386/pc/diskboot.S:301
+ljmp	$0, $(GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
+```
+
+这确认了 `diskboot.S` 跳转到 `0x8200`。
+
+**3. `grub-mkimage` 源代码中的验证：**
+
+```c
+// grub/util/mkimage.c:1367-1369
+assert (block->segment
+        == grub_host_to_target16 (GRUB_BOOT_I386_PC_KERNEL_SEG
+                                  + (GRUB_DISK_SECTOR_SIZE >> 4)));
+```
+
+这个断言验证了块列表的 segment 字段必须是 `GRUB_BOOT_I386_PC_KERNEL_SEG + 0x20`（因为 `GRUB_DISK_SECTOR_SIZE >> 4 = 512 >> 4 = 32 = 0x20`）。
+
+如果 `GRUB_BOOT_I386_PC_KERNEL_SEG = 0x0000`（对应物理地址 0x8000），那么 segment = 0x0820，对应物理地址 0x8200。
+
+**4. `grub-mkimage` 源代码中的大小检查：**
+
+```c
+// grub/util/mkimage.c:1221
+if ((image_target->id == IMAGE_I386_PC
+     || image_target->id == IMAGE_I386_PC_PXE
+     || image_target->id == IMAGE_I386_PC_ELTORITO)
+    && decompress_size > GRUB_KERNEL_I386_PC_LINK_ADDR - 0x8200)
+  grub_util_error ("%s", _("Decompressor is too big"));
+```
+
+这里明确使用了 `0x8200` 作为地址边界进行检查。
+
+**结论：**
+
+`startup_raw.S` 位于 0x8200 **不是推断，而是源代码中明确指定的**：
+1. `startup_raw.S` 源代码中的宏定义和注释明确说明了 0x8200 的地址
+2. `diskboot.S` 源代码中的跳转目标明确指向 0x8200
+3. `grub-mkimage` 源代码中的断言和检查明确使用了 0x8200 作为地址边界
+
+因此，`LOCAL(codestart)` 位于 0x8200 是由源代码设计决定的，而不是通过推断得出的。
+
+**3. 如何推断 startup_raw.S 在第二个扇区开始：**
+
+**方法 1：通过 diskboot.S 的跳转目标推断**
+
+```asm
+// grub/grub-core/boot/i386/pc/diskboot.S:310-320
+ljmp    $GRUB_BOOT_MACHINE_KERNEL_SEG, $(GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
+// 跳转到：0x8000 + 0x200 = 0x8200
+```
+
+- **0x200 = 512 字节 = 一个扇区**
+- **0x8200 = 0x8000 + 0x200** = 第一个扇区结束 + 第二个扇区开始
+- **diskboot.S 跳转到 0x8200**，说明下一个代码段从 0x8200 开始
+
+**方法 2：通过内存布局推断**
+
+```
+core.img 的内存布局（加载到 0x8000 后）：
+├─ 第一个扇区（512 字节 = 0x200）：
+│  └─ 0x8000 - 0x81FF：diskboot.S 代码 + 块列表
+│
+└─ 第二个扇区开始：
+   └─ 0x8200+：startup_raw.S（LOCAL(codestart) 标签）
+```
+
+- **第一个扇区**：0x8000-0x81FF（512 字节）
+- **第二个扇区开始**：0x8200 = 0x8000 + 0x200
+- **startup_raw.S 的入口点**：`LOCAL(codestart)` 位于 0x8200
+
+**方法 3：通过块列表的 segment 字段推断**
+
+```c
+// grub/util/setup.c
+bl->current_segment = GRUB_BOOT_MACHINE_KERNEL_SEG + 0x20;  // 0x0820
+// segment = 0x0820 → 物理地址 = 0x0820 × 16 = 0x8200
+```
+
+- **块列表的 segment = 0x0820**，对应物理地址 0x8200
+- **0x8200 = 0x8000 + 0x200**，正好是第二个扇区开始
+
+**结论：**
+
+虽然 `startup_raw.S` 源代码中没有明确的注释说明"这是第二个扇区开始"，但可以通过以下证据推断：
+
+1. **diskboot.S 跳转到**：`0x8200`（`GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200`）
+2. **0x200 = 512 字节 = 一个扇区**，所以 0x8200 是第一个扇区（0x8000-0x81FF）之后的位置
+3. **startup_raw.S 的入口点**：`LOCAL(codestart)` 标签，位于 0x8200
+4. **块列表 segment**：0x0820，对应物理地址 0x8200
+
+因此，**startup_raw.S 的入口点确实在第二个扇区开始（0x8200）**，这是通过地址计算和跳转目标推断出来的。
+
+**4. 地址对应关系：**
+
+- **diskboot.S 跳转目标**：`GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200 = 0x8000 + 0x200 = 0x8200`
+- **startup_raw.S 入口点**：`LOCAL(codestart)` 标签，位于 `core.img` 的第二个扇区开始
+- **内存布局**：
+  - 第一个扇区（diskboot.S）：0x8000-0x81FF（512 字节）
+  - 第二个扇区开始（startup_raw.S）：0x8200+（正好是 `0x8000 + 0x200`）
+
+**4. 块列表的 segment 字段：**
+
+```c
+// grub/util/setup.c
+bl->current_segment = GRUB_BOOT_MACHINE_KERNEL_SEG + 0x20;  // 0x0820
+bl->block->segment = grub_host_to_target16 (bl->current_segment);  // 0x0820
+// segment = 0x0820 → 物理地址 = 0x0820 × 16 = 0x8200
+```
+
+**结论：**
+
+虽然源代码中没有明确的注释说明"segment = 0x0820 就是 startup_raw.S 的入口点"，但通过以下证据可以推断：
+
+1. **diskboot.S 跳转到**：`0x8200`（`GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200`）
+2. **startup_raw.S 入口点**：`LOCAL(codestart)`，位于 `core.img` 第二个扇区开始（0x8200）
+3. **块列表 segment**：0x0820，对应物理地址 0x8200
+4. **内存布局**：0x8200 正好是第一个扇区（512 字节 = 0x200）之后的位置
+
+因此，**0x8200 就是 startup_raw.S 的入口点**，这是通过地址计算和跳转目标推断出来的，而不是源代码中的明确注释。
+
+**计算过程：**
+- **物理地址**：0x8200（即 `GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200`）
+- **段地址计算**：物理地址 ÷ 16 = 0x8200 ÷ 16 = 0x0820
+- **验证**：0x0820 × 16 = 0x8200 ✓
+
+**2. 更新逻辑：**
+
+每次处理完一个块列表条目后，`current_segment` 会更新：
+
+```c
+// 更新目标段地址
+// seclen：刚处理的扇区数（例如：56）
+// GRUB_DISK_SECTOR_BITS = 9（因为 512 字节 = 2^9）
+// 计算：seclen << (9 - 4) = seclen << 5 = seclen × 32
+bl->current_segment += seclen << (GRUB_DISK_SECTOR_BITS - 4);
+```
+
+**计算原理：**
+- **每个扇区 = 512 字节 = 32 × 16 字节**
+- **段地址单位**：每个段单位 = 16 字节
+- **扇区对应的段单位数**：512 ÷ 16 = 32
+- **位运算**：`seclen << 5` = `seclen × 32`（左移 5 位等于乘以 32）
+
+**示例计算：**
+
+假设第一个条目读取了 56 个扇区：
+```
+初始 current_segment = 0x0820
+处理 56 个扇区后：
+  current_segment += 56 << 5
+  current_segment += 56 × 32
+  current_segment += 1792 (0x700)
+  current_segment = 0x0820 + 0x700 = 0x0F20
+```
+
+**物理地址验证：**
+- 第一个条目：segment = 0x0820 → 物理地址 = 0x0820 × 16 = 0x8200 ✓
+- 如果有第二个条目：segment = 0x0F20 → 物理地址 = 0x0F20 × 16 = 0xF200
+
+**3. 在代码中的使用流程：**
+
+```c
+// 步骤 1：初始化（在调用 save_blocklists 之前）
+bl->current_segment = GRUB_BOOT_MACHINE_KERNEL_SEG + 0x20;  // 0x0820
+
+// 步骤 2：为每个块列表条目设置 segment
+bl->block->segment = grub_host_to_target16 (bl->current_segment);  // 0x0820
+
+// 步骤 3：更新 current_segment 为下一个条目的起始地址
+bl->current_segment += seclen << (GRUB_DISK_SECTOR_BITS - 4);
+// 例如：0x0820 + (56 << 5) = 0x0820 + 0x700 = 0x0F20
+```
+
+**关键点总结：**
+
+1. **初始值**：`current_segment = GRUB_BOOT_MACHINE_KERNEL_SEG + 0x20 = 0x0820`
+   - 对应物理地址 0x8200（startup_raw.S 入口点）
+
+2. **更新公式**：`current_segment += seclen × 32`
+   - 每个扇区（512 字节）对应 32 个段单位（16 字节/单位）
+
+3. **段地址到物理地址**：物理地址 = segment × 16
+   - 例如：segment = 0x0820 → 物理地址 = 0x8200
+
+4. **实际使用**：由于只有一个条目，`current_segment` 只设置一次（0x0820），不会更新
 
 **关键设计点总结：**
 
