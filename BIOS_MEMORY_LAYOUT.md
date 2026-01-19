@@ -305,14 +305,14 @@
                BIOSMapped["0x0E0000 - 0x0FFFFF (128KB)<br/>BIOS映射区域<br/>实模式可访问<br/>不是RAM，是ROM映射<br/>实际BIOS在4GB顶部"]
            end
            
-           subgraph Above1MB["1MB以上至4GB RAM区域（统一区域）"]
+           subgraph Above1MB["1MB-4GB RAM区域"]
                RAM4GB["0x100000 - 0xFFFFFFFF (前4GB RAM，统一区域)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址范围：1MB - 4GB<br/>访问模式：保护模式可访问<br/>内存类型：真正的物理RAM<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>此区域包含以下组件："]
                GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000+ (1MB+)<br/>大小：约 50KB - 100KB（解压后，标准配置）<br/>解压时机：startup_raw.S 切换到保护模式后<br/>解压函数：_LzmaDecodeA<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>包含内容：<br/>• grub_main()（main.c）<br/>• 磁盘/文件系统框架（disk.c, file.c, fs.c）<br/>• 内存管理（mm.c）<br/>• 命令处理（command.c）<br/>• i386_pc 平台初始化（init.c, mmap.c）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：解析 grub.cfg、显示菜单、加载内核<br/>生命周期：解压后 → 内核加载前（会被覆盖）<br/>访问方式：保护模式，需要 A20 地址线"]
                KernelLoad["Linux 内核镜像（压缩，bzImage 格式）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000 (1MB)<br/>大小：几 MB - 几十 MB（取决于内核配置）<br/>加载时机：GRUB 解析 grub.cfg 后<br/>加载方式：GRUB 通过文件系统读取<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>镜像结构：<br/>• 头部：setup 代码（实模式，约 32KB）<br/>• 主体：压缩的内核代码（vmlinux 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>关键点：<br/>• 会覆盖解压后的 GRUB Core<br/>• 包含自己的解压代码（setup）<br/>• 解压目标：0x1000000+ (16MB+)"]
                KernelDecomp["Linux 内核解压后（vmlinux）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x1000000+ (16MB+)<br/>大小：几十 MB - 几百 MB（取决于内核配置）<br/>解压时机：内核 setup 代码执行后<br/>解压方式：内核 setup 代码调用解压函数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>包含内容：<br/>• 内核核心代码（kernel/）<br/>• 设备驱动（drivers/）<br/>• 文件系统（fs/）<br/>• 网络栈（net/）<br/>• 内存管理（mm/）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：内核接管系统，GRUB 不再需要<br/>运行模式：长模式（64位）或保护模式（32位）"]
            end
            
-           subgraph Above4GB["超过4GB RAM区域（Long Mode专用）"]
+           subgraph Above4GB["4GB+ RAM区域(Long Mode)"]
                RAM8GB["0x100000000 - ... (超过4GB的RAM)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址范围：4GB 以上<br/>访问模式：仅长模式（Long Mode，64位）可访问<br/>内存类型：真正的物理RAM<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>说明：<br/>• 32位保护模式无法访问此区域<br/>• 需要切换到64位长模式才能访问<br/>• 现代64位系统的主要内存区域"]
            end
        end
@@ -331,11 +331,11 @@
        style OptionROM fill:#ffffcc
        style BIOSMap fill:#add8e6
        style BIOSMapped fill:#add8e6
-       style Above1MB fill:#dda0dd
-       style RAM4GB fill:#dda0dd
-       style GRUBDecomp fill:#dda0dd
-       style KernelLoad fill:#dda0dd
-       style KernelDecomp fill:#dda0dd
+       style Above1MB fill:#ccccff
+       style RAM4GB fill:#ccccff
+       style GRUBDecomp fill:#ccccff
+       style KernelLoad fill:#ccccff
+       style KernelDecomp fill:#ccccff
        style Above4GB fill:#ffb3d9
        style RAM8GB fill:#ffb3d9
        style BIOSROM fill:#add8e6
