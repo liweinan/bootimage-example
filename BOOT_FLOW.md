@@ -3487,6 +3487,24 @@ void go_to_protected_mode(void)
 }
 ```
 
+**源代码位置：** `linux/arch/x86/boot/pm.c:setup_idt()`
+
+```c
+// linux/arch/x86/boot/pm.c
+// setup_idt - 设置空 IDT（在进入保护模式之前）
+static void setup_idt(void)
+{
+    static const struct gdt_ptr null_idt = {0, 0};  // limit=0, base=0（空 IDT）
+    asm volatile("lidtl %0" : : "m" (null_idt));   // 加载空 IDT 到 IDTR
+}
+```
+
+**说明：**
+- `setup_idt()` 在 `go_to_protected_mode()` 中被调用（在 `protected_mode_jump()` 之前）
+- 设置的是**空 IDT**（limit=0, base=0），用于禁用所有中断
+- 此时内核尚未建立完整的中断处理程序，使用空 IDT 可以避免未处理的中断导致系统崩溃
+- 真正的 IDT 会在后续的内核初始化阶段建立（在 `startup_64` 中调用 `idt_setup_early_traps()`）
+
 **源代码位置：** `linux/arch/x86/boot/pmjump.S:protected_mode_jump()`
 
 ```asm
@@ -3505,6 +3523,8 @@ GLOBAL(protected_mode_jump)
     
     // 步骤 3: 加载 GDT
     lgdt    gdt_descriptor  // 加载 GDT 描述符到 GDTR
+    
+    // 注意：IDT 已在 setup_idt() 中加载（空 IDT），此处不需要再次加载
     
     // 步骤 4: 设置 CR0 的 PE 位（Protected Mode Enable）
     movl    %cr0, %eax
@@ -3555,10 +3575,10 @@ GLOBAL(protected_mode_jump)
     ↓
 长跳转到保护模式代码段（ljmp $__BOOT_CS, $1f）
     ↓
-32 位保护模式（startup_32，压缩内核解压代码）
+32 位保护模式（startup_32）
 ```
 
-压缩内核解压代码（startup_32）
+**压缩内核解压代码（startup_32）：**
     ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
     ├─ 运行模式：32 位保护模式 → 64 位长模式
     ├─ **切换到 64 位长模式的关键步骤**（源代码位置：`linux/arch/x86/boot/compressed/head_64.S`）：
