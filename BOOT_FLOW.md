@@ -2442,6 +2442,9 @@ bl->current_segment += seclen << (GRUB_DISK_SECTOR_BITS - 4);
 3. **启用 A20 地址线**：允许访问 1MB 以上的内存
 4. **错误纠正**：处理 Reed-Solomon 错误纠正（如果启用）
 5. **解压 LZMA 压缩代码**：将压缩的 C 代码部分解压到 1MB 以上（`0x100000`）
+   - **解压目标地址定义**：`GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000`
+   - **源代码位置**：`grub/include/grub/i386/pc/memory.h:36`
+   - **代码使用**：`startup_raw.S:335` 使用 `movl $GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR, %edi`
 6. **跳转到解压后的代码**：执行 `jmp *%esi` 跳转到 `grub_stub_init()` 入口点
 
 **源代码位置：`grub/grub-core/boot/i386/pc/startup_raw.S:76-104`**
@@ -2828,7 +2831,15 @@ prot_to_real:
     sidt    protidt         // 保存保护模式 IDT（空）
     lidt    LOCAL(realidt)  // 恢复实模式 IDT（IVT）
     
-    // 步骤 3-6: 切换回实模式（清除 CR0.PE 位等）
+    // 步骤 3: 保存保护模式栈
+    movl    %esp, %eax
+    movl    %eax, protstack
+    
+    // 步骤 4: 保存返回地址（关键！）
+    movl    (%esp), %eax
+    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 1MB 以下的内存
+    
+    // 步骤 5-6: 切换到实模式（清除 CR0.PE 位等）
     // ...
     
     // 步骤 7: 恢复中断
@@ -2836,6 +2847,63 @@ prot_to_real:
     
     retl    // 返回，现在在实模式下
 ```
+
+**⚠️ 关键问题：prot_to_real 执行后，GRUB 程序运行在 1MB 以上，如何解决？**
+
+**问题描述：**
+- GRUB 的解压后代码位于 `0x100000+`（1MB 以上）
+- 当从保护模式的代码（在 1MB 以上）调用 `prot_to_real` 时，返回地址指向 1MB 以上的代码
+- 切换到实模式后，实模式只能访问 1MB 以下的内存（`0x00000 - 0xFFFFF`）
+- **问题**：如何返回到 1MB 以上的代码？
+
+**解决方案：**
+
+1. **`prot_to_real` 和 `real_to_prot` 本身位于 1MB 以下**：
+   - 这两个函数被包含在 `startup_raw.S` 中（`startup_raw.S:119`：`#include "../../../kern/i386/realmode.S"`）
+   - `startup_raw.S` 被加载到内存地址 `0x8200`（1MB 以下）
+   - 因此，`prot_to_real` 和 `real_to_prot` 的代码本身位于 1MB 以下，可以在实模式下执行
+
+2. **返回地址的保存和恢复机制**：
+   - **`prot_to_real`**：保存返回地址到 `GRUB_MEMORY_MACHINE_REAL_STACK`（位于 1MB 以下，`0x2000 - 0x10`）
+   - **切换到实模式**：执行 BIOS 调用（在实模式下）
+   - **`real_to_prot`**：从 `GRUB_MEMORY_MACHINE_REAL_STACK` 恢复返回地址
+   - **切换回保护模式**：返回到保护模式的代码（此时已经在保护模式下，可以访问 1MB 以上的代码）
+
+3. **完整流程**：
+
+```
+保护模式代码（1MB 以上，0x100000+）
+    ↓
+调用 grub_bios_interrupt()
+    ↓
+调用 prot_to_real（位于 1MB 以下，0x8200+）
+    ├─ 保存返回地址到 GRUB_MEMORY_MACHINE_REAL_STACK（1MB 以下）
+    ├─ 切换到实模式
+    └─ 返回到 grub_bios_interrupt() 的实模式部分（位于 1MB 以下）
+        ↓
+执行 BIOS 调用（INT 13h 等，在实模式下）
+    ↓
+调用 real_to_prot（位于 1MB 以下，0x8200+）
+    ├─ 从 GRUB_MEMORY_MACHINE_REAL_STACK 恢复返回地址
+    ├─ 切换到保护模式
+    └─ 返回到 grub_bios_interrupt() 的保护模式部分（位于 1MB 以上）
+        ↓
+返回到保护模式代码（1MB 以上，0x100000+）
+```
+
+**关键点总结：**
+
+| 组件 | 内存位置 | 运行模式 | 说明 |
+|------|---------|---------|------|
+| **prot_to_real / real_to_prot** | `0x8200+`（1MB 以下） | 实模式/保护模式 | 模式切换函数本身位于 1MB 以下 |
+| **grub_bios_interrupt** | `0x100000+`（1MB 以上） | 保护模式 | 但包含实模式代码段（`.code16`） |
+| **返回地址保存位置** | `GRUB_MEMORY_MACHINE_REAL_STACK`（`0x2000 - 0x10`，1MB 以下） | - | 临时存储返回地址 |
+| **GRUB Core 解压后代码** | `0x100000+`（1MB 以上） | 保护模式 | 主代码运行位置 |
+
+**设计优势：**
+- **模式切换函数位于 1MB 以下**：可以在实模式下执行
+- **返回地址保存在 1MB 以下**：实模式可以访问
+- **代码分段组织**：`grub_bios_interrupt` 包含保护模式和实模式代码段，通过模式切换函数连接
 
 **重要澄清：保护模式下不能直接使用 BIOS 的 IVT**
 
