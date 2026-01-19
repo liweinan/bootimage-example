@@ -2433,44 +2433,39 @@ bl->current_segment += seclen << (GRUB_DISK_SECTOR_BITS - 4);
 
 > **注意**：这里的"阶段 3"是指 GRUB Core 内部的阶段，与前面的"阶段 1"（BIOS 加载引导扇区）和"阶段 2"（引导扇区加载 GRUB Core）不同。
 
-在 BIOS 模式下，GRUB Core 需要从实模式切换到保护模式。这个过程发生在 `startup_raw.S` 中：
+**startup_raw.S 的总体功能：**
+
+`startup_raw.S` 是 GRUB Core 的实模式入口点，负责完成从实模式到保护模式的转换，并准备执行解压后的 GRUB Core 代码。其主要功能包括：
+
+1. **初始化实模式环境**：设置段寄存器、栈指针，保存启动驱动器号
+2. **切换到保护模式**：调用 `real_to_prot` 完成模式切换
+3. **启用 A20 地址线**：允许访问 1MB 以上的内存
+4. **错误纠正**：处理 Reed-Solomon 错误纠正（如果启用）
+5. **解压 LZMA 压缩代码**：将压缩的 C 代码部分解压到 1MB 以上（`0x100000`）
+6. **跳转到解压后的代码**：执行 `jmp *%esi` 跳转到 `grub_stub_init()` 入口点
 
 **源代码位置：`grub/grub-core/boot/i386/pc/startup_raw.S:76-104`**
 
 ```asm
 // startup_raw.S - GRUB Core 的实模式入口点（0x8200）
 LOCAL (codestart):
-    cli     // 禁用中断，准备模式切换
-    
-    // 设置实模式段寄存器
+    cli
     xorw    %ax, %ax
     movw    %ax, %ds
     movw    %ax, %ss
     movw    %ax, %es
-    
-    // 设置实模式栈
     movl    $GRUB_MEMORY_MACHINE_REAL_STACK, %ebp
     movl    %ebp, %esp
-    
-    sti     // 重新启用中断
-    
-    // 保存启动驱动器号
+    sti
     movb    %dl, LOCAL(boot_drive)
-    
-    // 重置磁盘系统
     int     $0x13
-    
-    // 关键步骤：从实模式切换到保护模式
     calll   real_to_prot
     
-    // 切换到保护模式代码（.code32）
     .code32
-    
-    // 启用 A20 地址线（访问 1MB 以上内存）
     cld
     call    grub_gate_a20
     
-    // 步骤 4: 处理 Reed-Solomon 错误纠正（如果启用）
+    // Reed-Solomon 错误纠正
     movl    LOCAL(compressed_size), %edx
     addl    $(LOCAL(decompressor_end) - LOCAL(reed_solomon_part)), %edx
     movl    reed_solomon_redundancy, %ecx
@@ -2480,80 +2475,51 @@ LOCAL (codestart):
     jmp     post_reed_solomon
 
 post_reed_solomon:
-    // 步骤 5: 解压 GRUB Core（如果使用 LZMA 压缩）
-#ifdef ENABLE_LZMA
-    // 如果使用 LZMA 压缩（默认情况，已验证）：
-    // **压缩状态**（通过验证脚本确认）：
-    // - 前 4KB 未压缩：diskboot.S + startup_raw.S（在 0x8000+，实模式代码）
-    // - 后 24KB LZMA 压缩：C 代码（需要解压到 0x100000）
-    // - 解压目标地址：0x100000 (1MB)
-    movl    $GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR, %edi  // 解压目标地址：0x100000 (1MB)
-    movl    $LOCAL(decompressor_end), %esi                 // 解压源：压缩的代码结束位置
+    // LZMA 解压：将压缩的 C 代码解压到 0x100000 (1MB)
+    // 压缩状态：前约 4.1KB 未压缩（diskboot.S + startup_raw.S），后约 24KB LZMA 压缩（C 代码）
+    movl    $GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR, %edi  // 解压目标：0x100000
+    movl    $LOCAL(decompressor_end), %esi                 // 解压源：压缩代码位置
     pushl   %edi
-    movl    LOCAL (uncompressed_size), %ecx                // 解压后的大小
+    movl    LOCAL (uncompressed_size), %ecx
     leal    (%edi, %ecx), %ebx
     push    %ecx
-    call    _LzmaDecodeA                                   // 调用 LZMA 解压函数
+    call    _LzmaDecodeA
     pop     %ecx
     popl    %esi  // %esi 指向解压后的代码入口点（0x100000）
-#else
-    // 注意：默认情况下 GRUB 使用 LZMA 压缩，此分支仅在特殊情况下使用
-    // （例如：编译时使用 --disable-liblzma，或系统没有 LZMA 库）
-    // 如果没有 LZMA 压缩（特殊情况）：
-    // GRUB Core 代码没有被压缩，直接在前 1MB 中（0x8000+）
-    // %esi 需要指向实际的代码入口点
-    // 注意：如果没有 LZMA，代码可能已经在正确的位置，不需要解压
-    // 通常，如果没有压缩，代码入口点就是 LOCAL(decompressor_end) 之后的位置
-    // 或者代码已经在 0x8000+ 的位置，直接跳转即可
-#endif
 
-    // 步骤 6: 准备跳转到代码入口点
-    movl    LOCAL(boot_dev), %edx        // 保存启动设备号
-    movl    $prot_to_real, %edi         // 保存实模式切换函数地址
-    movl    $real_to_prot, %ecx         // 保存保护模式切换函数地址
-    movl    $LOCAL(realidt), %eax       // 保存实模式 IDT 地址
-    
-    // 步骤 7: 跳转到代码入口点
-    // 默认情况（使用 LZMA 压缩）：%esi 指向解压后的代码入口点（0x100000）
-    // 特殊情况（不使用 LZMA 压缩）：代码未压缩，直接在前 1MB 中（0x8000+）
-    //   - 此时 %esi 可能未设置，或者指向 LOCAL(decompressor_end) 之后的位置
-    //   - 代码入口点是 grub_stub_init() 函数（grub/grub-core/kern/i386/pc/init.c）
-    //   - 如果没有 LZMA，代码可能已经在正确的位置，直接跳转即可
-    jmp     *%esi  // 间接跳转：跳转到代码入口点（默认：0x100000，解压后的代码）
+    // 准备跳转到解压后的代码
+    movl    LOCAL(boot_dev), %edx
+    movl    $prot_to_real, %edi
+    movl    $real_to_prot, %ecx
+    movl    $LOCAL(realidt), %eax
+    jmp     *%esi  // 跳转到 grub_stub_init()（0x100000）
 ```
 
-**关键点：**
-- **第 104 行**：调用 `grub_gate_a20` 启用 A20 地址线（访问 1MB 以上内存）
-- **第 116-117 行**：处理 Reed-Solomon 错误纠正，然后跳转到 `post_reed_solomon`
-- **第 332-356 行**（`post_reed_solomon` 标签）：根据是否使用 LZMA 压缩，设置代码入口点并跳转
+**LZMA 解压流程：**
 
-**两种情况的处理逻辑：**
+1. **压缩状态**（在 `0x8000+`）：
+   - 前约 4.1KB 未压缩：diskboot.S + startup_raw.S（实模式代码）
+   - 后约 24KB LZMA 压缩：C 代码部分
 
-**情况 1：使用 LZMA 压缩（默认情况）**
-- 解压代码到 `GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000`（1MB）
-- `%esi` 指向解压后的代码入口点（`0x100000`）
-- 第 356 行执行 `jmp *%esi`，跳转到解压后的代码
+2. **解压过程**：
+   - 解压目标地址：`0x100000`（1MB）
+   - 调用 `_LzmaDecodeA` 解压函数
+   - `%esi` 指向解压后的代码入口点（`0x100000`）
 
-**情况 2：不使用 LZMA 压缩**
-- GRUB Core 代码未压缩，直接在前 1MB 中（`0x8000+`）
-- `%esi` 指向未压缩的代码入口点（通常在 `LOCAL(decompressor_end)` 之后）
-- 不需要解压，代码已在正确位置，直接执行 `jmp *%esi` 跳转
+3. **跳转执行**：
+   - 执行 `jmp *%esi` 跳转到解压后的代码
+   - 入口点是 `grub_stub_init()` 函数
 
-**代码入口点和执行流程：**
+**执行流程：**
 
-`jmp *%esi` 跳转后的代码入口点**不是直接到 `grub_main()`**，而是先执行 `grub_stub_init()` 初始化函数。该函数位于解压后的（或未压缩的）GRUB Core 代码中。
-
-**执行顺序：**
 ```
 startup_raw.S: jmp *%esi
     ├─ 源代码位置：grub/grub-core/boot/i386/pc/startup_raw.S
-    ├─ 内存位置：0x8200（startup_raw.S 的代码位置）
+    ├─ 内存位置：0x8200
     ↓
-代码入口点（grub_stub_init）
+grub_stub_init()（解压后的代码入口点）
     ├─ 源代码位置：grub/grub-core/kern/i386/pc/init.c
-    ├─ 内存位置：
-    │   ├─ 使用 LZMA 压缩：0x100000（1MB，解压后的位置）
-    │   └─ 不使用 LZMA 压缩：0x8000+（未压缩，直接在前 1MB 中）
+    ├─ 内存位置：0x100000（1MB，解压后的位置）
     ├─ 运行模式：保护模式
     ├─ 初始化 GRUB 核心功能：
     │   ├─ 内存管理初始化（grub_mm_init）
@@ -2567,72 +2533,10 @@ grub_main() 执行
     └─ 加载 Linux 内核并跳转
 ```
 
-**关键点总结：**
-- **入口点不是 `grub_main()`**：`jmp *%esi` 跳转到的是 `grub_stub_init()` 初始化函数
-- **初始化函数的作用**：在调用 `grub_main()` 之前，需要先初始化 GRUB 的核心功能（内存管理、设备驱动等）
-- **`grub_main()` 的调用**：由 `grub_stub_init()` 调用，而不是直接作为入口点
-
-**两种情况对比：**
-
-| 情况 | 代码位置 | 是否需要解压 | `%esi` 指向 | 使用场景 |
-|------|---------|------------|-----------|---------|
-| **使用 LZMA 压缩** | 压缩状态在 `0x8000+`，解压后到 `0x100000` | ✅ 需要解压 | 解压后的代码入口点（`0x100000`） | **默认情况**，大多数 GRUB 安装 |
-| **不使用 LZMA 压缩** | 未压缩，直接在 `0x8000+` | ❌ 不需要解压 | 未压缩的代码入口点（`0x8000+` 或 `LOCAL(decompressor_end)` 之后） | 禁用 LZMA、嵌入式系统、调试 |
-
 **关键点：**
-- **LZMA 压缩**：代码被压缩，需要解压到 1MB 以上（`0x100000`）
-- **无压缩**：代码未压缩，直接在前 1MB 中（`0x8000+`），不需要解压
-- **两种情况下**：最终都通过 `jmp *%esi` 跳转到代码入口点
-
-**关于压缩的常见问题：**
-
-1. **前 1MB 够用吗？**
-   - **如果使用 LZMA 压缩**（默认情况，已验证）：✅ 够用
-     - **混合格式**（已验证）：
-       - 前约 4.1KB 未压缩：diskboot.S + startup_raw.S（在 `0x8000 - 0x9063`，实模式代码）
-         - diskboot.S：约 0.5KB（0x8000-0x81F3）+ 块列表 12 字节（0x81F4-0x81FF）
-         - startup_raw.S：从 0x8200 开始，约 3.6KB
-       - 后约 24KB LZMA 压缩：C 代码（在 `0x9063+`，需要解压到 `0x100000`）
-     - 前 1MB 有约 640KB 可用空间，足够容纳压缩的代码
-     - 解压后的代码在 1MB 以上（`0x100000`），有足够的空间运行
-   - **如果不使用 LZMA 压缩**：⚠️ 可能不够用
-     - 未压缩的 GRUB Core：约 20KB - 100KB 或更大（取决于配置）
-     - 如果 GRUB Core 很大（> 100KB），前 1MB 可能不够用
-     - **因此，默认情况下 GRUB 使用 LZMA 压缩**
-
-2. **什么情况下没有压缩？**
-   - **编译时禁用 LZMA**：使用 `--disable-liblzma` 配置选项
-   - **系统没有 LZMA 库**：如果编译时检测不到 LZMA 库，可能不使用压缩
-   - **嵌入式系统**：某些嵌入式系统可能不使用压缩以简化启动流程
-   - **调试目的**：开发时可能禁用压缩以便调试
-
-3. **是不是默认都是压缩-解压的流程？**
-   - **是的，默认情况下 GRUB 使用 LZMA 压缩**（已验证）
-   - **原因**：
-     - GRUB Core 未压缩时可能很大（几十 KB 到几百 KB）
-     - 前 1MB 空间有限（约 640KB 可用）
-     - 使用压缩可以：
-       - 减小 core.img 的大小（压缩后约 28KB，已验证：前约 4.1KB 未压缩 + 后约 24KB 压缩）
-       - 在前 1MB 中容纳更多代码
-       - 解压到 1MB 以上，避免前 1MB 空间不足
-   - **压缩流程**（已验证）：
-     - 编译时：GRUB Core 的 C 代码部分被 LZMA 压缩，嵌入到 core.img
-     - 启动时：`startup_raw.S` 解压 C 代码部分到 `0x100000`（1MB）
-     - 解压后：代码在 1MB 以上，有足够的空间运行
-     - **混合格式**：前约 4.1KB 未压缩（diskboot.S + startup_raw.S），后约 24KB 压缩（C 代码）
-
-**实际大小示例：**
-
-| 配置 | 未压缩大小 | 压缩后大小（LZMA） | 压缩率 |
-|------|-----------|------------------|--------|
-| **最小配置** | 约 20KB | 约 8KB | ~40% |
-| **标准配置** | 约 50KB - 100KB | 约 20KB - 32KB | ~30-40% |
-| **完整配置** | 约 100KB - 200KB | 约 32KB - 64KB | ~30-40% |
-
-**结论：**
-- **默认使用 LZMA 压缩**：这是 GRUB 的标准配置
-- **前 1MB 通常不够未压缩的代码**：如果 GRUB Core 很大（> 100KB），前 1MB 可能不够用
-- **压缩-解压流程是默认的**：大多数 GRUB 安装都使用这个流程
+- **入口点**：`jmp *%esi` 跳转到 `grub_stub_init()`，而不是直接到 `grub_main()`
+- **初始化**：`grub_stub_init()` 负责初始化 GRUB 核心功能，然后调用 `grub_main()`
+- **压缩格式**：前约 4.1KB 未压缩 + 后约 24KB LZMA 压缩，解压到 1MB 以上
 
 ---
 
