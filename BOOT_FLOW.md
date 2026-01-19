@@ -2526,6 +2526,12 @@ startup_raw.S（实模式入口点，0x8200）
     ├─ 步骤 3: 切换到保护模式（calll real_to_prot）
     │   └─ 调用 real_to_prot() 完成模式切换
     │   └─ **注意**：此时 A20 尚未启用，但暂时不需要访问 1MB 以上内存
+    │   └─ **中断状态分析**：
+    │       ├─ **调用前**：中断是启用的（startup_raw.S:89 执行了 sti）
+    │       ├─ **real_to_prot() 内部**：执行 cli 禁用中断（realmode.S:135）
+    │       ├─ **real_to_prot() 返回时**：**不会重新启用中断**（没有 sti 指令）
+    │       └─ **返回后**：中断保持禁用状态，直到需要调用 BIOS 服务时切换回实模式
+    │       └─ **为什么 startup_raw.S 中没有显式的 cli**：因为中断已经在 real_to_prot() 内部被禁用，并且没有被重新启用
     ├─ 步骤 4: 启用 A20 地址线（call grub_gate_a20）
     │   └─ **顺序说明**：GRUB 在保护模式下启用 A20（而非在实模式下）
     │   └─ **实现细节**：如果使用 BIOS 方法（INT 15h），函数内部会临时切换回实模式，启用 A20 后再切换回保护模式
@@ -2564,6 +2570,92 @@ grub_main() 执行
 - **入口点**：`jmp *%esi` 跳转到 `grub_stub_init()`，而不是直接到 `grub_main()`
 - **初始化**：`grub_stub_init()` 负责初始化 GRUB 核心功能，然后调用 `grub_main()`
 - **压缩格式**：前约 4.1KB 未压缩 + 后约 24KB LZMA 压缩，解压到 1MB 以上
+
+**startup_raw.S 中的中断状态变化详细分析：**
+
+**源代码位置：`grub/grub-core/boot/i386/pc/startup_raw.S:76-104`**
+
+```asm
+LOCAL (codestart):
+    cli         // 第 77 行：禁用中断（"we're not safe here"）
+    
+    // 设置段寄存器和栈
+    // ...
+    
+    sti         // 第 89 行：重新启用中断（"we're safe again"）
+    
+    // 保存启动驱动器号
+    // ...
+    
+    int $0x13   // 第 95 行：调用 BIOS 磁盘服务（需要中断启用）
+    
+    calll   real_to_prot  // 第 98 行：切换到保护模式
+                          // ⚠️ 注意：这里没有 cli，但中断会在 real_to_prot() 内部被禁用
+    
+    .code32     // 第 101 行：切换到 32 位代码
+                // ⚠️ 注意：此时中断已经是禁用状态（由 real_to_prot() 内部禁用）
+    
+    cld
+    call    grub_gate_a20  // 第 104 行：启用 A20（如果需要调用 BIOS，内部会切换回实模式）
+    // ... 继续执行后续代码
+```
+
+**中断状态变化流程：**
+
+```
+startup_raw.S:77
+    ↓
+cli（禁用中断）
+    ↓
+startup_raw.S:89
+    ↓
+sti（重新启用中断）
+    ↓
+startup_raw.S:95
+    ↓
+int $0x13（调用 BIOS 服务，需要中断启用）
+    ↓
+startup_raw.S:98
+    ↓
+calll real_to_prot
+    ↓
+realmode.S:135
+    ↓
+cli（在 real_to_prot() 内部禁用中断）
+    ↓
+realmode.S:191-192
+    ↓
+加载空 IDT（protidt）
+    ↓
+realmode.S:195
+    ↓
+ret（返回，⚠️ 没有 sti，中断保持禁用）
+    ↓
+返回到 startup_raw.S:101
+    ↓
+.code32（32 位保护模式代码）
+    ↓
+⚠️ 中断仍然是禁用状态（由 real_to_prot() 禁用，没有被重新启用）
+    ↓
+后续代码继续执行（中断禁用，直到需要调用 BIOS 服务时切换回实模式）
+```
+
+**关键结论：**
+
+1. **为什么 startup_raw.S 中没有显式的 cli**：
+   - `real_to_prot()` 函数在开始时（第 135 行）执行 `cli` 禁用中断
+   - `real_to_prot()` 函数返回时（第 195 行）**没有执行 `sti`**，所以中断保持禁用状态
+   - 因此，从 `real_to_prot()` 返回后，中断已经是禁用状态，不需要再次执行 `cli`
+
+2. **这是正确的设计**：
+   - 保护模式下使用空 IDT，如果发生中断会导致系统崩溃
+   - 因此必须在保护模式下保持中断禁用
+   - 只有在需要调用 BIOS 服务时，才会通过 `prot_to_real` 切换回实模式并重新启用中断
+
+3. **中断重新启用的时机**：
+   - 当 GRUB 需要调用 BIOS 服务（如磁盘 I/O）时，会调用 `prot_to_real` 切换回实模式
+   - `prot_to_real` 函数在返回前会执行 `sti`（realmode.S:275），重新启用中断
+   - 调用完 BIOS 服务后，再次通过 `real_to_prot` 切换回保护模式，中断再次被禁用
 
 ---
 
