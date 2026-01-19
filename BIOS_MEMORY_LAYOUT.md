@@ -329,8 +329,8 @@
        style VGAMem fill:#ffffcc
        style ExtROM fill:#ffffcc
        style OptionROM fill:#ffffcc
-       style BIOSMap fill:#ffcccc
-       style BIOSMapped fill:#ffcccc
+       style BIOSMap fill:#add8e6
+       style BIOSMapped fill:#add8e6
        style Above1MB fill:#dda0dd
        style RAM4GB fill:#dda0dd
        style GRUBDecomp fill:#dda0dd
@@ -338,8 +338,8 @@
        style KernelDecomp fill:#dda0dd
        style Above4GB fill:#ffb3d9
        style RAM8GB fill:#ffb3d9
-       style BIOSROM fill:#ffcccc
-       style BIOSFull fill:#ffcccc
+       style BIOSROM fill:#add8e6
+       style BIOSFull fill:#add8e6
    ```
 
 **1MB 以上 RAM 区域详细说明：**
