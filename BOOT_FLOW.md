@@ -2525,28 +2525,35 @@ post_reed_solomon:
 **关键点：**
 - **第 104 行**：调用 `grub_gate_a20` 启用 A20 地址线（访问 1MB 以上内存）
 - **第 116-117 行**：处理 Reed-Solomon 错误纠正，然后跳转到 `post_reed_solomon`
-- **第 332-356 行**（`post_reed_solomon` 标签）：
-  - **如果使用 LZMA 压缩**：
-    - 解压代码到 `GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000`（1MB）
-    - `%esi` 指向解压后的代码入口点（0x100000）
-  - **如果没有 LZMA 压缩**：
-    - GRUB Core 代码没有被压缩，直接在前 1MB 中（0x8000+）
-    - `%esi` 指向未压缩的代码入口点（通常在 `LOCAL(decompressor_end)` 之后，或代码已经在 0x8000+ 的位置）
-    - **不需要解压**：代码已经在正确的位置，直接跳转即可
-- **第 356 行**：`jmp *%esi` - 跳转到代码入口点（解压后的或未压缩的）
+- **第 332-356 行**（`post_reed_solomon` 标签）：根据是否使用 LZMA 压缩，设置代码入口点并跳转
 
-**代码入口点（解压后或未压缩）：**
+**两种情况的处理逻辑：**
 
-`jmp *%esi` 跳转后的代码入口点**不是直接到 `main.c` 的 `grub_main()`**，而是先到 `grub_stub_init()` 初始化函数，该函数位于解压后的 GRUB Core 代码中。
+**情况 1：使用 LZMA 压缩（默认情况）**
+- 解压代码到 `GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000`（1MB）
+- `%esi` 指向解压后的代码入口点（`0x100000`）
+- 第 356 行执行 `jmp *%esi`，跳转到解压后的代码
+
+**情况 2：不使用 LZMA 压缩**
+- GRUB Core 代码未压缩，直接在前 1MB 中（`0x8000+`）
+- `%esi` 指向未压缩的代码入口点（通常在 `LOCAL(decompressor_end)` 之后）
+- 不需要解压，代码已在正确位置，直接执行 `jmp *%esi` 跳转
+
+**代码入口点和执行流程：**
+
+`jmp *%esi` 跳转后的代码入口点**不是直接到 `grub_main()`**，而是先执行 `grub_stub_init()` 初始化函数。该函数位于解压后的（或未压缩的）GRUB Core 代码中。
 
 **执行顺序：**
 ```
 startup_raw.S: jmp *%esi
     ├─ 源代码位置：grub/grub-core/boot/i386/pc/startup_raw.S
+    ├─ 内存位置：0x8200（startup_raw.S 的代码位置）
     ↓
-解压后的代码入口点（grub_stub_init）
+代码入口点（grub_stub_init）
     ├─ 源代码位置：grub/grub-core/kern/i386/pc/init.c
-    ├─ 内存位置：0x100000（1MB，如果使用 LZMA 压缩）或 0x8000+（如果不使用 LZMA 压缩）
+    ├─ 内存位置：
+    │   ├─ 使用 LZMA 压缩：0x100000（1MB，解压后的位置）
+    │   └─ 不使用 LZMA 压缩：0x8000+（未压缩，直接在前 1MB 中）
     ├─ 运行模式：保护模式
     ├─ 初始化 GRUB 核心功能：
     │   ├─ 内存管理初始化（grub_mm_init）
@@ -2560,19 +2567,10 @@ grub_main() 执行
     └─ 加载 Linux 内核并跳转
 ```
 
-**关键点：**
-- **入口点不是 `main.c`**：`jmp *%esi` 跳转到的是初始化函数，不是 `grub_main()`
+**关键点总结：**
+- **入口点不是 `grub_main()`**：`jmp *%esi` 跳转到的是 `grub_stub_init()` 初始化函数
 - **初始化函数的作用**：在调用 `grub_main()` 之前，需要先初始化 GRUB 的核心功能（内存管理、设备驱动等）
-- **`grub_main()` 的调用**：由初始化函数调用，而不是直接作为入口点
-
-**阶段 3.5：从 startup_raw.S 到 grub_main() 的中间过程**
-
-**源代码位置：** `grub/grub-core/kern/i386/pc/init.c`
-
-**关键点：**
-- **解压后的代码入口点**：`startup_raw.S` 的 `jmp *%esi` 跳转到解压后的代码（或未压缩的代码）入口点
-- **初始化函数**：`grub_stub_init()` 函数，负责初始化 GRUB 核心功能
-- **调用 grub_main()**：初始化完成后，调用 `grub_main()` 进入 GRUB 主程序
+- **`grub_main()` 的调用**：由 `grub_stub_init()` 调用，而不是直接作为入口点
 
 **两种情况对比：**
 
@@ -2636,7 +2634,9 @@ grub_main() 执行
 - **前 1MB 通常不够未压缩的代码**：如果 GRUB Core 很大（> 100KB），前 1MB 可能不够用
 - **压缩-解压流程是默认的**：大多数 GRUB 安装都使用这个流程
 
-> **注意**：关于 A20 地址线的详细技术说明，请参见 [A20 地址线技术详解](A20_ADDRESS_LINE.md)。
+---
+
+### 从实模式到保护模式的切换
 
 **模式切换的关键步骤（real_to_prot）：**
 
@@ -2688,6 +2688,12 @@ protcseg:
     ret     // 返回，现在在保护模式下
 ```
 
+> **注意**：关于 A20 地址线的详细技术说明，请参见 [A20 地址线技术详解](A20_ADDRESS_LINE.md)。
+
+---
+
+### 引导过程的完整内存布局和关键步骤
+
 **完整内存布局（引导过程）：**
 
 以下是整个引导过程中内存的使用情况，从 BIOS 加载引导扇区到 GRUB 加载内核：
@@ -2711,15 +2717,21 @@ protcseg:
 0x009000 - 0x00CFFF      C 代码（LZMA 压缩状态，约 24KB，已验证）← diskboot.S 加载
 0x00D000 - 0x00FFFF      可用空间
 ...
-0x0100000 (1MB) - ...    内核镜像（vmlinuz）← GRUB 加载
+0x0100000 (1MB) - ...    GRUB Core 解压后（如果使用 LZMA 压缩）← startup_raw.S 解压
+                        内核镜像（vmlinuz）← GRUB 加载
 0x0200000 - ...          initramfs ← GRUB 加载
 ...
 0xF0000 - 0xFFFFF        BIOS ROM
 ```
 
-**关键步骤总结：**
+**关键内存地址：**
+- `0x7C00`：引导扇区（MBR）加载地址
+- `0x8000`：GRUB Core 压缩状态加载地址
+- `0x8200`：startup_raw.S 入口点
+- `0x100000`（1MB）：GRUB Core 解压后地址（如果使用 LZMA 压缩）、内核镜像加载地址
+- `0xF0000 - 0xFFFFF`：BIOS ROM
 
-以下是整个引导过程的关键步骤，从 BIOS 加载引导扇区到 GRUB 加载内核：
+**引导过程的关键步骤总结：**
 
 1. **BIOS → 引导扇区**：
    - BIOS 调用 INT 13h（AH=0x02）读取磁盘第一个扇区
@@ -2731,42 +2743,39 @@ protcseg:
    - 加载 diskboot.S 到 `0x8000`
    - diskboot.S 使用块列表加载完整的 GRUB Core（包括 startup_raw.S）
    - 跳转到 GRUB Core（startup_raw.S 入口点 0x8200）
-   
-   **实模式下的内存使用分析：**
-   
-   - **1MB 内存是否够用？**
-     - **够用**：在实模式阶段（引导扇区 → GRUB Core），所有代码和数据都在 1MB 范围内：
-       - `0x7C00 - 0x7DFF`：引导扇区（512 字节）
-       - `0x8000 - 0x9FFF`：GRUB Core（约 8KB）
-       - `0xA000 - 0xBFFF`：GRUB 文件系统驱动（可选）
-       - `0xF0000 - 0xFFFFF`：BIOS ROM（只读）
-     - **总计使用**：约 10-20KB，远小于 1MB 的可用空间（约 640KB 常规 RAM）
-   
-   - **地址会不会冲突？**
-     - **不会冲突**：内存布局是精心设计的，各组件使用不同的地址范围：
-       - 引导扇区：`0x7C00 - 0x7DFF`（512 字节）
-       - GRUB Core：`0x8000+`（与引导扇区不重叠）
-       - BIOS ROM：`0xF0000 - 0xFFFFF`（只读，不影响）
-       - 可用空间：`0x0000 - 0x7BFF`、`0x8000 - 0x9FFF` 之间等
-     - **设计原则**：引导扇区选择 `0x7C00` 是为了避免与 BIOS 数据区（`0x0000 - 0x03FF`）和栈空间冲突
-   
-   - **为什么内核加载到 1MB 以上？**
-     - 内核镜像通常较大（几 MB 到几十 MB），无法放入前 1MB
-     - 因此 GRUB Core 需要**先切换到保护模式**，然后才能访问 1MB 以上的内存来加载内核
-     - 这是为什么步骤 3 中需要"切换到保护模式/长模式"的原因
 
 3. **GRUB Core → grub_main()**：
+   - startup_raw.S 启用 A20 地址线（访问 1MB 以上内存）
+   - startup_raw.S 切换到保护模式（调用 `real_to_prot`）
    - startup_raw.S 解压 GRUB Core（如果使用 LZMA 压缩）到 `0x100000`（1MB）
    - 跳转到解压后的代码入口点（`grub_stub_init()`）
    - 初始化函数初始化 GRUB 核心功能（内存管理、设备驱动等）
    - 调用 `grub_main()`（`grub/grub-core/kern/main.c`）
    - **此时 GRUB Core 已完全初始化，准备加载内核**
 
-**关键内存地址：**
-- `0x7C00`：引导扇区（MBR）加载地址
-- `0x8000`：GRUB Core 压缩状态加载地址
-- `0x100000`（1MB）：GRUB Core 解压后地址（如果使用 LZMA 压缩）
-- `0xFFFFFFFF - bios_size`：BIOS ROM 地址
+**实模式下的内存使用分析：**
+
+- **1MB 内存是否够用？**
+  - **够用**：在实模式阶段（引导扇区 → GRUB Core），所有代码和数据都在 1MB 范围内：
+    - `0x7C00 - 0x7DFF`：引导扇区（512 字节）
+    - `0x8000 - 0x9FFF`：GRUB Core（约 8KB）
+    - `0xA000 - 0xBFFF`：GRUB 文件系统驱动（可选）
+    - `0xF0000 - 0xFFFFF`：BIOS ROM（只读）
+  - **总计使用**：约 10-20KB，远小于 1MB 的可用空间（约 640KB 常规 RAM）
+
+- **地址会不会冲突？**
+  - **不会冲突**：内存布局是精心设计的，各组件使用不同的地址范围：
+    - 引导扇区：`0x7C00 - 0x7DFF`（512 字节）
+    - GRUB Core：`0x8000+`（与引导扇区不重叠）
+    - BIOS ROM：`0xF0000 - 0xFFFFF`（只读，不影响）
+    - 可用空间：`0x0000 - 0x7BFF`、`0x8000 - 0x9FFF` 之间等
+  - **设计原则**：引导扇区选择 `0x7C00` 是为了避免与 BIOS 数据区（`0x0000 - 0x03FF`）和栈空间冲突
+
+- **为什么需要切换到保护模式？**
+  - 内核镜像通常较大（几 MB 到几十 MB），无法放入前 1MB
+  - GRUB Core 解压后也需要 1MB 以上的空间（如果使用 LZMA 压缩）
+  - 因此 GRUB Core 需要**先切换到保护模式**，然后才能访问 1MB 以上的内存来加载内核和解压代码
+  - 这是为什么 `startup_raw.S` 需要"切换到保护模式"的原因
 
 ---
 
