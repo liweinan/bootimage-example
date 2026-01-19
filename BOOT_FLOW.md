@@ -2615,8 +2615,10 @@ protcseg:
     // 步骤 6: 保存实模式 IDT，加载保护模式 IDT（空）
     sidt    LOCAL(realidt)  // 保存实模式 IDT
     lidt    protidt         // 加载保护模式 IDT（空）
+    // 注意：此时中断仍然是禁用的（cli），不会重新启用（sti）
+    // 这是必要的，因为空 IDT 无法处理任何中断，如果发生中断会导致系统崩溃
     
-    ret     // 返回，现在在保护模式下
+    ret     // 返回，现在在保护模式下（中断禁用）
 ```
 
 **IDT 定义（源代码位置：`grub/grub-core/kern/i386/realmode.S:119-124`）：**
@@ -2631,21 +2633,97 @@ protidt:
     .long 0        // 保护模式 IDT 基址（0 = 空 IDT）
 ```
 
+**重要说明：`LOCAL(realidt)` 和 `protidt` 的内存位置**
+
+**关键点：这两个数据结构只是存储 IDT 描述符（limit 和 base），不是 IDT 表本身**
+
+1. **数据结构的位置**：
+   - `realmode.S` 被包含在 `startup_raw.S` 中（`startup_raw.S:119`：`#include "../../../kern/i386/realmode.S"`）
+   - `startup_raw.S` 被加载到内存地址 `0x8200`
+   - 因此，`LOCAL(realidt)` 和 `protidt` 这两个数据结构位于 `0x8200+` 的某个位置（作为 `startup_raw.S` 的一部分）
+   - 每个数据结构占 6 字节（2 字节 limit + 4 字节 base）
+
+2. **IDT 表本身的位置**：
+   - **`protidt`**：base=0，limit=0，表示**空 IDT**（没有实际的 IDT 表）
+   - **`LOCAL(realidt)`**：保存的是实模式的 IVT 信息，base=0（IVT 固定位置 `0x0000:0000`）
+   - 实际的 IDT 表位置由 IDTR 寄存器中的 base 地址决定
+   - 对于 `protidt`，由于 base=0，limit=0，CPU 不会访问任何实际的 IDT 表
+
+3. **与解压程序的重叠问题**：
+   - **不会重叠**：`LOCAL(realidt)` 和 `protidt` 位于 `0x8200+`（前 1MB 范围内）
+   - 解压程序（LZMA 解压后的 GRUB Core）位于 `0x100000`（1MB）以上
+   - 两者位于不同的内存区域，不会发生重叠
+
+4. **内存布局总结**：
+
+```
+前 1MB 内存（实模式阶段）：
+0x8200 - 0x9063：startup_raw.S（包含 realmode.S）
+    ├─ 0x8200+：startup_raw.S 代码
+    ├─ 0x8200+（某个偏移）：LOCAL(realidt)（6 字节）
+    └─ 0x8200+（某个偏移）：protidt（6 字节）
+
+1MB 以上内存（保护模式阶段）：
+0x100000+：解压后的 GRUB Core（LZMA 解压后）
+```
+
+**结论：`LOCAL(realidt)` 和 `protidt` 作为 `startup_raw.S` 的一部分，位于前 1MB 范围内（约 `0x8200+`），不会与解压程序（位于 `0x100000+`）重叠。**
+
 **GRUB 在保护模式下处理 IDT 的策略：**
 
-1. **加载空 IDT**：
+1. **禁用中断（关键安全措施）**：
+   - 在 `real_to_prot` 函数开始时执行 `cli`（第 135 行），禁用所有中断
+   - **重要**：加载空 IDT 后，**不会重新启用中断**（没有 `sti` 指令）
+   - 这意味着 GRUB 在保护模式下**始终禁用中断**，直到需要调用 BIOS 服务时切换回实模式
+
+2. **加载空 IDT**：
    - `protidt` 是一个"空"的 IDT（limit=0，base=0）
    - 在保护模式下，如果发生中断且 IDT 为空，CPU 会触发异常（通常导致系统挂起）
-   - 但 GRUB 在保护模式下通常禁用中断（`cli`），所以不会触发中断
+   - **因此必须禁用中断**：这是为什么 GRUB 在保护模式下保持中断禁用的原因
 
-2. **保存实模式 IDT（IVT）**：
+3. **保存实模式 IDT（IVT）**：
    - `LOCAL(realidt)` 保存实模式的 IDT 信息（实际上是 IVT）
    - 界限为 0x400（1024 字节），基址为 0（IVT 固定位置）
 
-3. **需要调用 BIOS 服务时的处理**：
+4. **需要调用 BIOS 服务时的处理**：
    - 当 GRUB 需要调用 BIOS 服务（如 INT 13h 读取磁盘）时，通过 `prot_to_real` 切换回实模式
    - `prot_to_real` 会恢复实模式的 IDT（IVT），然后调用 BIOS 服务
    - 调用完成后，再次通过 `real_to_prot` 切换回保护模式
+
+**⚠️ 重要风险：空 IDT 与 CPU 异常处理**
+
+**关键问题：禁用中断（`cli`）只能防止硬件中断，无法防止 CPU 异常**
+
+1. **硬件中断 vs CPU 异常的区别**：
+   - **硬件中断**：由外部设备触发（如键盘、定时器、磁盘等），可以通过 `cli` 禁用
+   - **CPU 异常**：由 CPU 内部触发（如除零错误、页错误、无效操作码等），**无法通过 `cli` 禁用**
+
+2. **空 IDT 的风险**：
+   - 如果 GRUB 在保护模式下发生 CPU 异常（如页错误、除零错误、无效操作码等），CPU 会尝试通过 IDT 查找异常处理程序
+   - 但 IDT 是空的（limit=0），CPU 无法找到异常处理程序
+   - 这会导致 CPU 触发"双重故障"（Double Fault，向量 8）
+   - 如果双重故障也无法处理（因为 IDT 仍然是空的），CPU 会触发"三重故障"（Triple Fault），导致系统立即重启或挂起
+
+3. **GRUB 的保护措施**：
+   - **代码简单**：GRUB 在保护模式下的代码相对简单，主要是内存操作、解压缩等
+   - **不使用分页**：GRUB 使用平坦内存模型（flat memory model），不启用分页，避免页错误异常
+   - **避免危险操作**：
+     - 避免除零操作
+     - 避免无效的内存访问（通过仔细的内存管理）
+     - 避免无效的操作码（使用标准汇编指令）
+   - **快速执行**：GRUB 在保护模式下的执行时间尽可能短，减少出错窗口
+
+4. **设计权衡**：
+   - **优点**：简化代码，不需要实现完整的 IDT 和异常处理机制
+   - **缺点**：必须非常小心地编写代码，任何错误都可能导致系统崩溃
+   - **适用场景**：GRUB 作为引导加载程序，代码相对简单且执行时间短，这种权衡是合理的
+
+5. **与 Linux 内核的对比**：
+   - **Linux 内核**：在保护模式下建立完整的 IDT，为所有 CPU 异常设置专门的处理程序
+   - **GRUB**：使用空 IDT，依赖代码正确性来避免异常
+   - **原因**：GRUB 是引导加载程序，代码简单且执行时间短；Linux 内核是操作系统，需要完整的异常处理机制
+
+**总结：GRUB 在保护模式下使用空 IDT 是一个高风险的设计选择，必须通过代码正确性和简单性来降低风险。任何代码错误（如除零、无效内存访问等）都可能导致系统立即崩溃。**
 
 **prot_to_real 函数（源代码位置：`grub/grub-core/kern/i386/realmode.S:217-279`）：**
 
@@ -2779,7 +2857,7 @@ REAL_TO_PROT（real_to_prot）
 | 组件 | 运行模式 | 中断表类型 | 中断表位置 | 处理策略 |
 |------|---------|-----------|-----------|---------|
 | **BIOS** | 实模式 | IVT | 固定 0x0000:0000 | 提供中断服务 |
-| **GRUB（保护模式）** | 保护模式 | IDT（空） | 可配置（但设为空） | 禁用中断，需要时切换回实模式 |
+| **GRUB（保护模式）** | 保护模式 | IDT（空） | 可配置（但设为空） | **禁用中断（cli）**，需要时切换回实模式 |
 | **GRUB（调用 BIOS）** | 实模式 | IVT | 固定 0x0000:0000 | 恢复 IVT，调用 BIOS 服务 |
 | **Linux 内核** | 保护模式/长模式 | IDT | 内核内存（可配置） | 建立完整的 IDT，接管所有中断 |
 
@@ -3996,6 +4074,270 @@ void __init idt_setup_apic_and_irq_gates(void)
 	// CPU 入口区域是内核中的固定只读区域，用于存放 IDT 等关键数据结构
 	idt_map_in_cea();
 	load_idt(&idt_descr);  // 加载 IDT：此时 BIOS IVT 被完全取代
+```
+
+**`load_idt` 函数定义：**
+
+**源代码位置：** `linux/arch/x86/include/asm/desc.h:112-115`
+
+```c
+// load_idt 是一个宏定义，实际调用 native_load_idt
+#define load_idt(dtr)    native_load_idt(dtr)
+```
+
+**源代码位置：** `linux/arch/x86/include/asm/desc.h:213-216`
+
+```c
+// native_load_idt - 加载 IDT 到 CPU 的 IDTR 寄存器
+static __always_inline void native_load_idt(const struct desc_ptr *dtr)
+{
+    asm volatile("lidt %0"::"m" (*dtr));  // 执行 LIDT 指令
+}
+```
+
+**`desc_ptr` 结构定义：**
+
+**源代码位置：** `linux/arch/x86/include/asm/desc_defs.h:164-167`
+
+```c
+// desc_ptr - 描述符表指针结构（用于 GDT 和 IDT）
+struct desc_ptr {
+    unsigned short size;      // 表的大小（字节数 - 1）
+    unsigned long address;     // 表的基址
+} __attribute__((packed));
+```
+
+**`idt_table` 和 `idt_descr` 定义：**
+
+**源代码位置：** `linux/arch/x86/kernel/idt.c:173-178`
+
+```c
+// idt_table - IDT 表本身（256 个条目，每个 16 字节，共 4KB）
+static gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
+
+// idt_descr - IDT 描述符（包含 IDT 的基址和大小）
+static struct desc_ptr idt_descr __ro_after_init = {
+    .size    = IDT_TABLE_SIZE - 1,           // IDT 大小 - 1（4096 - 1 = 4095）
+    .address = (unsigned long) idt_table,    // IDT 表的基址
+};
+```
+
+**`gate_desc` 结构定义（中断描述符）：**
+
+**源代码位置：** `linux/arch/x86/include/asm/desc_defs.h:134-143`
+
+```c
+// gate_struct - 中断门描述符结构（64位）
+struct gate_struct {
+    u16         offset_low;      // 处理程序地址的低 16 位
+    u16         segment;         // 段选择子（通常是 __KERNEL_CS）
+    struct idt_bits bits;         // 中断门属性（类型、DPL、P 位等）
+    u16         offset_middle;   // 处理程序地址的中 16 位
+    u32         offset_high;     // 处理程序地址的高 32 位（64位模式）
+    u32         reserved;         // 保留字段
+} __attribute__((packed));
+
+typedef struct gate_struct gate_desc;
+```
+
+**`idt_bits` 结构定义（中断门属性）：**
+
+**源代码位置：** `linux/arch/x86/include/asm/desc_defs.h:119-125`
+
+```c
+// idt_bits - 中断描述符的属性位
+struct idt_bits {
+    u16 ist   : 3,    // IST（Interrupt Stack Table）索引
+    zero  : 5,    // 保留位
+    type  : 5,    // 门类型（中断门、陷阱门、任务门）
+    dpl   : 2,    // 描述符特权级（0=内核，3=用户）
+    p     : 1;    // 存在位（1=有效，0=无效）
+} __attribute__((packed));
+```
+
+**`idt_table` 的内容填充：**
+
+`idt_table` 的内容不是静态定义的，而是通过函数动态填充的：
+
+**源代码位置：** `linux/arch/x86/kernel/idt.c:193-204`
+
+```c
+// idt_setup_from_table - 从 idt_data 表填充 IDT
+static __init void
+idt_setup_from_table(gate_desc *idt, const struct idt_data *t, int size, bool sys)
+{
+    gate_desc desc;
+    
+    for (; size > 0; t++, size--) {
+        idt_init_desc(&desc, t);              // 将 idt_data 转换为 gate_desc
+        write_idt_entry(idt, t->vector, &desc); // 写入到 idt_table[t->vector]
+        if (sys)
+            set_bit(t->vector, system_vectors);
+    }
+}
+```
+
+**填充 `idt_table` 的数据源：**
+
+1. **早期陷阱（early_idts）**：
+   - **源代码位置：** `linux/arch/x86/kernel/idt.c:63-76`
+   - 包含：调试异常（X86_TRAP_DB）、断点异常（X86_TRAP_BP）等
+   - 在 `idt_setup_early_traps()` 中使用
+
+2. **默认陷阱（def_idts）**：
+   - **源代码位置：** `linux/arch/x86/kernel/idt.c:84-109`
+   - 包含：除零错误、页故障、通用保护错误等所有 CPU 异常
+   - 在 `idt_setup_traps()` 中使用
+
+3. **APIC 中断（apic_idts）**：
+   - **源代码位置：** `linux/arch/x86/kernel/idt.c:112-169`
+   - 包含：Local APIC 相关的中断
+   - 在 `idt_setup_apic_and_irq_gates()` 中使用
+
+4. **IRQ 中断（动态设置）**：
+   - 在 `idt_setup_apic_and_irq_gates()` 中通过循环动态设置
+   - 为每个 IRQ 向量设置中断门，指向 `irq_entries_start`
+
+5. **系统调用（INT 0x80）**：
+   - **源代码位置：** `linux/arch/x86/kernel/idt.c:122-128`
+   - 在 `ia32_idt[]` 表中定义：`SYSG(IA32_SYSCALL_VECTOR, entry_INT80_32)`
+   - `IA32_SYSCALL_VECTOR` = 0x80（定义在 `arch/x86/include/asm/irq_vectors.h:38`）
+   - 在 `idt_setup_ia32_syscall_gate()` 中设置到 IDT[0x80]
+
+**INT 0x80 系统调用的完整实现路径：**
+
+**1. IDT 设置（源代码位置：`linux/arch/x86/kernel/idt.c:122-128`）：**
+
+```c
+// ia32_idt - 32位系统调用 IDT 条目
+static const struct idt_data ia32_idt[] __initconst = {
+#if defined(CONFIG_IA32_EMULATION)
+    SYSG(IA32_SYSCALL_VECTOR, asm_int80_emulation),  // 64位内核的 32位兼容模式
+#elif defined(CONFIG_X86_32)
+    SYSG(IA32_SYSCALL_VECTOR, entry_INT80_32),      // 32位内核
+#endif
+};
+```
+
+**2. 汇编入口点（源代码位置：`linux/arch/x86/entry/entry_32.S:933-983`）：**
+
+```asm
+// entry_INT80_32 - INT 0x80 系统调用的汇编入口点
+SYM_FUNC_START(entry_INT80_32)
+    ASM_CLAC
+    pushl   %eax                    // 保存系统调用号（orig_ax）
+    
+    SAVE_ALL pt_regs_ax=$-ENOSYS switch_stacks=1  // 保存所有寄存器到 pt_regs
+    
+    movl    %esp, %eax              // 传递 pt_regs 指针
+    call    do_int80_syscall_32     // 调用 C 处理函数
+    
+    // 恢复用户态并返回
+    RESTORE_REGS pop=4
+    CLEAR_CPU_BUFFERS
+    iret                            // 返回到用户空间
+SYM_FUNC_END(entry_INT80_32)
+```
+
+**3. C 处理函数（源代码位置：`linux/arch/x86/entry/syscall_32.c:246-263`）：**
+
+```c
+// do_int80_syscall_32 - INT 0x80 的 C 处理函数
+__visible noinstr void do_int80_syscall_32(struct pt_regs *regs)
+{
+    int nr = syscall_32_enter(regs);  // 获取系统调用号（从 regs->orig_ax）
+    
+    // 系统调用入口处理（审计、跟踪等）
+    nr = syscall_enter_from_user_mode(regs, nr);
+    
+    // 执行系统调用
+    do_syscall_32_irqs_on(regs, nr);
+    
+    // 系统调用退出处理
+    syscall_exit_to_user_mode(regs);
+}
+```
+
+**4. 系统调用分发（源代码位置：`linux/arch/x86/entry/syscall_32.c:73-87`）：**
+
+```c
+// do_syscall_32_irqs_on - 执行 32 位系统调用
+static __always_inline void do_syscall_32_irqs_on(struct pt_regs *regs, int nr)
+{
+    unsigned int unr = nr;
+    
+    if (likely(unr < IA32_NR_syscalls)) {
+        unr = array_index_nospec(unr, IA32_NR_syscalls);
+        regs->ax = ia32_sys_call(regs, unr);  // 调用实际的系统调用函数
+    } else {
+        regs->ax = __ia32_sys_ni_syscall(regs);  // 无效的系统调用号
+    }
+}
+```
+
+**5. 系统调用表（源代码位置：`linux/arch/x86/entry/syscall_32.c:44-50`）：**
+
+```c
+// ia32_sys_call - 根据系统调用号分发到具体函数
+long ia32_sys_call(const struct pt_regs *regs, unsigned int nr)
+{
+    switch (nr) {
+        #include <asm/syscalls_32.h>  // 包含所有系统调用的 case 语句
+        // 例如：case 1: return __ia32_sys_exit(regs);
+        //      case 3: return __ia32_sys_read(regs);
+        //      ...
+        default: return __ia32_sys_ni_syscall(regs);  // 无效的系统调用
+    }
+}
+```
+
+**INT 0x80 系统调用的完整流程：**
+
+```
+用户空间程序执行 INT 0x80
+    ↓
+CPU 查找 IDT[0x80]（在 idt_table 中）
+    ↓
+跳转到 entry_INT80_32（汇编入口点）
+    ├─ 保存寄存器到 pt_regs
+    ├─ 切换到内核栈
+    └─ 调用 do_int80_syscall_32(regs)
+        ↓
+do_int80_syscall_32（C 处理函数）
+    ├─ 获取系统调用号（regs->orig_ax）
+    ├─ 系统调用入口处理（审计、跟踪等）
+    ├─ 调用 do_syscall_32_irqs_on(regs, nr)
+    │   └─ 调用 ia32_sys_call(regs, nr)
+    │       └─ switch(nr) 分发到具体的系统调用函数
+    │           └─ 例如：__ia32_sys_read(regs)
+    └─ 系统调用退出处理
+        ↓
+返回到 entry_INT80_32
+    ├─ 恢复寄存器
+    ├─ 切换到用户栈
+    └─ iret 返回到用户空间
+```
+
+**关键点：**
+- **IDT[0x80]** 指向 `entry_INT80_32`（汇编入口点）
+- **系统调用号**：存储在 `%eax` 寄存器中（通过 `regs->orig_ax` 访问）
+- **参数传递**：通过寄存器传递（`%ebx`, `%ecx`, `%edx`, `%esi`, `%edi`, `%ebp`）
+- **返回值**：通过 `%eax` 寄存器返回
+
+**`load_idt` 的工作原理：**
+
+1. **参数**：`&idt_descr` 是一个指向 `desc_ptr` 结构的指针
+2. **结构内容**：
+   - `size`：IDT 表的大小减 1（4095，表示 4096 字节）
+   - `address`：`idt_table` 数组的基址
+3. **执行**：调用 `native_load_idt()`，执行 `lidt` 指令
+4. **结果**：将 IDT 的基址和大小加载到 CPU 的 IDTR 寄存器
+5. **效果**：从这一刻起，CPU 使用内核的 IDT，不再使用 BIOS 的 IVT
+
+**关键点：**
+- `load_idt()` 是一个内联函数，直接执行 `lidt` 汇编指令
+- `idt_descr` 包含 IDT 表的完整信息（基址和大小）
+- 加载 IDT 后，所有中断（包括硬件中断和软件中断）都路由到内核的处理程序
 
 	// 步骤 5: 将 IDT 表设置为只读（防止被恶意修改）
 	set_memory_ro((unsigned long)&idt_table, 1);
