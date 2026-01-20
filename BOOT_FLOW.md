@@ -2869,6 +2869,290 @@ prot_to_real:
    - **`real_to_prot`**：从 `GRUB_MEMORY_MACHINE_REAL_STACK` 恢复返回地址
    - **切换回保护模式**：返回到保护模式的代码（此时已经在保护模式下，可以访问 1MB 以上的代码）
 
+**返回地址保存和恢复的源代码详解：**
+
+**1. GRUB_MEMORY_MACHINE_REAL_STACK 定义（源代码位置：`grub/include/grub/i386/memory_raw.h:29`）：**
+
+```c
+#define GRUB_MEMORY_MACHINE_REAL_STACK	(0x2000 - 0x10)
+```
+
+- **地址**：`0x1FF0`（1MB 以下，实模式可访问）
+- **用途**：临时存储返回地址，用于模式切换
+
+**2. prot_to_real 保存返回地址（源代码位置：`grub/grub-core/kern/i386/realmode.S:228-235`）：**
+
+```asm
+prot_to_real:
+    // ... (设置 GDT、IDT 等)
+    
+    // 步骤 1: 保存保护模式栈
+    movl    %esp, %eax
+    movl    %eax, protstack
+    
+    // 步骤 2: 保存返回地址到 1MB 以下的内存（关键！）
+    movl    (%esp), %eax                    // 从栈顶读取返回地址（指向 1MB 以上的代码）
+    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 0x1FF0（1MB 以下）
+    
+    // 步骤 3: 设置新的栈（使用 GRUB_MEMORY_MACHINE_REAL_STACK 作为栈）
+    movl    $GRUB_MEMORY_MACHINE_REAL_STACK, %eax
+    movl    %eax, %esp                      // 栈指针指向 0x1FF0
+    movl    %eax, %ebp
+    
+    // ... (切换到实模式)
+    
+    retl    // 返回到实模式代码（grub_bios_interrupt 的实模式部分）
+```
+
+**3. real_to_prot 恢复返回地址（源代码位置：`grub/grub-core/kern/i386/realmode.S:175-186`）：**
+
+```asm
+real_to_prot:
+    .code16
+    cli
+    
+    // ... (加载 GDT、设置 CR0.PE 位、跳转到保护模式)
+    
+    .code32
+protcseg:
+    // ... (重新加载段寄存器)
+    
+    // 步骤 1: 保存返回地址到 1MB 以下的内存（从实模式栈读取）
+    movl    (%esp), %eax                    // 从栈顶读取返回地址（实模式代码的返回地址）
+    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 0x1FF0
+    
+    // 步骤 2: 切换到保护模式栈
+    movl    protstack, %eax                  // 恢复保护模式栈指针
+    movl    %eax, %esp
+    movl    %eax, %ebp
+    
+    // 步骤 3: 恢复返回地址到保护模式栈（关键！）
+    movl    GRUB_MEMORY_MACHINE_REAL_STACK, %eax  // 从 0x1FF0 读取返回地址
+    movl    %eax, (%esp)                    // 将返回地址放到保护模式栈顶
+    
+    // ... (加载空 IDT)
+    
+    ret     // 返回到保护模式代码（1MB 以上，此时已在保护模式下，可以访问）
+```
+
+**4. grub_bios_interrupt 完整实现（源代码位置：`grub/grub-core/kern/i386/int.S:19-134`）：**
+
+```asm
+FUNCTION(grub_bios_interrupt)
+    // 步骤 1: 保存寄存器（在保护模式下）
+    pushf
+    cli
+    popf
+    pushl    %ebp
+    pushl    %ecx
+    pushl    %eax
+    pushl    %ebx
+    pushl    %esi
+    pushl    %edi
+    pushl    %edx
+    
+    // 步骤 2: 准备 BIOS 中断参数（在保护模式下）
+    movb     %al, intno                    // 保存中断号到 intno 位置（第 87 行）
+    movl     (%edx), %eax                  // 从参数结构读取 EAX 值
+    movl     %eax, LOCAL(bios_register_eax)  // 保存到局部变量
+    movw     4(%edx), %ax                  // 读取 ES 值
+    movw     %ax, LOCAL(bios_register_es)
+    movw     6(%edx), %ax                  // 读取 DS 值
+    movw     %ax, LOCAL(bios_register_ds)
+    movw     8(%edx), %ax                  // 读取 FLAGS 值
+    movw     %ax, LOCAL(bios_register_flags)
+    
+    movl     12(%edx), %ebx                // 读取 EBX 值
+    movl     16(%edx), %ecx                // 读取 ECX 值
+    movl     20(%edx), %edi                // 读取 EDI 值
+    movl     24(%edx), %esi                // 读取 ESI 值
+    movl     28(%edx), %edx                // 读取 EDX 值
+    
+    // 步骤 3: 切换到实模式（调用 prot_to_real）
+    PROT_TO_REAL                // 宏展开为：call prot_to_real
+    .code16                      // 现在在实模式下（16 位代码）
+    
+    // 步骤 4: 设置 BIOS 中断所需的寄存器（在实模式下）
+    pushf
+    cli
+    mov     %ds, %ax
+    push    %ax
+    
+    // 设置 ES 寄存器
+    .byte   0xb8                // movw imm16, %ax 的操作码
+LOCAL(bios_register_es):
+    .short  0                   // ES 值（在保护模式下已设置）
+    movw    %ax, %es
+    
+    // 设置 DS 寄存器
+    .byte   0xb8                // movw imm16, %ax 的操作码
+LOCAL(bios_register_ds):
+    .short  0                   // DS 值（在保护模式下已设置）
+    movw    %ax, %ds
+    
+    // 设置 FLAGS 寄存器
+    .byte   0xb8                // movw imm16, %ax 的操作码
+LOCAL(bios_register_flags):
+    .short  0                   // FLAGS 值（在保护模式下已设置）
+    push    %ax
+    popf                        // 恢复 FLAGS
+    
+    // 设置 EAX 寄存器
+    .byte   0x66, 0xb8          // movl imm32, %eax 的操作码（0x66 是 32 位操作数前缀）
+LOCAL(bios_register_eax):
+    .long   0                   // EAX 值（在保护模式下已设置）
+    
+    // 步骤 5: 执行 BIOS 中断调用（在实模式下，关键！）
+    .byte   0xcd                // INT 指令的操作码
+intno:                          // 中断号位置（在保护模式下第 31 行已设置）
+    .byte   0                   // 中断号（如 0x13，会被 movb %al, intno 修改）
+    // ⚠️ 注意：这里执行的是实际的 BIOS 中断调用
+    // CPU 会查找 IVT[intno]，跳转到 BIOS 处理程序，执行 BIOS 服务，然后返回
+    
+    // 步骤 6: 保存 BIOS 返回的寄存器值（在实模式下）
+    movl    %eax, %cs:LOCAL(bios_register_eax)  // 保存 BIOS 返回的 EAX
+    movw    %ds, %ax
+    movw    %ax, %cs:LOCAL(bios_register_ds)    // 保存 BIOS 返回的 DS
+    pop     %ax
+    mov     %ax, %ds
+    pushf
+    pop     %ax
+    movw    %ax, LOCAL(bios_register_flags)     // 保存 BIOS 返回的 FLAGS
+    mov     %es, %ax
+    movw    %ax, LOCAL(bios_register_es)        // 保存 BIOS 返回的 ES
+    
+    popf
+    
+    // 步骤 7: 切换回保护模式（调用 real_to_prot）
+    REAL_TO_PROT                // 宏展开为：calll real_to_prot
+    .code32                     // 现在在保护模式下（32 位代码）
+    
+    // 步骤 8: 恢复寄存器并返回（在保护模式下）
+    popl    %eax                // 恢复参数结构指针
+    
+    // 将 BIOS 返回的寄存器值写回参数结构
+    movl    %ebx, 12(%eax)      // 保存 EBX
+    movl    %ecx, 16(%eax)      // 保存 ECX
+    movl    %edi, 20(%eax)      // 保存 EDI
+    movl    %esi, 24(%eax)      // 保存 ESI
+    movl    %edx, 28(%eax)      // 保存 EDX
+    
+    movl    %eax, %edx          // %edx 指向参数结构
+    
+    // 从局部变量读取 BIOS 返回的值
+    movl    LOCAL(bios_register_eax), %eax
+    movl    %eax, (%edx)        // 保存 EAX 返回值
+    movw    LOCAL(bios_register_es), %ax
+    movw    %ax, 4(%edx)       // 保存 ES 返回值
+    movw    LOCAL(bios_register_ds), %ax
+    movw    %ax, 6(%edx)       // 保存 DS 返回值
+    movw    LOCAL(bios_register_flags), %ax
+    movw    %ax, 8(%edx)       // 保存 FLAGS 返回值
+    
+    // 恢复所有寄存器
+    popl    %edi
+    popl    %esi
+    popl    %ebx
+    popl    %eax
+    popl    %ecx
+    popl    %ebp
+    ret                         // 返回到调用者（1MB 以上的保护模式代码）
+```
+
+**BIOS 调用的关键代码（第 85-88 行）：**
+
+```asm
+// 执行 BIOS 中断调用
+.byte   0xcd                // INT 指令的操作码（x86 指令：INT imm8）
+intno:                      // 中断号标签（地址位置）
+    .byte   0               // 中断号（如 0x13，在保护模式下第 31 行已设置）
+```
+
+**执行流程：**
+
+1. **第 31 行**：`movb %al, intno` - 将中断号（从 `%al` 寄存器）写入 `intno` 位置（第 87 行）
+2. **第 85-88 行**：执行 `INT` 指令
+   - `0xcd` 是 `INT imm8` 指令的操作码
+   - `intno` 位置存储中断号（如 0x13）
+   - CPU 执行 `INT 0x13` 时：
+     - 查找 IVT[0x13]（实模式中断向量表）
+     - 跳转到 BIOS 的 INT 13h 处理程序
+     - BIOS 执行磁盘服务（如读取扇区）
+     - BIOS 返回，CPU 继续执行第 90 行
+
+**为什么使用 `.byte` 而不是 `int $0x13`？**
+
+- 中断号是**动态的**（从 `%al` 寄存器传入）
+- 使用 `.byte` 可以在运行时修改中断号
+- `int $0x13` 是静态的，只能调用固定的中断号
+
+**`imm8` 的含义：**
+
+- **`imm8`** = **immediate 8-bit**（8 位立即数）
+  - `imm` = immediate（立即数，直接编码在指令中的常量值）
+  - `8` = 8 位（1 字节，范围 0-255）
+- **`INT imm8`** 指令格式：
+  - 操作码：`0xCD`（1 字节）
+  - 中断号：`imm8`（1 字节，0-255）
+  - 总长度：2 字节
+- **为什么是 8 位？**
+  - x86 中断向量表（IVT）有 256 个条目（0x00-0xFF）
+  - 8 位可以表示 0-255，正好对应 256 个中断向量
+  - 因此 `INT` 指令使用 8 位立即数作为中断号
+
+**其他立即数格式：**
+- **`imm16`**：16 位立即数（2 字节，范围 0-65535）
+- **`imm32`**：32 位立即数（4 字节，范围 0-4294967295）
+
+**示例：**
+```asm
+int $0x13        // INT imm8：中断号 0x13（静态，编译时确定）
+.byte 0xcd       // INT 指令操作码
+.byte 0x13       // imm8：中断号 0x13（等同于 int $0x13）
+
+// 动态中断号（GRUB 使用的方式）
+.byte 0xcd       // INT 指令操作码
+intno:
+.byte 0          // imm8：中断号（运行时修改，如 movb %al, intno）
+```
+
+**关键点说明：**
+
+1. **返回地址的保存时机**：
+   - `prot_to_real`：在切换到实模式**之前**保存返回地址（第 229-230 行）
+   - `real_to_prot`：在切换到保护模式**之后**恢复返回地址（第 185-186 行）
+
+2. **内存位置的重要性**：
+   - `GRUB_MEMORY_MACHINE_REAL_STACK = 0x1FF0`（1MB 以下）
+   - 实模式和保护模式都可以访问此地址
+   - 作为临时存储位置，确保返回地址在模式切换过程中不丢失
+
+3. **栈的使用**：
+   - `prot_to_real`：将栈指针设置为 `GRUB_MEMORY_MACHINE_REAL_STACK`，返回地址就存储在这个位置
+   - `real_to_prot`：从 `GRUB_MEMORY_MACHINE_REAL_STACK` 读取返回地址，放到保护模式栈顶
+
+4. **完整的地址流程**：
+   ```
+   保护模式代码（1MB 以上，如 0x100123）
+       ↓
+   调用 grub_bios_interrupt()
+       ↓
+   调用 prot_to_real
+       ├─ 返回地址 0x100123 保存到 0x1FF0
+       └─ 切换到实模式
+       ↓
+   grub_bios_interrupt 实模式部分（1MB 以下，0x8200+）
+       ↓
+   执行 BIOS 调用（INT 13h 等）
+       ↓
+   调用 real_to_prot
+       ├─ 从 0x1FF0 读取返回地址 0x100123
+       ├─ 切换到保护模式
+       └─ 将返回地址放到保护模式栈顶
+       ↓
+   返回到保护模式代码（1MB 以上，0x100123）
+   ```
+
 3. **完整流程**：
 
 ```
