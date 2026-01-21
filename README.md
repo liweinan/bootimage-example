@@ -165,11 +165,14 @@ DISPLAY=:1 make run-gui
 - **[GRUB_KERNEL_ADDR_ANALYSIS.md](GRUB_KERNEL_ADDR_ANALYSIS.md)** - GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000 的计算和设计原因分析
 - **[GRUB_BIOS_INTERRUPT_USAGE.md](GRUB_BIOS_INTERRUPT_USAGE.md)** - GRUB 在保护模式下调用 BIOS 服务的使用场景
 - **[GRUB_MODE_SWITCHING.md](GRUB_MODE_SWITCHING.md)** - GRUB 模式切换函数详解（real_to_prot、prot_to_real 实现细节）
+- **[GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)** - GRUB 加载 Linux 内核详细流程（grub_cmd_linux、grub_linux_boot、grub_relocator32_boot 源代码分析）
 - **[CREATE_GRUB_ISO.md](CREATE_GRUB_ISO.md)** - 使用 grub-mkrescue 生成 GRUB ISO 镜像教程
 
 ### Linux 内核相关文档
 
 - **[VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md)** - vmlinuz（bzImage）文件详细结构分析（boot_params、setup code、压缩内核等）
+- **[LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)** - Linux 内核早期启动详细流程（64 位）（Setup 代码、模式切换、startup_32、startup_64 源代码分析）
+- **[LINUX_KERNEL_INTERRUPT_TAKEOVER.md](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)** - Linux 内核中断系统接管详细流程（早期 IDT 设置、8259A PIC 重新编程、APIC 和中断门设置、INT 0x80 系统调用实现）
 
 ### 中断相关文档
 

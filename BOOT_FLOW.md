@@ -2656,742 +2656,7 @@ grub_main()（1MB 以上，0x100000+）
    - 这些变量在内存中的初始值是随机的
    - 需要清零，确保这些变量有正确的初始值（0 或 NULL）
 
-**startup_raw.S 中的中断状态变化详细分析：**
-
-**源代码位置：`grub/grub-core/boot/i386/pc/startup_raw.S:76-104`**
-
-```asm
-LOCAL (codestart):
-    cli         // 第 77 行：禁用中断（"we're not safe here"）
-    
-    // 设置段寄存器和栈
-    // ...
-    
-    sti         // 第 89 行：重新启用中断（"we're safe again"）
-    
-    // 保存启动驱动器号
-    // ...
-    
-    int $0x13   // 第 95 行：调用 BIOS 磁盘服务（需要中断启用）
-    
-    calll   real_to_prot  // 第 98 行：切换到保护模式
-                          // ⚠️ 注意：这里没有 cli，但中断会在 real_to_prot() 内部被禁用
-    
-    .code32     // 第 101 行：切换到 32 位代码
-                // ⚠️ 注意：此时中断已经是禁用状态（由 real_to_prot() 内部禁用）
-    
-    cld
-    call    grub_gate_a20  // 第 104 行：启用 A20（如果需要调用 BIOS，内部会切换回实模式）
-    // ... 继续执行后续代码
-```
-
-**中断状态变化流程：**
-
-```
-startup_raw.S:77
-    ↓
-cli（禁用中断）
-    ↓
-startup_raw.S:89
-    ↓
-sti（重新启用中断）
-    ↓
-startup_raw.S:95
-    ↓
-int $0x13（调用 BIOS 服务，需要中断启用）
-    ↓
-startup_raw.S:98
-    ↓
-calll real_to_prot
-    ↓
-realmode.S:135
-    ↓
-cli（在 real_to_prot() 内部禁用中断）
-    ↓
-realmode.S:191-192
-    ↓
-加载空 IDT（protidt）
-    ↓
-realmode.S:195
-    ↓
-ret（返回，⚠️ 没有 sti，中断保持禁用）
-    ↓
-返回到 startup_raw.S:101
-    ↓
-.code32（32 位保护模式代码）
-    ↓
-⚠️ 中断仍然是禁用状态（由 real_to_prot() 禁用，没有被重新启用）
-    ↓
-后续代码继续执行（中断禁用，直到需要调用 BIOS 服务时切换回实模式）
-```
-
-**关键结论：**
-
-1. **为什么 startup_raw.S 中没有显式的 cli**：
-   - `real_to_prot()` 函数在开始时（第 135 行）执行 `cli` 禁用中断
-   - `real_to_prot()` 函数返回时（第 195 行）**没有执行 `sti`**，所以中断保持禁用状态
-   - 因此，从 `real_to_prot()` 返回后，中断已经是禁用状态，不需要再次执行 `cli`
-
-2. **这是正确的设计**：
-   - 保护模式下使用空 IDT，如果发生中断会导致系统崩溃
-   - 因此必须在保护模式下保持中断禁用
-   - 只有在需要调用 BIOS 服务时，才会通过 `prot_to_real` 切换回实模式并重新启用中断
-
-3. **中断重新启用的时机**：
-   - 当 GRUB 需要调用 BIOS 服务（如磁盘 I/O）时，会调用 `prot_to_real` 切换回实模式
-   - `prot_to_real` 函数在返回前会执行 `sti`（realmode.S:275），重新启用中断
-   - 调用完 BIOS 服务后，再次通过 `real_to_prot` 切换回保护模式，中断再次被禁用
-
----
-
-> **注意**：关于 `real_to_prot` 和 `prot_to_real` 函数的详细实现说明，请参见本文档末尾的[附录：GRUB 模式切换函数详解](#附录grub-模式切换函数详解)。
-
-### 引导过程的完整内存布局和关键步骤
-
-**完整内存布局（引导过程）：**
-
-`startup_raw.S` 中调用的 `real_to_prot` 函数负责从实模式切换到保护模式。这个函数在 `realmode.S` 中实现：
-
-**源代码位置：`grub/grub-core/kern/i386/realmode.S:133-195`**
-
-```asm
-// real_to_prot - 从实模式切换到保护模式
-real_to_prot:
-    .code16
-    cli     // 禁用中断
-    
-    // 步骤 1: 加载全局描述符表（GDT）
-    xorw    %ax, %ax
-    movw    %ax, %ds
-    lgdtl   gdtdesc  // 加载 GDT 描述符
-    
-    // 步骤 2: 设置 CR0 的 PE 位（Protected Mode Enable）
-    movl    %cr0, %eax
-    orl     $GRUB_MEMORY_CPU_CR0_PE_ON, %eax  // 设置 PE 位
-    movl    %eax, %cr0
-    
-    // 步骤 3: 跳转到保护模式代码段，刷新预取队列
-    ljmpl   $GRUB_MEMORY_MACHINE_PROT_MODE_CSEG, $protcseg
-    
-    .code32
-protcseg:
-    // 步骤 4: 重新加载所有段寄存器（使用保护模式段选择子）
-    movw    $GRUB_MEMORY_MACHINE_PROT_MODE_DSEG, %ax
-    movw    %ax, %ds
-    movw    %ax, %es
-    movw    %ax, %fs
-    movw    %ax, %gs
-    movw    %ax, %ss
-    
-    // 步骤 5: 切换到保护模式栈
-    movl    (%esp), %eax
-    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK
-    
-    movl    protstack, %eax
-    movl    %eax, %esp
-    movl    %eax, %ebp
-    
-    // 步骤 6: 保存实模式 IDT，加载保护模式 IDT（空）
-    sidt    LOCAL(realidt)  // 保存实模式 IDT
-    lidt    protidt         // 加载保护模式 IDT（空）
-    // 注意：此时中断仍然是禁用的（cli），不会重新启用（sti）
-    // 这是必要的，因为空 IDT 无法处理任何中断，如果发生中断会导致系统崩溃
-    
-    ret     // 返回，现在在保护模式下（中断禁用）
-```
-
-**IDT 定义（源代码位置：`grub/grub-core/kern/i386/realmode.S:119-124`）：**
-
-```asm
-LOCAL(realidt):
-    .word 0x400    // 实模式 IDT 界限（1024 字节 = 256 个中断向量 × 4 字节）
-    .long 0        // 实模式 IDT 基址（0x0000:0000，即 IVT 位置）
-
-protidt:
-    .word 0        // 保护模式 IDT 界限（0 = 空 IDT）
-    .long 0        // 保护模式 IDT 基址（0 = 空 IDT）
-```
-
-**重要说明：`LOCAL(realidt)` 和 `protidt` 的内存位置**
-
-**关键点：这两个数据结构只是存储 IDT 描述符（limit 和 base），不是 IDT 表本身**
-
-1. **数据结构的位置**：
-   - `realmode.S` 被包含在 `startup_raw.S` 中（`startup_raw.S:119`：`#include "../../../kern/i386/realmode.S"`）
-   - `startup_raw.S` 被加载到内存地址 `0x8200`
-   - 因此，`LOCAL(realidt)` 和 `protidt` 这两个数据结构位于 `0x8200+` 的某个位置（作为 `startup_raw.S` 的一部分）
-   - 每个数据结构占 6 字节（2 字节 limit + 4 字节 base）
-
-2. **IDT 表本身的位置**：
-   - **`protidt`**：base=0，limit=0，表示**空 IDT**（没有实际的 IDT 表）
-   - **`LOCAL(realidt)`**：保存的是实模式的 IVT 信息，base=0（IVT 固定位置 `0x0000:0000`）
-   - 实际的 IDT 表位置由 IDTR 寄存器中的 base 地址决定
-   - 对于 `protidt`，由于 base=0，limit=0，CPU 不会访问任何实际的 IDT 表
-
-3. **与解压程序的重叠问题**：
-   - **不会重叠**：`LOCAL(realidt)` 和 `protidt` 位于 `0x8200+`（前 1MB 范围内）
-   - 解压程序（LZMA 解压后的 GRUB Core）位于 `0x100000`（1MB）以上
-   - 两者位于不同的内存区域，不会发生重叠
-
-4. **内存布局总结**：
-
-```
-前 1MB 内存（实模式阶段）：
-0x8200 - 0x9063：startup_raw.S（包含 realmode.S）
-    ├─ 0x8200+：startup_raw.S 代码
-    ├─ 0x8200+（某个偏移）：LOCAL(realidt)（6 字节）
-    └─ 0x8200+（某个偏移）：protidt（6 字节）
-
-1MB 以上内存（保护模式阶段）：
-0x100000+：解压后的 GRUB Core（LZMA 解压后）
-```
-
-**结论：`LOCAL(realidt)` 和 `protidt` 作为 `startup_raw.S` 的一部分，位于前 1MB 范围内（约 `0x8200+`），不会与解压程序（位于 `0x100000+`）重叠。**
-
-**GRUB 在保护模式下处理 IDT 的策略：**
-
-1. **禁用中断（关键安全措施）**：
-   - 在 `real_to_prot` 函数开始时执行 `cli`（第 135 行），禁用所有中断
-   - **重要**：加载空 IDT 后，**不会重新启用中断**（没有 `sti` 指令）
-   - 这意味着 GRUB 在保护模式下**始终禁用中断**，直到需要调用 BIOS 服务时切换回实模式
-
-2. **加载空 IDT**：
-   - `protidt` 是一个"空"的 IDT（limit=0，base=0）
-   - 在保护模式下，如果发生中断且 IDT 为空，CPU 会触发异常（通常导致系统挂起）
-   - **因此必须禁用中断**：这是为什么 GRUB 在保护模式下保持中断禁用的原因
-
-3. **保存实模式 IDT（IVT）**：
-   - `LOCAL(realidt)` 保存实模式的 IDT 信息（实际上是 IVT）
-   - 界限为 0x400（1024 字节），基址为 0（IVT 固定位置）
-
-4. **需要调用 BIOS 服务时的处理**：
-   - 当 GRUB 需要调用 BIOS 服务（如 INT 13h 读取磁盘）时，通过 `prot_to_real` 切换回实模式
-   - `prot_to_real` 会恢复实模式的 IDT（IVT），然后调用 BIOS 服务
-   - 调用完成后，再次通过 `real_to_prot` 切换回保护模式
-
-**⚠️ 重要风险：空 IDT 与 CPU 异常处理**
-
-**关键问题：禁用中断（`cli`）只能防止硬件中断，无法防止 CPU 异常**
-
-1. **硬件中断 vs CPU 异常的区别**：
-   - **硬件中断**：由外部设备触发（如键盘、定时器、磁盘等），可以通过 `cli` 禁用
-   - **CPU 异常**：由 CPU 内部触发（如除零错误、页错误、无效操作码等），**无法通过 `cli` 禁用**
-
-2. **空 IDT 的风险**：
-   - 如果 GRUB 在保护模式下发生 CPU 异常（如页错误、除零错误、无效操作码等），CPU 会尝试通过 IDT 查找异常处理程序
-   - 但 IDT 是空的（limit=0），CPU 无法找到异常处理程序
-   - 这会导致 CPU 触发"双重故障"（Double Fault，向量 8）
-   - 如果双重故障也无法处理（因为 IDT 仍然是空的），CPU 会触发"三重故障"（Triple Fault），导致系统立即重启或挂起
-
-3. **GRUB 的保护措施**：
-   - **代码简单**：GRUB 在保护模式下的代码相对简单，主要是内存操作、解压缩等
-   - **不使用分页**：GRUB 使用平坦内存模型（flat memory model），不启用分页，避免页错误异常
-   - **避免危险操作**：
-     - 避免除零操作
-     - 避免无效的内存访问（通过仔细的内存管理）
-     - 避免无效的操作码（使用标准汇编指令）
-   - **快速执行**：GRUB 在保护模式下的执行时间尽可能短，减少出错窗口
-
-4. **设计权衡**：
-   - **优点**：简化代码，不需要实现完整的 IDT 和异常处理机制
-   - **缺点**：必须非常小心地编写代码，任何错误都可能导致系统崩溃
-   - **适用场景**：GRUB 作为引导加载程序，代码相对简单且执行时间短，这种权衡是合理的
-
-5. **与 Linux 内核的对比**：
-   - **Linux 内核**：在保护模式下建立完整的 IDT，为所有 CPU 异常设置专门的处理程序
-   - **GRUB**：使用空 IDT，依赖代码正确性来避免异常
-   - **原因**：GRUB 是引导加载程序，代码简单且执行时间短；Linux 内核是操作系统，需要完整的异常处理机制
-
-**总结：GRUB 在保护模式下使用空 IDT 是一个高风险的设计选择，必须通过代码正确性和简单性来降低风险。任何代码错误（如除零、无效内存访问等）都可能导致系统立即崩溃。**
-
-**prot_to_real 函数（源代码位置：`grub/grub-core/kern/i386/realmode.S:217-279`）：**
-
-```asm
-prot_to_real:
-    // 步骤 1: 设置 GDT
-    lgdt    gdtdesc
-    
-    // 步骤 2: 保存保护模式 IDT，恢复实模式 IDT（IVT）
-    sidt    protidt         // 保存保护模式 IDT（空）
-    lidt    LOCAL(realidt)  // 恢复实模式 IDT（IVT）
-    
-    // 步骤 3: 保存保护模式栈
-    movl    %esp, %eax
-    movl    %eax, protstack
-    
-    // 步骤 4: 保存返回地址（关键！）
-    movl    (%esp), %eax
-    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 1MB 以下的内存
-    
-    // 步骤 5-6: 切换到实模式（清除 CR0.PE 位等）
-    // ...
-    
-    // 步骤 7: 恢复中断
-    sti
-    
-    retl    // 返回，现在在实模式下
-```
-
-**⚠️ 关键问题：prot_to_real 执行后，GRUB 程序运行在 1MB 以上，如何解决？**
-
-**问题描述：**
-- GRUB 的解压后代码位于 `0x100000+`（1MB 以上）
-- 当从保护模式的代码（在 1MB 以上）调用 `prot_to_real` 时，返回地址指向 1MB 以上的代码
-- 切换到实模式后，实模式只能访问 1MB 以下的内存（`0x00000 - 0xFFFFF`）
-- **问题**：如何返回到 1MB 以上的代码？
-
-**解决方案：**
-
-1. **`prot_to_real` 和 `real_to_prot` 本身位于 1MB 以下**：
-   - 这两个函数被包含在 `startup_raw.S` 中（`startup_raw.S:119`：`#include "../../../kern/i386/realmode.S"`）
-   - `startup_raw.S` 被加载到内存地址 `0x8200`（1MB 以下）
-   - 因此，`prot_to_real` 和 `real_to_prot` 的代码本身位于 1MB 以下，可以在实模式下执行
-
-2. **返回地址的保存和恢复机制**：
-   - **`prot_to_real`**：保存返回地址到 `GRUB_MEMORY_MACHINE_REAL_STACK`（位于 1MB 以下，`0x2000 - 0x10`）
-   - **切换到实模式**：执行 BIOS 调用（在实模式下）
-   - **`real_to_prot`**：从 `GRUB_MEMORY_MACHINE_REAL_STACK` 恢复返回地址
-   - **切换回保护模式**：返回到保护模式的代码（此时已经在保护模式下，可以访问 1MB 以上的代码）
-
-**返回地址保存和恢复的源代码详解：**
-
-**1. GRUB_MEMORY_MACHINE_REAL_STACK 定义（源代码位置：`grub/include/grub/i386/memory_raw.h:29`）：**
-
-```c
-#define GRUB_MEMORY_MACHINE_REAL_STACK	(0x2000 - 0x10)
-```
-
-- **地址**：`0x1FF0`（1MB 以下，实模式可访问）
-- **用途**：临时存储返回地址，用于模式切换
-
-**2. prot_to_real 保存返回地址（源代码位置：`grub/grub-core/kern/i386/realmode.S:228-235`）：**
-
-```asm
-prot_to_real:
-    // ... (设置 GDT、IDT 等)
-    
-    // 步骤 1: 保存保护模式栈
-    movl    %esp, %eax
-    movl    %eax, protstack
-    
-    // 步骤 2: 保存返回地址到 1MB 以下的内存（关键！）
-    movl    (%esp), %eax                    // 从栈顶读取返回地址（指向 1MB 以上的代码）
-    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 0x1FF0（1MB 以下）
-    
-    // 步骤 3: 设置新的栈（使用 GRUB_MEMORY_MACHINE_REAL_STACK 作为栈）
-    movl    $GRUB_MEMORY_MACHINE_REAL_STACK, %eax
-    movl    %eax, %esp                      // 栈指针指向 0x1FF0
-    movl    %eax, %ebp
-    
-    // ... (切换到实模式)
-    
-    retl    // 返回到实模式代码（grub_bios_interrupt 的实模式部分）
-```
-
-**3. real_to_prot 恢复返回地址（源代码位置：`grub/grub-core/kern/i386/realmode.S:175-186`）：**
-
-```asm
-real_to_prot:
-    .code16
-    cli
-    
-    // ... (加载 GDT、设置 CR0.PE 位、跳转到保护模式)
-    
-    .code32
-protcseg:
-    // ... (重新加载段寄存器)
-    
-    // 步骤 1: 保存返回地址到 1MB 以下的内存（从实模式栈读取）
-    movl    (%esp), %eax                    // 从栈顶读取返回地址（实模式代码的返回地址）
-    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 0x1FF0
-    
-    // 步骤 2: 切换到保护模式栈
-    movl    protstack, %eax                  // 恢复保护模式栈指针
-    movl    %eax, %esp
-    movl    %eax, %ebp
-    
-    // 步骤 3: 恢复返回地址到保护模式栈（关键！）
-    movl    GRUB_MEMORY_MACHINE_REAL_STACK, %eax  // 从 0x1FF0 读取返回地址
-    movl    %eax, (%esp)                    // 将返回地址放到保护模式栈顶
-    
-    // ... (加载空 IDT)
-    
-    ret     // 返回到保护模式代码（1MB 以上，此时已在保护模式下，可以访问）
-```
-
-**4. grub_bios_interrupt 完整实现（源代码位置：`grub/grub-core/kern/i386/int.S:19-134`）：**
-
-```asm
-FUNCTION(grub_bios_interrupt)
-    // 步骤 1: 保存寄存器（在保护模式下）
-    pushf
-    cli
-    popf
-    pushl    %ebp
-    pushl    %ecx
-    pushl    %eax
-    pushl    %ebx
-    pushl    %esi
-    pushl    %edi
-    pushl    %edx
-    
-    // 步骤 2: 准备 BIOS 中断参数（在保护模式下）
-    movb     %al, intno                    // 保存中断号到 intno 位置（第 87 行）
-    movl     (%edx), %eax                  // 从参数结构读取 EAX 值
-    movl     %eax, LOCAL(bios_register_eax)  // 保存到局部变量
-    movw     4(%edx), %ax                  // 读取 ES 值
-    movw     %ax, LOCAL(bios_register_es)
-    movw     6(%edx), %ax                  // 读取 DS 值
-    movw     %ax, LOCAL(bios_register_ds)
-    movw     8(%edx), %ax                  // 读取 FLAGS 值
-    movw     %ax, LOCAL(bios_register_flags)
-    
-    movl     12(%edx), %ebx                // 读取 EBX 值
-    movl     16(%edx), %ecx                // 读取 ECX 值
-    movl     20(%edx), %edi                // 读取 EDI 值
-    movl     24(%edx), %esi                // 读取 ESI 值
-    movl     28(%edx), %edx                // 读取 EDX 值
-    
-    // 步骤 3: 切换到实模式（调用 prot_to_real）
-    PROT_TO_REAL                // 宏展开为：call prot_to_real
-    .code16                      // 现在在实模式下（16 位代码）
-    
-    // 步骤 4: 设置 BIOS 中断所需的寄存器（在实模式下）
-    pushf
-    cli
-    mov     %ds, %ax
-    push    %ax
-    
-    // 设置 ES 寄存器
-    .byte   0xb8                // movw imm16, %ax 的操作码
-LOCAL(bios_register_es):
-    .short  0                   // ES 值（在保护模式下已设置）
-    movw    %ax, %es
-    
-    // 设置 DS 寄存器
-    .byte   0xb8                // movw imm16, %ax 的操作码
-LOCAL(bios_register_ds):
-    .short  0                   // DS 值（在保护模式下已设置）
-    movw    %ax, %ds
-    
-    // 设置 FLAGS 寄存器
-    .byte   0xb8                // movw imm16, %ax 的操作码
-LOCAL(bios_register_flags):
-    .short  0                   // FLAGS 值（在保护模式下已设置）
-    push    %ax
-    popf                        // 恢复 FLAGS
-    
-    // 设置 EAX 寄存器
-    .byte   0x66, 0xb8          // movl imm32, %eax 的操作码（0x66 是 32 位操作数前缀）
-LOCAL(bios_register_eax):
-    .long   0                   // EAX 值（在保护模式下已设置）
-    
-    // 步骤 5: 执行 BIOS 中断调用（在实模式下，关键！）
-    .byte   0xcd                // INT 指令的操作码
-intno:                          // 中断号位置（在保护模式下第 31 行已设置）
-    .byte   0                   // 中断号（如 0x13，会被 movb %al, intno 修改）
-    // ⚠️ 注意：这里执行的是实际的 BIOS 中断调用
-    // CPU 会查找 IVT[intno]，跳转到 BIOS 处理程序，执行 BIOS 服务，然后返回
-    
-    // 步骤 6: 保存 BIOS 返回的寄存器值（在实模式下）
-    movl    %eax, %cs:LOCAL(bios_register_eax)  // 保存 BIOS 返回的 EAX
-    movw    %ds, %ax
-    movw    %ax, %cs:LOCAL(bios_register_ds)    // 保存 BIOS 返回的 DS
-    pop     %ax
-    mov     %ax, %ds
-    pushf
-    pop     %ax
-    movw    %ax, LOCAL(bios_register_flags)     // 保存 BIOS 返回的 FLAGS
-    mov     %es, %ax
-    movw    %ax, LOCAL(bios_register_es)        // 保存 BIOS 返回的 ES
-    
-    popf
-    
-    // 步骤 7: 切换回保护模式（调用 real_to_prot）
-    REAL_TO_PROT                // 宏展开为：calll real_to_prot
-    .code32                     // 现在在保护模式下（32 位代码）
-    
-    // 步骤 8: 恢复寄存器并返回（在保护模式下）
-    popl    %eax                // 恢复参数结构指针
-    
-    // 将 BIOS 返回的寄存器值写回参数结构
-    movl    %ebx, 12(%eax)      // 保存 EBX
-    movl    %ecx, 16(%eax)      // 保存 ECX
-    movl    %edi, 20(%eax)      // 保存 EDI
-    movl    %esi, 24(%eax)      // 保存 ESI
-    movl    %edx, 28(%eax)      // 保存 EDX
-    
-    movl    %eax, %edx          // %edx 指向参数结构
-    
-    // 从局部变量读取 BIOS 返回的值
-    movl    LOCAL(bios_register_eax), %eax
-    movl    %eax, (%edx)        // 保存 EAX 返回值
-    movw    LOCAL(bios_register_es), %ax
-    movw    %ax, 4(%edx)       // 保存 ES 返回值
-    movw    LOCAL(bios_register_ds), %ax
-    movw    %ax, 6(%edx)       // 保存 DS 返回值
-    movw    LOCAL(bios_register_flags), %ax
-    movw    %ax, 8(%edx)       // 保存 FLAGS 返回值
-    
-    // 恢复所有寄存器
-    popl    %edi
-    popl    %esi
-    popl    %ebx
-    popl    %eax
-    popl    %ecx
-    popl    %ebp
-    ret                         // 返回到调用者（1MB 以上的保护模式代码）
-```
-
-**BIOS 调用的关键代码（第 85-88 行）：**
-
-```asm
-// 执行 BIOS 中断调用
-.byte   0xcd                // INT 指令的操作码（x86 指令：INT imm8）
-intno:                      // 中断号标签（地址位置）
-    .byte   0               // 中断号（如 0x13，在保护模式下第 31 行已设置）
-```
-
-**执行流程：**
-
-1. **第 31 行**：`movb %al, intno` - 将中断号（从 `%al` 寄存器）写入 `intno` 位置（第 87 行）
-2. **第 85-88 行**：执行 `INT` 指令
-   - `0xcd` 是 `INT imm8` 指令的操作码
-   - `intno` 位置存储中断号（如 0x13）
-   - CPU 执行 `INT 0x13` 时：
-     - 查找 IVT[0x13]（实模式中断向量表）
-     - 跳转到 BIOS 的 INT 13h 处理程序
-     - BIOS 执行磁盘服务（如读取扇区）
-     - BIOS 返回，CPU 继续执行第 90 行
-
-**为什么使用 `.byte` 而不是 `int $0x13`？**
-
-- 中断号是**动态的**（从 `%al` 寄存器传入）
-- 使用 `.byte` 可以在运行时修改中断号
-- `int $0x13` 是静态的，只能调用固定的中断号
-
-**`imm8` 的含义：**
-
-- **`imm8`** = **immediate 8-bit**（8 位立即数）
-  - `imm` = immediate（立即数，直接编码在指令中的常量值）
-  - `8` = 8 位（1 字节，范围 0-255）
-- **`INT imm8`** 指令格式：
-  - 操作码：`0xCD`（1 字节）
-  - 中断号：`imm8`（1 字节，0-255）
-  - 总长度：2 字节
-- **为什么是 8 位？**
-  - x86 中断向量表（IVT）有 256 个条目（0x00-0xFF）
-  - 8 位可以表示 0-255，正好对应 256 个中断向量
-  - 因此 `INT` 指令使用 8 位立即数作为中断号
-
-**其他立即数格式：**
-- **`imm16`**：16 位立即数（2 字节，范围 0-65535）
-- **`imm32`**：32 位立即数（4 字节，范围 0-4294967295）
-
-**示例：**
-```asm
-int $0x13        // INT imm8：中断号 0x13（静态，编译时确定）
-.byte 0xcd       // INT 指令操作码
-.byte 0x13       // imm8：中断号 0x13（等同于 int $0x13）
-
-// 动态中断号（GRUB 使用的方式）
-.byte 0xcd       // INT 指令操作码
-intno:
-.byte 0          // imm8：中断号（运行时修改，如 movb %al, intno）
-```
-
-**关键点说明：**
-
-1. **返回地址的保存时机**：
-   - `prot_to_real`：在切换到实模式**之前**保存返回地址（第 229-230 行）
-   - `real_to_prot`：在切换到保护模式**之后**恢复返回地址（第 185-186 行）
-
-2. **内存位置的重要性**：
-   - `GRUB_MEMORY_MACHINE_REAL_STACK = 0x1FF0`（1MB 以下）
-   - 实模式和保护模式都可以访问此地址
-   - 作为临时存储位置，确保返回地址在模式切换过程中不丢失
-
-3. **栈的使用**：
-   - `prot_to_real`：将栈指针设置为 `GRUB_MEMORY_MACHINE_REAL_STACK`，返回地址就存储在这个位置
-   - `real_to_prot`：从 `GRUB_MEMORY_MACHINE_REAL_STACK` 读取返回地址，放到保护模式栈顶
-
-4. **完整的地址流程**：
-   ```
-   保护模式代码（1MB 以上，如 0x100123）
-       ↓
-   调用 grub_bios_interrupt()
-       ↓
-   调用 prot_to_real
-       ├─ 返回地址 0x100123 保存到 0x1FF0
-       └─ 切换到实模式
-       ↓
-   grub_bios_interrupt 实模式部分（1MB 以下，0x8200+）
-       ↓
-   执行 BIOS 调用（INT 13h 等）
-       ↓
-   调用 real_to_prot
-       ├─ 从 0x1FF0 读取返回地址 0x100123
-       ├─ 切换到保护模式
-       └─ 将返回地址放到保护模式栈顶
-       ↓
-   返回到保护模式代码（1MB 以上，0x100123）
-   ```
-
-3. **完整流程**：
-
-```
-保护模式代码（1MB 以上，0x100000+）
-    ↓
-调用 grub_bios_interrupt()
-    ↓
-调用 prot_to_real（位于 1MB 以下，0x8200+）
-    ├─ 保存返回地址到 GRUB_MEMORY_MACHINE_REAL_STACK（1MB 以下）
-    ├─ 切换到实模式
-    └─ 返回到 grub_bios_interrupt() 的实模式部分（位于 1MB 以下）
-        ↓
-执行 BIOS 调用（INT 13h 等，在实模式下）
-    ↓
-调用 real_to_prot（位于 1MB 以下，0x8200+）
-    ├─ 从 GRUB_MEMORY_MACHINE_REAL_STACK 恢复返回地址
-    ├─ 切换到保护模式
-    └─ 返回到 grub_bios_interrupt() 的保护模式部分（位于 1MB 以上）
-        ↓
-返回到保护模式代码（1MB 以上，0x100000+）
-```
-
-**关键点总结：**
-
-| 组件 | 内存位置 | 运行模式 | 说明 |
-|------|---------|---------|------|
-| **prot_to_real / real_to_prot** | `0x8200+`（1MB 以下） | 实模式/保护模式 | 模式切换函数本身位于 1MB 以下 |
-| **grub_bios_interrupt** | `0x100000+`（1MB 以上） | 保护模式 | 但包含实模式代码段（`.code16`） |
-| **返回地址保存位置** | `GRUB_MEMORY_MACHINE_REAL_STACK`（`0x2000 - 0x10`，1MB 以下） | - | 临时存储返回地址 |
-| **GRUB Core 解压后代码** | `0x100000+`（1MB 以上） | 保护模式 | 主代码运行位置 |
-
-**设计优势：**
-- **模式切换函数位于 1MB 以下**：可以在实模式下执行
-- **返回地址保存在 1MB 以下**：实模式可以访问
-- **代码分段组织**：`grub_bios_interrupt` 包含保护模式和实模式代码段，通过模式切换函数连接
-
-**重要澄清：保护模式下不能直接使用 BIOS 的 IVT**
-
-**关键点：**
-1. **保护模式下 CPU 使用 IDT，不使用 IVT**：
-   - 在保护模式下，CPU 只使用 IDT（中断描述符表），不会使用 IVT（中断向量表）
-   - IVT 只在实模式下有效（固定位置 0x0000:0000）
-   - 即使 IVT 仍然存在于内存中，保护模式下的 CPU 也不会访问它
-
-2. **GRUB 在保护模式下使用空 IDT**：
-   - GRUB 在保护模式下加载的是空 IDT（limit=0，base=0）
-   - 如果保护模式下发生中断，CPU 会尝试访问 IDT，但由于 IDT 为空，会导致异常
-   - 因此 GRUB 在保护模式下禁用中断（`cli`），避免触发中断
-
-3. **调用 BIOS 服务必须切换回实模式**：
-   - 当 GRUB 需要调用 BIOS 服务（如 INT 13h 读取磁盘）时，**必须切换回实模式**
-   - 切换回实模式后，CPU 才会使用 IVT，此时才能调用 BIOS 中断服务
-
-**GRUB 调用 BIOS 服务的完整流程（源代码位置：`grub/grub-core/kern/i386/int.S:19-134`）：**
-
-```asm
-// grub_bios_interrupt - 在保护模式下调用 BIOS 中断服务
-FUNCTION(grub_bios_interrupt)
-    // 步骤 1: 保存寄存器（在保护模式下）
-    pushf
-    cli
-    popf
-    pushl    %ebp
-    pushl    %ecx
-    pushl    %eax
-    // ... 保存其他寄存器
-    
-    // 步骤 2: 准备 BIOS 中断参数
-    movb     %al, intno        // 中断号（如 0x13）
-    movl     (%edx), %eax
-    movl     %eax, LOCAL(bios_register_eax)
-    // ... 准备其他寄存器值
-    
-    // 步骤 3: 切换到实模式
-    PROT_TO_REAL                // 调用 prot_to_real
-    .code16                      // 现在在实模式下
-    
-    // 步骤 4: 设置 BIOS 中断所需的寄存器
-    movw     LOCAL(bios_register_es), %ax
-    movw     %ax, %es
-    movw     LOCAL(bios_register_ds), %ax
-    movw     %ax, %ds
-    // ... 设置其他寄存器
-    
-    // 步骤 5: 调用 BIOS 中断服务（在实模式下）
-    .byte   0xcd                // INT 指令的操作码
-intno:
-    .byte   0                   // 中断号（如 0x13）
-    
-    // 步骤 6: 保存 BIOS 返回的寄存器值
-    movl    %eax, %cs:LOCAL(bios_register_eax)
-    movw    %ds, %ax
-    movw    %ax, %cs:LOCAL(bios_register_ds)
-    // ... 保存其他寄存器
-    
-    // 步骤 7: 切换回保护模式
-    REAL_TO_PROT                // 调用 real_to_prot
-    .code32                     // 现在在保护模式下
-    
-    // 步骤 8: 恢复寄存器并返回（在保护模式下）
-    popl    %eax
-    // ... 恢复其他寄存器
-    ret
-```
-
-**流程总结：**
-
-```
-保护模式（GRUB 主代码）
-    ↓
-需要调用 BIOS 服务（如 INT 13h）
-    ↓
-调用 grub_bios_interrupt()
-    ↓
-PROT_TO_REAL（prot_to_real）
-    ├─ 保存保护模式 IDT（空）
-    ├─ 恢复实模式 IDT（IVT）
-    ├─ 清除 CR0.PE 位（退出保护模式）
-    └─ 切换到实模式
-    ↓
-实模式（CPU 现在使用 IVT）
-    ↓
-执行 INT 指令（如 INT 13h）
-    ├─ CPU 使用 IVT[0x13] 查找处理程序
-    ├─ 跳转到 BIOS 处理程序
-    └─ BIOS 执行服务并返回
-    ↓
-REAL_TO_PROT（real_to_prot）
-    ├─ 保存实模式 IDT（IVT）
-    ├─ 加载保护模式 IDT（空）
-    ├─ 设置 CR0.PE 位（进入保护模式）
-    └─ 切换到保护模式
-    ↓
-保护模式（GRUB 主代码继续执行）
-```
-
-**关键结论：**
-
-| 模式 | CPU 使用的中断表 | GRUB 的 IDT/IVT 状态 | 能否调用 BIOS 服务 |
-|------|----------------|---------------------|-------------------|
-| **实模式** | IVT（固定 0x0000:0000） | 使用 BIOS 的 IVT | ✅ 可以直接调用（INT 指令） |
-| **保护模式** | IDT（由 IDTR 指定） | 使用空 IDT（limit=0） | ❌ **不能直接调用**，必须切换回实模式 |
-
-**关键点总结：**
-
-| 组件 | 运行模式 | 中断表类型 | 中断表位置 | 处理策略 |
-|------|---------|-----------|-----------|---------|
-| **BIOS** | 实模式 | IVT | 固定 0x0000:0000 | 提供中断服务 |
-| **GRUB（保护模式）** | 保护模式 | IDT（空） | 可配置（但设为空） | **禁用中断（cli）**，需要时切换回实模式 |
-| **GRUB（调用 BIOS）** | 实模式 | IVT | 固定 0x0000:0000 | 恢复 IVT，调用 BIOS 服务 |
-| **Linux 内核** | 保护模式/长模式 | IDT | 内核内存（可配置） | 建立完整的 IDT，接管所有中断 |
-
-> **注意**：关于 A20 地址线的详细技术说明，请参见 [A20 地址线技术详解](A20_ADDRESS_LINE.md)。
-
----
+> **注意**：关于 `startup_raw.S` 中的中断状态变化、`real_to_prot` 和 `prot_to_real` 函数的详细实现说明、返回地址处理机制等，请参见 [GRUB 模式切换函数详解](GRUB_MODE_SWITCHING.md)。
 
 ### 引导过程的完整内存布局和关键步骤
 
@@ -3449,8 +2714,8 @@ REAL_TO_PROT（real_to_prot）
    - startup_raw.S 启用 A20 地址线（访问 1MB 以上内存）
    - startup_raw.S 切换到保护模式（调用 `real_to_prot`）
    - startup_raw.S 解压 GRUB Core（如果使用 LZMA 压缩）到 `0x100000`（1MB）
-   - 跳转到解压后的代码入口点（`grub_stub_init()`）
-   - 初始化函数初始化 GRUB 核心功能（内存管理、设备驱动等）
+   - 跳转到解压后的代码入口点（`_start`）
+   - `_start` 初始化 GRUB 核心功能（内存管理、设备驱动等）
    - 调用 `grub_main()`（`grub/grub-core/kern/main.c`）
    - **此时 GRUB Core 已完全初始化，准备加载内核**
 
@@ -3486,13 +2751,74 @@ REAL_TO_PROT（real_to_prot）
 
 **执行流程衔接：**
 
-在上一节中，我们已经完成了从 BIOS 到 `grub_main()` 的完整流程：
-- BIOS 加载引导扇区（boot.S）到 `0x7C00`
-- boot.S 加载 GRUB Core 第一个扇区（diskboot.S）到 `0x8000`
-- diskboot.S 加载完整的 GRUB Core（包括 startup_raw.S）到 `0x8200+`
-- startup_raw.S 切换到保护模式，解压 GRUB Core 到 `0x100000`（如果使用 LZMA 压缩）
-- 跳转到解压后的代码入口点（`grub_stub_init()`），初始化 GRUB 核心功能
-- 调用 `grub_main()`（`grub/grub-core/kern/main.c`）
+从 `_start` 调用 `grub_main()` 后，GRUB 开始加载 Linux 内核：
+
+```
+grub_main()（grub/grub-core/kern/main.c）
+    ├─ 源代码位置：grub/grub-core/kern/main.c
+    ├─ 解析 grub.cfg 配置文件
+    ├─ 显示启动菜单（如果配置）
+    ├─ 用户选择启动 Linux 内核
+    └─ 执行 linux 命令 → grub_cmd_linux()
+        ↓
+grub_cmd_linux()（grub/grub-core/loader/i386/linux.c）
+    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
+    ├─ 加载内核镜像到内存（0x100000）
+    ├─ 设置内核启动参数（boot_params）
+    └─ 注册启动函数 grub_linux_boot()
+        ↓
+grub_linux_boot() → grub_relocator32_boot()
+    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
+    └─ 跳转到内核入口点（code32_start）
+        ↓
+grub_relocator32_boot() 跳转到内核入口点（code32_start）
+    ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
+    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 的偏移）
+    └─ 寄存器状态：
+        ├─ ESI = boot_params 地址
+        ├─ ESP = 栈指针
+        └─ EIP = code32_start（内核入口点）
+    ↓
+Linux 内核 Setup 代码（实模式）
+    ├─ 源代码位置：linux/arch/x86/boot/header.S
+    ├─ 内存位置：0x100000（1MB）或内核指定的地址
+    ├─ 运行模式：实模式（初始阶段）
+    ├─ 验证内核签名（boot_flag = 0xAA55）
+    ├─ 初始化基本环境
+    ├─ 切换到保护模式
+    └─ 跳转到压缩内核解压代码
+        ↓
+压缩内核解压代码（startup_32）
+    ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
+    ├─ 运行模式：32 位保护模式 → 64 位长模式
+    ├─ 设置页表（身份映射：物理地址 = 线性地址）
+    ├─ 切换到 64 位长模式
+    ├─ 解压内核（gzip 解压）
+    └─ 跳转到 startup_64
+        ↓
+startup_64（64 位内核入口点）
+    ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
+    ├─ 运行模式：64 位长模式
+    ├─ 保存 boot_params 结构地址（%RSI → %R15）
+    ├─ 设置初始内核栈
+    ├─ 设置 GS 段基址（per-CPU 数据）
+    ├─ 设置 GDT 和早期 IDT
+    ├─ 切换到内核代码段（__KERNEL_CS）
+    ├─ 激活内存加密（SEV/SME，如果支持）
+    ├─ 验证和清理 CPU 配置（verify_cpu）
+    └─ 继续内核初始化流程
+        ↓
+内核继续初始化（x86_64_start_kernel）
+    ├─ 源代码位置：linux/arch/x86/kernel/head64.c
+    ├─ 设置早期中断处理程序（idt_setup_early_handler）
+    │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
+    ├─ TDX 早期初始化（tdx_early_init，如果支持）
+    ├─ 复制引导数据（copy_bootdata）
+    ├─ 加载微码更新（load_ucode_boot）
+    ├─ 设置内核高地址映射
+    └─ 启动内核预留区域初始化（x86_64_start_reservations）
+        └─ 最终调用 start_kernel()
+```
 
 **本节内容：**
 
@@ -3589,230 +2915,10 @@ Linux 内核镜像（bzImage/vmlinuz）包含两部分：
    - 格式：gzip 压缩的 vmlinux
    - 加载地址：`0x100000`（1MB）或内核指定的地址
 
-**GRUB 加载内核的详细代码流程：**
-
-**源代码位置：** `grub/grub-core/loader/i386/linux.c:680-725`
-
-```c
-// grub/grub-core/loader/i386/linux.c
-grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
-{
-    // 步骤 1: 打开内核文件（如 /boot/vmlinuz-5.x.x）
-    file = grub_file_open (argv[0]);
-    
-    // 步骤 2: 读取整个文件到内存（注意：这里只是复制文件，不解压）
-    // vmlinuz 文件包含：
-    //   - 内核头部（512字节，未压缩）
-    //   - Setup 代码（未压缩，可以直接执行）
-    //   - 压缩的内核代码（gzip 压缩的 vmlinux）
-    // GRUB 只是将整个文件从磁盘复制到内存，不解压
-    len = grub_file_size (file);
-    kernel = grub_malloc (len);
-    grub_file_read (file, kernel, len);
-    
-    // 步骤 3: 解析内核头部（前 512 字节）
-    grub_memcpy (&lh, kernel, sizeof (lh));  // lh 是 linux_kernel_header 结构
-    
-    // 步骤 4: 验证内核签名
-    if (lh.boot_flag != grub_cpu_to_le16 (0xAA55))
-        return grub_error (GRUB_ERR_BAD_OS, "invalid kernel signature");
-    
-    if (lh.header != grub_cpu_to_le32 (0x53726448))  // "HdrS"
-        return grub_error (GRUB_ERR_BAD_OS, "invalid kernel header");
-    
-    // 步骤 5: 计算 Setup 代码大小
-    setup_sects = lh.setup_sects;
-    if (setup_sects == 0)
-        setup_sects = 4;  // 默认 4 个扇区
-    setup_size = (setup_sects + 1) * 512;  // +1 是因为头部也算一个扇区
-    
-    // 步骤 6: 计算压缩内核代码大小
-    kernel_size = len - setup_size;
-    
-    // 步骤 7: 计算加载地址
-    preferred_address = GRUB_LINUX_BZIMAGE_ADDR;  // 0x100000
-    if (lh.pref_address && relocatable)
-        preferred_address = grub_le_to_cpu64 (lh.pref_address);
-    
-    // 步骤 8: 分配内存并加载内核
-    prot_mode_target = allocate_pages (prot_size, &align, min_align, 
-                                       relocatable, preferred_address);
-    
-    // 步骤 9: 复制 Setup 代码和压缩内核到目标地址
-    // 注意：这里只是复制文件内容到内存，不解压
-    // Setup 代码是未压缩的，可以直接执行
-    // 压缩的内核代码需要由 Setup 代码解压
-    grub_memcpy (prot_mode_mem, kernel, setup_size);  // Setup 代码（未压缩）
-    grub_memcpy (prot_mode_mem + setup_size, 
-                 kernel + setup_size, kernel_size);    // 压缩内核（gzip 压缩）
-    
-    // 步骤 10: 设置 boot_params 结构
-    linux_params.code32_start = prot_mode_target + 
-                                grub_le_to_cpu32 (lh.code32_start) - 
-                                GRUB_LINUX_BZIMAGE_ADDR;
-    linux_params.cmd_line_ptr = ...;  // 内核命令行参数
-    linux_params.ramdisk_image = ...; // initramfs 地址
-    
-    // 步骤 11: 注册启动函数
-    // 注意：这里只是注册，并不立即执行跳转
-    // 当用户在 GRUB 菜单中选择启动该项时，才会调用 grub_linux_boot()
-    grub_loader_set (grub_linux_boot, grub_linux_unload, 0);
-}
-```
-
-**GRUB 菜单选择与启动函数的关系：**
-
-**执行时机说明：**
-
-1. **解析 `grub.cfg` 时**（`grub_main()` → `grub_cmd_linux()`）：
-   - 当 GRUB 解析 `grub.cfg` 配置文件时，遇到 `linux` 命令会调用 `grub_cmd_linux()`
-   - `grub_cmd_linux()` 加载内核镜像到内存，设置启动参数
-   - **关键**：此时只是**注册**启动函数 `grub_linux_boot()`，**并不立即执行跳转**
-   - 用户可以继续浏览菜单，选择其他启动项，或修改内核参数
-
-2. **用户选择启动项时**（菜单交互 → `grub_linux_boot()`）：
-   - 当用户在 GRUB 菜单中选择启动该项（按 Enter 键）时
-   - GRUB 会调用之前注册的启动函数 `grub_linux_boot()`
-   - `grub_linux_boot()` 通过 `grub_relocator32_boot()` 执行跳转到内核入口点
-
-**示例 `grub.cfg` 配置：**
-
-```bash
-# /boot/grub/grub.cfg
-menuentry "Linux 5.x.x" {
-    linux /boot/vmlinuz-5.x.x root=/dev/sda1 ro
-    # ↑ 执行 linux 命令时，调用 grub_cmd_linux()
-    #   此时加载内核到内存，注册 grub_linux_boot()
-    #   但不会立即跳转，用户可以继续选择或修改
-    
-    initrd /boot/initrd.img-5.x.x
-    # ↑ 加载 initramfs（可选）
-}
-
-# 用户按 Enter 选择 "Linux 5.x.x" 时：
-# → GRUB 调用 grub_linux_boot()
-# → grub_linux_boot() 调用 grub_relocator32_boot()
-# → 跳转到内核入口点（code32_start）
-```
-
 **关键点：**
 - **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
 - **用户交互触发**：跳转由用户在菜单中选择启动项时触发
-- **灵活性**：用户可以在加载内核后继续浏览菜单、修改参数或选择其他启动项
-
-**步骤 12：grub_linux_boot() 执行跳转**
-
-当用户选择启动内核时，GRUB 会调用注册的 `grub_linux_boot()` 函数，该函数通过 `grub_relocator32_boot()` 跳转到内核入口点：
-
-**源代码位置：** `grub/grub-core/loader/i386/linux.c:446-667`
-
-```c
-// grub/grub-core/loader/i386/linux.c
-grub_linux_boot (void)
-{
-    // 准备 boot_params 结构（包含 code32_start）
-    *ctx.params = linux_params;
-    
-    // 设置寄存器状态
-    struct grub_relocator32_state state;
-    state.esi = ctx.real_mode_target;        // ESI = boot_params 地址
-    state.esp = ctx.real_mode_target;        // ESP = 栈指针
-    state.eip = ctx.params->code32_start;    // EIP = 内核入口点（code32_start）
-    
-    // 跳转到内核（通过 relocator 切换到保护模式并跳转）
-    return grub_relocator32_boot (relocator, state, 0);
-}
-```
-
-**步骤 13：grub_relocator32_boot() 执行跳转**
-
-**源代码位置：** `grub/grub-core/lib/i386/relocator.c:75-117`
-
-```c
-// grub/grub-core/lib/i386/relocator.c
-grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state state, ...)
-{
-    // 设置寄存器值
-    // grub_relocator32_eip 是 relocator 代码中的一个全局变量
-    // 用于存储目标跳转地址，relocator 代码执行时会读取这个变量并加载到 EIP
-    grub_relocator32_eip = state.eip;  // 内核入口点地址（code32_start）
-    grub_relocator32_esi = state.esi;  // boot_params 地址
-    
-    // 准备 relocator 代码（切换到保护模式并跳转）
-    // 将 relocator 代码复制到 relocator_mem 内存区域
-    grub_memmove (relocator_mem, &grub_relocator32_start, ...);
-    
-    // 执行跳转（关闭中断，切换到保护模式，跳转到 state.eip）
-    asm volatile ("cli");
-    ((void (*) (void)) relst) ();  // 跳转到 relocator 代码
-    // relocator 代码会：
-    //   1. 切换到保护模式
-    //   2. 设置 GDT
-    //   3. 从 grub_relocator32_eip 读取地址并加载到 EIP 寄存器
-    //   4. 跳转到内核入口点（code32_start）
-    //   5. 此时 ESI 寄存器包含 boot_params 的地址
-}
-```
-
-**地址来源和加载过程：**
-
-**1. `code32_start` 的来源：**
-
-在 `grub_cmd_linux()` 中计算（步骤 10）：
-
-```c
-// grub/grub-core/loader/i386/linux.c
-// code32_start 的计算：
-linux_params.code32_start = prot_mode_target + 
-                            grub_le_to_cpu32 (lh.code32_start) - 
-                            GRUB_LINUX_BZIMAGE_ADDR;
-// 其中：
-// - prot_mode_target: 内核实际加载地址（通常是 0x100000）
-// - lh.code32_start: 内核头部中的字段，表示相对于 0x100000 的偏移
-// - GRUB_LINUX_BZIMAGE_ADDR: 0x100000（1MB）
-```
-
-**2. `state.eip` 的设置：**
-
-在 `grub_linux_boot()` 中设置（步骤 12）：
-
-```c
-state.eip = ctx.params->code32_start;  // 从 boot_params 中读取 code32_start
-```
-
-**3. `grub_relocator32_eip` 的存储：**
-
-- **存储位置**：`grub_relocator32_eip` 是 relocator 代码中的一个全局变量
-- **赋值时机**：在 `grub_relocator32_boot()` 中赋值（第 2353 行）
-- **用途**：relocator 代码执行时会读取这个变量
-
-**4. 何时加载到 EIP 寄存器：**
-
-在 relocator 代码执行时（`((void (*) (void)) relst)()` 调用后）：
-
-```asm
-; relocator 代码（伪代码，实际在 grub/grub-core/lib/i386/relocator32.S）
-relocator32_start:
-    ; 1. 切换到保护模式
-    ; 2. 设置 GDT
-    ; 3. 从 grub_relocator32_eip 读取地址
-    mov eax, [grub_relocator32_eip]  ; 读取目标地址
-    mov [esp], eax                    ; 准备跳转
-    ; 4. 跳转到内核入口点（此时 EIP = code32_start）
-    jmp eax                           ; 跳转，EIP 寄存器被设置为 code32_start
-```
-
-**关键点总结：**
-- **地址来源**：`code32_start` 在 `grub_cmd_linux()` 中计算，存储在 `boot_params` 中
-- **传递路径**：`boot_params.code32_start` → `state.eip` → `grub_relocator32_eip`
-- **加载时机**：relocator 代码执行时，从 `grub_relocator32_eip` 读取并加载到 EIP 寄存器
-- **最终结果**：CPU 的 EIP 寄存器指向内核入口点（`code32_start`），开始执行内核代码
-
-**关键点：**
-- **`grub_cmd_linux()`** 只负责加载内核镜像到内存，注册启动函数，不执行跳转
-- **`grub_linux_boot()`** 在用户选择启动时被调用，准备跳转参数
-- **`grub_relocator32_boot()`** 实际执行跳转，切换到保护模式并跳转到内核入口点（`code32_start`）
-- **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点
+- **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点（`code32_start`）
 
 **内存布局（加载后）：**
 
@@ -3840,7 +2946,8 @@ GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数�
 - **`e820_map`**：系统内存映射表
 - **`esi` 寄存器**：包含 `boot_params` 的地址（内核通过 `%esi` 访问）
 
-> **详细说明**：关于 vmlinuz 文件结构的完整分析，请参见 [附录：vmlinuz 文件详细结构分析](#附录vmlinuz-文件详细结构分析)。
+> **详细说明**：关于 GRUB 加载内核的详细代码流程、地址来源和加载过程、GRUB 菜单选择与启动函数的关系等，请参见 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md)。  
+> 关于 vmlinuz 文件结构的完整分析，请参见 [vmlinuz 文件详细结构分析](VMLINUZ_STRUCTURE.md)。
 
 ### 内核早期启动（64 位）
 
@@ -3854,7 +2961,7 @@ GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数�
 - **GRUB 的作用**：只是将整个 vmlinuz 文件从磁盘复制到内存，**不解压**
 - **解压时机**：由内核自己的 Setup 代码完成解压，不是 GRUB
 
-**详细执行流程：**
+**执行流程概述：**
 
 ```
 grub_relocator32_boot() 跳转到内核入口点（code32_start）
@@ -3869,340 +2976,19 @@ Linux 内核 Setup 代码（实模式）
     ├─ 源代码位置：linux/arch/x86/boot/header.S
     ├─ 内存位置：0x100000（1MB）或内核指定的地址
     ├─ 运行模式：实模式（初始阶段）
-    ├─ **状态说明**：Setup 代码是未压缩的，可以直接执行
     ├─ 验证内核签名（boot_flag = 0xAA55）
-    ├─ 初始化基本环境
-    ├─ **调用链**：
-    │   ├─ `header.S`（入口点）→ 调用 `main()` 函数
-    │   │   └─ 源代码位置：`linux/arch/x86/boot/main.c:main()`
-    │   └─ `main()` → 调用 `go_to_protected_mode()` 函数
-    │       └─ 源代码位置：`linux/arch/x86/boot/pm.c:go_to_protected_mode()`
-    ├─ **切换到保护模式的关键步骤**（源代码位置：`linux/arch/x86/boot/pm.c` 和 `linux/arch/x86/boot/pmjump.S`）：
-    │   ├─ 步骤 1: 调用 `go_to_protected_mode()` 函数
-    │   │   └─ 源代码位置：`linux/arch/x86/boot/pm.c:go_to_protected_mode()`
-    │   │   └─ **调用者**：`linux/arch/x86/boot/main.c:main()`
-    │   ├─ 步骤 2: 设置 GDT（全局描述符表）
-    │   │   └─ `setup_gdt()` - 设置保护模式的段描述符
-    │   ├─ 步骤 3: 设置 IDT（中断描述符表）
-    │   │   └─ `setup_idt()` - 设置保护模式的中断描述符
-    │   ├─ 步骤 4: 启用 A20 地址线
-    │   │   └─ `enable_a20()` - 允许访问 1MB 以上内存
-    │   ├─ 步骤 5: 重置协处理器（如果存在）
-    │   │   └─ `reset_coprocessor()` - 重置数学协处理器
-    │   ├─ 步骤 6: 屏蔽所有中断
-    │   │   └─ `mask_all_interrupts()` - 在模式切换期间禁用中断
-    │   ├─ 步骤 7: 设置 CR0 的 PE 位（Protected Mode Enable）
-    │   │   └─ `movl %cr0, %eax; orl $X86_CR0_PE, %eax; movl %eax, %cr0`
-    │   └─ 步骤 8: 跳转到保护模式代码
-    │       └─ `protected_mode_jump()` - 长跳转到保护模式代码段
+    ├─ 初始化基本环境（main.c）
+    ├─ 切换到保护模式（go_to_protected_mode）
     └─ 跳转到压缩内核解压代码（startup_32，32 位保护模式）
         ↓
-**Linux 内核 Setup 代码切换到保护模式的详细代码：**
-
-**调用链：**
-
-```
-header.S（入口点，实模式）
-    ↓
-main()（linux/arch/x86/boot/main.c）
-    ↓
-go_to_protected_mode()（linux/arch/x86/boot/pm.c）
-    ↓
-protected_mode_jump()（linux/arch/x86/boot/pmjump.S）
-    ↓
-startup_32（32 位保护模式，压缩内核解压代码）
-```
-
-**源代码位置：** `linux/arch/x86/boot/header.S`（入口点）
-
-```asm
-// linux/arch/x86/boot/header.S
-// 这是 Linux 内核 Setup 代码的入口点
-// GRUB 跳转到 code32_start，即这个入口点
-
-.code16
-.section ".header", "a"
-.globl	hdr
-hdr:
-    // 内核头部结构（boot_params）
-    setup_sects:    .byte 0
-    root_flags:     .word ROOT_RDONLY
-    syssize:        .long 0
-    ram_size:       .word 0
-    vid_mode:       .word SVGA_MODE
-    root_dev:       .word 0
-    boot_flag:      .word 0xAA55  // 引导扇区签名
-    
-    // ... 更多头部字段 ...
-    
-    // 入口点：_start
-    .globl _start
-_start:
-    // 步骤 1: 初始化段寄存器
-    movw    %cs, %ax
-    movw    %ax, %ds
-    movw    %ax, %es
-    movw    %ax, %ss
-    
-    // 步骤 2: 设置栈指针
-    lss     stack_start, %esp
-    
-    // 步骤 3: 清除方向标志（字符串操作方向）
-    cld
-    
-    // 步骤 4: 调用 C 代码的 main() 函数
-    calll   main  // ← 这里调用 main() 函数
-    
-    // 注意：main() 函数会调用 go_to_protected_mode()
-    // 然后跳转到保护模式，不会返回到这里
-```
-
-**源代码位置：** `linux/arch/x86/boot/main.c:main()`
-
-```c
-// linux/arch/x86/boot/main.c
-void main(void)
-{
-    /* 第一步：复制引导参数 */
-    // 从实模式数据区域复制 boot_params 结构
-    // boot_params 包含从 GRUB 传递过来的启动参数（命令行、内存映射等）
-    copy_boot_params();
-    
-    /* 第二步：初始化堆 */
-    // 设置堆内存区域，用于动态内存分配
-    // Setup 代码需要堆来分配临时缓冲区等
-    init_heap();
-    
-    /* 第三步：设置视频模式 */
-    // 检测和设置显示模式（VGA、SVGA 等）
-    // 如果内核需要显示启动信息，需要先设置视频模式
-    set_video();
-    
-    /* 第四步：查询 APM BIOS（高级电源管理） */
-    // 检测系统是否支持 APM
-    // APM 用于电源管理（休眠、唤醒等）
-    query_apm_bios();
-    
-    /* 第五步：查询 EDD（Enhanced Disk Drive） */
-    // 检测硬盘信息（容量、几何结构等）
-    // 用于内核了解系统硬件配置
-    query_edd();
-    
-    /* 第六步：检测内存 */
-    // 检测系统内存大小和布局
-    // 使用 INT 15h E820 功能获取内存映射
-    detect_memory();
-    
-    /* 第七步：设置键盘 */
-    // 初始化键盘控制器
-    // 用于内核启动过程中的键盘输入
-    keyboard_init();
-    
-    /* 第八步：查询 MCA（Micro Channel Architecture） */
-    // 检测是否使用 MCA 总线（IBM PS/2 系统）
-    query_mca();
-    
-    /* 第九步：查询 VESA（Video Electronics Standards Association） */
-    // 检测 VESA BIOS 扩展（VBE）
-    // 用于设置高分辨率显示模式
-    query_vesa();
-    
-    /* 第十步：查询 PAL（Platform Abstraction Layer） */
-    // 检测平台抽象层（某些特殊平台）
-    query_pal();
-    
-    /* 第十一步：设置命令行参数 */
-    // 处理内核命令行参数（如 root=、ro、quiet 等）
-    // 这些参数会影响内核的启动行为
-    parse_early_param();
-    
-    /* 第十二步：最终检查 */
-    // 验证所有必要的初始化是否完成
-    // 检查硬件兼容性等
-    
-    /* 最后：切换到保护模式 */
-    // 所有初始化完成后，切换到保护模式
-    // 然后跳转到压缩内核解压代码（startup_32）
-    go_to_protected_mode();  // ← 这里调用 go_to_protected_mode()
-    
-    // 注意：go_to_protected_mode() 会跳转到保护模式代码
-    // 不会返回到这里
-}
-```
-
-**`main.c` 的主要工作：**
-
-1. **引导参数处理**：
-   - `copy_boot_params()`：从实模式数据区域复制 `boot_params` 结构
-   - 包含从 GRUB 传递的启动参数（命令行、内存映射、initramfs 地址等）
-
-2. **内存管理**：
-   - `init_heap()`：初始化堆内存区域，用于动态内存分配
-   - `detect_memory()`：检测系统内存大小和布局（使用 INT 15h E820）
-
-3. **硬件检测**：
-   - `set_video()`：设置视频显示模式
-   - `query_apm_bios()`：检测高级电源管理（APM）支持
-   - `query_edd()`：检测增强磁盘驱动器（EDD）信息
-   - `query_mca()`：检测微通道架构（MCA）总线
-   - `query_vesa()`：检测 VESA BIOS 扩展（VBE）
-
-4. **输入设备**：
-   - `keyboard_init()`：初始化键盘控制器
-
-5. **参数处理**：
-   - `parse_early_param()`：解析内核命令行参数（如 `root=`, `ro`, `quiet` 等）
-
-6. **模式切换**：
-   - `go_to_protected_mode()`：切换到保护模式，跳转到压缩内核解压代码
-
-**关键点：**
-- **所有工作都在实模式下完成**：`main.c` 中的所有函数都在实模式下执行
-- **为保护模式做准备**：初始化各种子系统，为切换到保护模式做准备
-- **最后一步是模式切换**：所有初始化完成后，调用 `go_to_protected_mode()` 切换到保护模式
-
-**源代码位置：** `linux/arch/x86/boot/pm.c:go_to_protected_mode()`
-
-```c
-// linux/arch/x86/boot/pm.c
-void go_to_protected_mode(void)
-{
-    // 步骤 1: 设置 GDT（全局描述符表）
-    // 定义保护模式的段描述符（代码段、数据段等）
-    setup_gdt();
-    
-    // 步骤 2: 设置 IDT（中断描述符表）
-    // 在保护模式下，中断通过 IDT 处理
-    setup_idt();
-    
-    // 步骤 3: 启用 A20 地址线
-    // 允许访问 1MB 以上的内存（实模式限制在 1MB）
-    enable_a20();
-    
-    // 步骤 4: 重置协处理器（如果存在）
-    reset_coprocessor();
-    
-    // 步骤 5: 屏蔽所有中断
-    // 在模式切换期间必须禁用中断
-    mask_all_interrupts();
-    
-    // 步骤 6: 调用汇编函数执行实际的模式切换
-    // 这个函数会设置 CR0.PE 位并跳转到保护模式
-    protected_mode_jump(boot_params.hdr.code32_start,
-                        (u32)&boot_params + (ds() << 4));
-}
-```
-
-**源代码位置：** `linux/arch/x86/boot/pm.c:setup_idt()`
-
-```c
-// linux/arch/x86/boot/pm.c
-// setup_idt - 设置空 IDT（在进入保护模式之前）
-static void setup_idt(void)
-{
-    static const struct gdt_ptr null_idt = {0, 0};  // limit=0, base=0（空 IDT）
-    asm volatile("lidtl %0" : : "m" (null_idt));   // 加载空 IDT 到 IDTR
-}
-```
-
-**说明：**
-- `setup_idt()` 在 `go_to_protected_mode()` 中被调用（在 `protected_mode_jump()` 之前）
-- 设置的是**空 IDT**（limit=0, base=0），用于禁用所有中断
-- 此时内核尚未建立完整的中断处理程序，使用空 IDT 可以避免未处理的中断导致系统崩溃
-- 真正的 IDT 会在后续的内核初始化阶段建立（在 `startup_64` 中调用 `idt_setup_early_traps()`）
-
-**源代码位置：** `linux/arch/x86/boot/pmjump.S:protected_mode_jump()`
-
-```asm
-// linux/arch/x86/boot/pmjump.S
-// protected_mode_jump - 从实模式切换到保护模式并跳转
-.code16
-GLOBAL(protected_mode_jump)
-    // 步骤 1: 禁用中断
-    cli
-    
-    // 步骤 2: 禁用不可屏蔽中断（NMI）
-    movl    %eax, %edx      // 保存参数
-    inb     $0x70, %al      // 读取 CMOS 索引寄存器
-    orl     $0x80, %eax     // 设置 NMI 禁用位
-    outb    %al, $0x70      // 写回 CMOS
-    
-    // 步骤 3: 加载 GDT
-    lgdt    gdt_descriptor  // 加载 GDT 描述符到 GDTR
-    
-    // 注意：IDT 已在 setup_idt() 中加载（空 IDT），此处不需要再次加载
-    
-    // 步骤 4: 设置 CR0 的 PE 位（Protected Mode Enable）
-    movl    %cr0, %eax
-    orl     $X86_CR0_PE, %eax  // 设置 PE 位 = 1
-    movl    %eax, %cr0
-    
-    // 步骤 5: 跳转到保护模式代码段
-    // 使用长跳转（ljmp）刷新预取队列并切换到保护模式
-    ljmp    $__BOOT_CS, $1f  // 跳转到保护模式代码段
-    
-    .code32
-1:  // 保护模式代码开始
-    // 步骤 6: 重新加载所有段寄存器（使用保护模式段选择子）
-    movl    $__BOOT_DS, %eax
-    movl    %eax, %ds
-    movl    %eax, %es
-    movl    %eax, %fs
-    movl    %eax, %gs
-    movl    %eax, %ss
-    
-    // 步骤 7: 设置栈指针
-    leal    boot_stack_end, %esp
-    
-    // 步骤 8: 跳转到压缩内核解压代码（startup_32）
-    // %edx 包含 code32_start 地址（从 boot_params 传递）
-    jmp     *%edx  // 跳转到 startup_32（32 位保护模式代码）
-```
-
-**关键寄存器设置：**
-
-1. **GDT**：定义保护模式的段描述符（代码段、数据段等）
-2. **IDT**：定义保护模式的中断描述符表
-3. **CR0.PE = 1**：启用保护模式（Protected Mode Enable）
-4. **段选择子**：`__BOOT_CS`（代码段）、`__BOOT_DS`（数据段）
-
-**模式切换顺序：**
-
-```
-实模式（Setup 代码）
-    ↓
-设置 GDT 和 IDT
-    ↓
-启用 A20 地址线
-    ↓
-屏蔽中断
-    ↓
-设置 CR0.PE = 1（启用保护模式）
-    ↓
-长跳转到保护模式代码段（ljmp $__BOOT_CS, $1f）
-    ↓
-32 位保护模式（startup_32）
-```
-
-**压缩内核解压代码（startup_32）：**
+压缩内核解压代码（startup_32）
     ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
     ├─ 运行模式：32 位保护模式 → 64 位长模式
-    ├─ **切换到 64 位长模式的关键步骤**（源代码位置：`linux/arch/x86/boot/compressed/head_64.S`）：
-    │   ├─ 步骤 1: 设置页表（身份映射：物理地址 = 线性地址）
-    │   ├─ 步骤 2: 启用 PAE（Physical Address Extension）
-    │   │   └─ 设置 CR4.PAE = 1（必须，长模式需要 PAE）
-    │   ├─ 步骤 3: 加载页表基址到 CR3
-    │   │   └─ `mov %eax, %cr3`（设置页表基址）
-    │   ├─ 步骤 4: 启用长模式（EFER.LME = 1）
-    │   │   └─ 使用 `wrmsr` 设置 EFER MSR 寄存器
-    │   ├─ 步骤 5: 启用分页（CR0.PG = 1）
-    │   │   └─ `mov %eax, %cr0`（设置 CR0.PG 位）
-    │   └─ 步骤 6: 跳转到 64 位代码段
-    │       └─ `ljmp $__KERNEL_CS, $startup_64`（使用 64 位代码段选择子）
-    ├─ **解压内核（gzip 解压）**：
-    │   ├─ 解压 vmlinuz 文件中的压缩内核代码部分
-    │   ├─ 解压目标：0x100000+（覆盖压缩代码区域）
-    │   └─ 这是**第一次解压**，由内核自己的代码完成
+    ├─ 设置页表（身份映射：物理地址 = 线性地址）
+    ├─ 启用 PAE（CR4.PAE = 1）
+    ├─ 启用长模式（EFER.LME = 1）
+    ├─ 启用分页（CR0.PG = 1）← 此时 CPU 进入 64 位长模式
+    ├─ 解压内核（gzip 解压）
     └─ 跳转到 startup_64
         ↓
 startup_64（64 位内核入口点，已切换到长模式）
@@ -4220,7 +3006,6 @@ startup_64（64 位内核入口点，已切换到长模式）
 内核继续初始化（x86_64_start_kernel）
     ├─ 源代码位置：linux/arch/x86/kernel/head64.c
     ├─ 设置早期中断处理程序（idt_setup_early_handler）
-    │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
     ├─ TDX 早期初始化（tdx_early_init，如果支持）
     ├─ 复制引导数据（copy_bootdata）
     ├─ 加载微码更新（load_ucode_bsp）
@@ -4229,322 +3014,57 @@ startup_64（64 位内核入口点，已切换到长模式）
         └─ 最终调用 start_kernel()
 ```
 
-**Linux 内核切换到 64 位长模式的详细代码：**
+**关键点：**
+- **Setup 代码**：在实模式下执行，负责硬件检测、内存检测、参数处理等
+- **模式切换**：实模式 → 32 位保护模式 → 64 位长模式
+- **解压时机**：由 `startup_32` 代码完成内核解压，不是 GRUB
+- **64 位长模式特征**：使用 64 位寄存器（%RSI, %R15）、%rip 相对寻址、64 位指令（movq, pushq, lretq）
 
-**源代码位置：** `linux/arch/x86/boot/compressed/head_64.S`
-
-切换到长模式的关键代码（伪代码，展示主要步骤）：
-
-```asm
-// linux/arch/x86/boot/compressed/head_64.S
-// startup_32: 32 位保护模式入口点
-SYM_CODE_START(startup_32)
-	.code32  // 32 位保护模式代码
-	
-	// 步骤 1: 设置页表（身份映射：物理地址 = 线性地址）
-	// 创建页表结构：PML4 → PDPT → PD → PT
-	// 每个页表项映射 4KB 或 2MB 页面
-	call setup_identity_mapping
-	
-	// 步骤 2: 启用 PAE（Physical Address Extension）
-	// 长模式必须启用 PAE
-	movl	%cr4, %eax
-	orl	$X86_CR4_PAE, %eax  // 设置 CR4.PAE = 1
-	movl	%eax, %cr4
-	
-	// 步骤 3: 加载页表基址到 CR3
-	leal	pgtable(%ebx), %eax  // %ebx 包含重定位后的基址
-	movl	%eax, %cr3           // 设置页表基址
-	
-	// 步骤 4: 启用长模式（EFER.LME = 1）
-	// EFER (Extended Feature Enable Register) 是 MSR 寄存器
-	movl	$MSR_EFER, %ecx      // MSR 编号
-	rdmsr                        // 读取当前 EFER 值到 %edx:%eax
-	btsl	$_EFER_LME, %eax     // 设置 LME 位（Long Mode Enable）
-	wrmsr                        // 写回 EFER
-	
-	// 步骤 5: 启用分页（CR0.PG = 1）
-	// 这是激活长模式的最后一步
-	movl	%cr0, %eax
-	orl	$X86_CR0_PG, %eax     // 设置 CR0.PG = 1（启用分页）
-	movl	%eax, %cr0
-	
-	// 步骤 6: 跳转到 64 位代码段
-	// 使用 64 位代码段选择子（CS.L = 1），跳转到 startup_64
-	ljmp	$__KERNEL_CS, $startup_64  // 长跳转，切换到 64 位长模式
-	
-	.code64  // 从这行开始，代码是 64 位的
-startup_64:
-	// 此时 CPU 已处于 64 位长模式
-	// 可以开始使用 64 位寄存器和指令
-```
-
-**关键寄存器设置：**
-
-1. **CR4.PAE = 1**：启用物理地址扩展（长模式必需）
-2. **CR3**：页表基址（指向 PML4 表）
-3. **EFER.LME = 1**：启用长模式（但此时还未激活，需要 CR0.PG）
-4. **CR0.PG = 1**：启用分页（激活长模式，CPU 进入 64 位长模式）
-
-**模式切换顺序：**
-
-```
-32 位保护模式
-    ↓
-设置页表（身份映射）
-    ↓
-启用 PAE（CR4.PAE = 1）
-    ↓
-加载页表基址（CR3）
-    ↓
-启用长模式（EFER.LME = 1）
-    ↓
-启用分页（CR0.PG = 1）← 此时 CPU 进入 64 位长模式
-    ↓
-跳转到 64 位代码段（ljmp $__KERNEL_CS, $startup_64）
-    ↓
-64 位长模式（startup_64）
-```
-
-**源代码位置：`linux/arch/x86/kernel/head_64.S:38-100`**
-
-```asm
-// Linux 内核 64 位启动入口点
-// 此时 CPU 已处于 64 位长模式（CS.L = 1, CS.D = 0）
-// Bootloader 已经加载了身份映射页表（物理地址 = 线性地址）
-SYM_CODE_START_NOALIGN(startup_64)
-	UNWIND_HINT_END_OF_STACK
-	
-	// 步骤 1: 保存 boot_params 结构地址
-	// %RSI 包含 bootloader 提供的 boot_params 物理地址
-	// 保存到 %R15，避免后续 C 函数调用破坏它
-	// ↑ 使用 64 位寄存器（%RSI, %R15）表明这是 64 位长模式
-	mov	%rsi, %r15
-
-	// 步骤 2: 设置初始内核栈（用于 verify_cpu() 等函数）
-	// ↑ 使用 %rip 相对寻址（leaq ...(%rip)），这是 64 位长模式特有
-	// ↑ 使用 64 位寄存器 %rsp
-	leaq	__top_init_kernel_stack(%rip), %rsp
-
-	// 步骤 3: 设置 GS 段基址（用于 per-CPU 数据）
-	// 在 SMP 系统中，启动 CPU 使用 init 数据段，直到 per-CPU 区域设置完成
-	// ↑ 使用 wrmsr 指令写入 64 位 MSR 寄存器（GS_BASE）
-	movl	$MSR_GS_BASE, %ecx  // MSR 寄存器编号
-	xorl	%eax, %eax          // 清零 EAX（GS 基址低 32 位）
-	xorl	%edx, %edx          // 清零 EDX（GS 基址高 32 位）
-	wrmsr                      // 写入 MSR，设置 GS 基址为 0
-
-	// 步骤 4: 设置 GDT（全局描述符表）和早期 IDT（中断描述符表）
-	// 这是内核接管中断系统的第一步
-	call	__pi_startup_64_setup_gdt_idt
-
-	// 步骤 5: 切换到内核代码段（__KERNEL_CS），确保 IRET 正常工作
-	// ↑ 使用 pushq（64 位压栈）和 lretq（64 位长返回）
-	// ↑ __KERNEL_CS 是 64 位代码段选择子（CS.L = 1）
-	pushq	$__KERNEL_CS        // 压入内核代码段选择子
-	leaq	.Lon_kernel_cs(%rip), %rax  // 获取标签地址（%rip 相对寻址）
-	pushq	%rax                // 压入返回地址
-	lretq                       // 长返回：弹出 CS 和 RIP，切换到内核代码段
-
-.Lon_kernel_cs:
-	ANNOTATE_NOENDBR
-	UNWIND_HINT_END_OF_STACK
-
-#ifdef CONFIG_AMD_MEM_ENCRYPT
-	// 步骤 6: 激活内存加密（SEV/SME），如果支持
-	// 必须在执行 CPUID 之前完成，因为需要设置 SEV-SNP CPUID 表
-	// ↑ 使用 movq（64 位移动）和 64 位寄存器 %r15, %rdi
-	movq	%r15, %rdi          // 传递 boot_params 指针作为参数
-	call	__pi_sme_enable
-#endif
-
-	// 步骤 7: 验证和清理 CPU 配置
-	call verify_cpu
-```
-
-**64 位长模式的代码特征：**
-
-1. **64 位寄存器**：
-   - `%RSI`, `%R15`, `%RSP`, `%RAX`, `%RDX`, `%RCX`, `%RDI` 等（R 前缀表示 64 位）
-   - 与 32 位模式的区别：32 位使用 `%ESI`, `%EAX` 等（E 前缀）
-
-2. **64 位指令**：
-   - `movq`（64 位移动）、`leaq`（64 位地址加载）、`pushq`（64 位压栈）、`lretq`（64 位长返回）
-   - 与 32 位模式的区别：32 位使用 `movl`, `leal`, `pushl`, `lretl` 等
-
-3. **%rip 相对寻址**：
-   - `leaq __top_init_kernel_stack(%rip), %rsp` - 使用 `%rip` 相对寻址
-   - 这是 64 位长模式特有的寻址方式，简化了位置无关代码（PIC）
-
-4. **64 位代码段选择子**：
-   - `__KERNEL_CS` 是 64 位代码段选择子，其描述符的 `CS.L = 1`（Long mode）
-   - 与 32 位模式的区别：32 位代码段选择子的 `CS.L = 0`
-
-5. **64 位 MSR 寄存器访问**：
-   - `wrmsr` 指令写入 64 位 MSR 寄存器（`GS_BASE`）
-   - 使用 `%EAX`（低 32 位）和 `%EDX`（高 32 位）组合成 64 位值
-
-**关键步骤（体现 64 位长模式）：**
-- **第 2550 行**：使用 64 位寄存器 `%RSI`, `%R15`（R 前缀表示 64 位）
-- **第 2553-2556 行**：使用 `%rip` 相对寻址（`leaq ...(%rip)`），这是 64 位长模式特有
-- **第 2560-2564 行**：使用 `wrmsr` 指令写入 64 位 MSR 寄存器（`GS_BASE`）
-- **第 2568 行**：调用 `__pi_startup_64_setup_gdt_idt` 设置 GDT 和早期 IDT
-- **第 2571-2576 行**：使用 `pushq` 和 `lretq`（64 位指令），使用 `__KERNEL_CS`（64 位代码段选择子）
-- **第 2585-2586 行**：使用 `movq`（64 位移动）和 64 位寄存器 `%r15`, `%rdi`
-- 此时内核已切换到 64 位长模式
-
-**GDT 和 IDT 的区别：**
-
-| 特性 | GDT（全局描述符表） | IDT（中断描述符表） |
-|------|------------------|------------------|
-| **全称** | Global Descriptor Table | Interrupt Descriptor Table |
-| **用途** | 定义内存段（代码段、数据段等） | 定义中断处理程序 |
-| **访问方式** | 通过段选择子（Segment Selector） | 通过中断向量号（0-255） |
-| **寄存器** | GDTR（GDT 基址和界限） | IDTR（IDT 基址和界限） |
-| **加载指令** | `LGDT` | `LIDT` |
-| **条目内容** | 段描述符（基址、界限、权限等） | 中断门/陷阱门/任务门（处理程序地址） |
-| **主要功能** | 内存分段和保护 | 中断处理和异常处理 |
-| **使用场景** | 代码段、数据段、栈段的定义 | CPU 异常、硬件中断、软件中断的处理 |
-
-**简单理解：**
-- **GDT**：定义"内存段是什么"（代码段在哪里、数据段在哪里、权限如何）
-- **IDT**：定义"中断发生时跳转到哪里"（INT 10h 跳到哪里、页故障跳到哪里）
+> **详细说明**：关于内核早期启动的详细源代码分析，包括 Setup 代码（header.S、main.c、pm.c、pmjump.S）、模式切换详细步骤、startup_32 和 startup_64 的完整源代码等，请参见 [Linux 内核早期启动详细流程（64 位）](LINUX_KERNEL_EARLY_BOOT.md)。
 
 ### 早期 IDT 设置
 
-源代码位置：`linux/arch/x86/kernel/head64.c:276-292`
+**源代码位置：** `linux/arch/x86/kernel/head64.c:276-292`
+
+内核在 `x86_64_start_kernel()` 中设置早期中断处理程序：
 
 ```c
-	// 步骤 1: 设置早期中断处理程序
-	// 建立内核自己的 IDT，取代 BIOS 的 IVT
-	// 此时中断将路由到内核处理程序，而不是 BIOS
-	idt_setup_early_handler();
+// 步骤 1: 设置早期中断处理程序
+// 建立内核自己的 IDT，取代 BIOS 的 IVT
+// 此时中断将路由到内核处理程序，而不是 BIOS
+idt_setup_early_handler();
 
-	// 步骤 2: TDX（Trust Domain Extensions）早期初始化
-	// 在调用 cc_platform_has() 之前需要完成
-	tdx_early_init();
+// 步骤 2: TDX（Trust Domain Extensions）早期初始化
+tdx_early_init();
 
-	// 步骤 3: 复制引导数据（从实模式数据区域）
-	copy_bootdata(__va(real_mode_data));
+// 步骤 3: 复制引导数据（从实模式数据区域）
+copy_bootdata(__va(real_mode_data));
 
-	// 步骤 4: 在启动 CPU（BSP）上早期加载微码更新
-	// 微码更新修复 CPU 硬件缺陷，必须在早期加载
-	load_ucode_bsp();
+// 步骤 4: 在启动 CPU（BSP）上早期加载微码更新
+load_ucode_bsp();
 
-	// 步骤 5: 设置内核高地址映射
-	// 将 early_top_pgt 的最后一个条目复制到 init_top_pgt
-	init_top_pgt[511] = early_top_pgt[511];
+// 步骤 5: 设置内核高地址映射
+init_top_pgt[511] = early_top_pgt[511];
 
-	// 步骤 6: 启动内核预留区域初始化，最终调用 start_kernel()
-	x86_64_start_reservations(real_mode_data);
-}
+// 步骤 6: 启动内核预留区域初始化，最终调用 start_kernel()
+x86_64_start_reservations(real_mode_data);
 ```
 
 **关键点：**
-- **第 276 行**：`idt_setup_early_handler()` 设置早期中断处理程序
-
-源代码位置：`linux/arch/x86/kernel/idt.c:216-227`
-
-```c
-/**
- * idt_setup_early_traps - 初始化 IDT 表，设置早期陷阱处理程序
- *
- * 在 x86_64 上，这些陷阱不使用中断栈（IST），因为在 cpu_init() 调用
- * 并设置 TSS 之前无法工作。IST 变体在那之后安装。
- */
-void __init idt_setup_early_traps(void)
-{
-	// 步骤 1: 从 early_idts 表设置 IDT 条目
-	// early_idts 包含早期需要的异常处理程序（如页故障、除零等）
-	idt_setup_from_table(idt_table, early_idts, ARRAY_SIZE(early_idts),
-			     true);
-	
-	// 步骤 2: 加载 IDT 到 CPU
-	// 使用 LIDT 指令将 idt_descr 加载到 IDTR 寄存器
-	// 从这一刻起，CPU 使用内核的 IDT 而不是 BIOS 的 IVT
-	load_idt(&idt_descr);
-}
-```
-
-**说明：**
-- 内核建立自己的 IDT（中断描述符表），取代 BIOS 的 IVT
+- **`idt_setup_early_handler()`** 设置早期中断处理程序，建立内核自己的 IDT，取代 BIOS 的 IVT
 - 早期陷阱处理程序用于处理 CPU 异常（如页故障、除零等）
 
 ### 中断控制器接管
 
 #### 8259A PIC 重新编程
 
-源代码位置：`linux/arch/x86/kernel/i8259.c:349-399`
+**源代码位置：** `linux/arch/x86/kernel/i8259.c:349-399`
 
-```c
-// 重新编程 8259A PIC：将硬件中断从 BIOS 的向量（0x08-0x0F, 0x70-0x77）
-// 重映射到内核的向量（0x20-0x2F），避免与 CPU 异常向量（0-31）冲突
-static void init_8259A(int auto_eoi)
-{
-	unsigned long flags;
-
-	i8259A_auto_eoi = auto_eoi;  // 保存自动 EOI 设置
-
-	raw_spin_lock_irqsave(&i8259A_lock, flags);  // 加锁保护
-
-	// 步骤 1: 屏蔽主 PIC 的所有中断（0xFF = 所有位都屏蔽）
-	outb(0xff, PIC_MASTER_IMR);
-
-	// 步骤 2: 初始化主 PIC（8259A-1）
-	// ICW1: 0x11 = 边沿触发、级联模式、需要 ICW4
-	outb_pic(0x11, PIC_MASTER_CMD);
-
-	// ICW2: 将主 PIC 的 IRQ0-7 映射到 ISA_IRQ_VECTOR(0)（通常是 0x20-0x27）
-	// 这覆盖了 BIOS 的配置（BIOS 映射到 0x08-0x0F）
-	outb_pic(ISA_IRQ_VECTOR(0), PIC_MASTER_IMR);
-
-	// ICW3: 主 PIC 在 IR2 上有从 PIC（级联）
-	outb_pic(1U << PIC_CASCADE_IR, PIC_MASTER_IMR);
-
-	// ICW4: 设置主 PIC 的工作模式
-	if (auto_eoi)
-		// 自动 EOI 模式：中断处理完成后自动发送 EOI
-		outb_pic(MASTER_ICW4_DEFAULT | PIC_ICW4_AEOI, PIC_MASTER_IMR);
-	else
-		// 正常 EOI 模式：需要手动发送 EOI
-		outb_pic(MASTER_ICW4_DEFAULT, PIC_MASTER_IMR);
-
-	// 步骤 3: 初始化从 PIC（8259A-2）
-	// ICW1: 选择从 PIC 初始化
-	outb_pic(0x11, PIC_SLAVE_CMD);
-
-	// ICW2: 将从 PIC 的 IRQ8-15 映射到 ISA_IRQ_VECTOR(8)（通常是 0x28-0x2F）
-	// 这覆盖了 BIOS 的配置（BIOS 映射到 0x70-0x77）
-	outb_pic(ISA_IRQ_VECTOR(8), PIC_SLAVE_IMR);
-	
-	// ICW3: 从 PIC 连接到主 PIC 的 IR2
-	outb_pic(PIC_CASCADE_IR, PIC_SLAVE_IMR);
-	
-	// ICW4: 设置从 PIC 的工作模式
-	outb_pic(SLAVE_ICW4_DEFAULT, PIC_SLAVE_IMR);
-
-	// 步骤 4: 根据 EOI 模式设置中断确认函数
-	if (auto_eoi)
-		// AEOI 模式：确认时只需屏蔽中断
-		i8259A_chip.irq_mask_ack = disable_8259A_irq;
-	else
-		// 正常模式：确认时需要屏蔽并发送 EOI
-		i8259A_chip.irq_mask_ack = mask_and_ack_8259A;
-
-	// 步骤 5: 等待 PIC 初始化完成（硬件需要时间）
-	udelay(100);
-
-	// 步骤 6: 恢复之前保存的中断屏蔽位
-	outb(cached_master_mask, PIC_MASTER_IMR);
-	outb(cached_slave_mask, PIC_SLAVE_IMR);
-
-	raw_spin_unlock_irqrestore(&i8259A_lock, flags);  // 解锁
-}
-```
+内核重新编程 8259A PIC，将硬件中断从 BIOS 的向量（0x08-0x0F, 0x70-0x77）重映射到内核的向量（0x20-0x2F），避免与 CPU 异常向量（0-31）冲突。
 
 **关键点：**
-- **第 365 行**：将主 PIC 的 IRQ0-7 重映射到 `ISA_IRQ_VECTOR(0)`（通常是 0x20-0x27），避免与 CPU 异常向量（0-31）冲突
-- **第 378 行**：将从 PIC 的 IRQ8-15 重映射到 `ISA_IRQ_VECTOR(8)`（通常是 0x28-0x2F）
+- 将主 PIC 的 IRQ0-7 重映射到 `ISA_IRQ_VECTOR(0)`（通常是 0x20-0x27）
+- 将从 PIC 的 IRQ8-15 重映射到 `ISA_IRQ_VECTOR(8)`（通常是 0x28-0x2F）
 - 这**完全覆盖了 BIOS 的 PIC 配置**，硬件中断不再路由到 BIOS 代码
 
 #### APIC 和中断门设置
@@ -4552,14 +3072,12 @@ static void init_8259A(int auto_eoi)
 **重要说明：APIC vs 8259A PIC**
 
 - **8259A PIC**：外部芯片，用于处理硬件中断（IRQ0-15），已在前面重新编程
-- **Local APIC**：CPU 内部集成的中断控制器，用于：
-  - 多处理器系统中的处理器间中断（IPI）
-  - 本地定时器中断
-  - 性能计数器中断
-  - 热中断等
+- **Local APIC**：CPU 内部集成的中断控制器，用于多处理器系统中的处理器间中断（IPI）、本地定时器中断等
 - **两者关系**：在现代系统中，Local APIC 可以替代或配合 8259A PIC 工作
 
-源代码位置：`linux/arch/x86/kernel/idt.c:281-315`
+**源代码位置：** `linux/arch/x86/kernel/idt.c:281-315`
+
+内核通过 `idt_setup_apic_and_irq_gates()` 完成中断系统的接管：
 
 ```c
 /**
@@ -4572,315 +3090,28 @@ static void init_8259A(int auto_eoi)
  */
 void __init idt_setup_apic_and_irq_gates(void)
 {
-	int i = FIRST_EXTERNAL_VECTOR;  // 第一个外部中断向量（通常是 0x20）
-	void *entry;
-
 	// 步骤 1: 从 apic_idts 表设置 APIC 相关的中断门
-	// 包括本地 APIC 中断（CPU 内部集成）、SMP IPI 等
-	// 注意：这是 Local APIC，不是 8259A PIC
 	idt_setup_from_table(idt_table, apic_idts, ARRAY_SIZE(apic_idts), true);
 
 	// 步骤 2: 为所有外部中断（IRQ）设置中断门
-	// FIRST_EXTERNAL_VECTOR 到 FIRST_SYSTEM_VECTOR 是 IRQ 向量范围
 	for_each_clear_bit_from(i, system_vectors, FIRST_SYSTEM_VECTOR) {
-		// 计算中断入口地址：irq_entries_start + 对齐偏移
 		entry = irq_entries_start + IDT_ALIGN * (i - FIRST_EXTERNAL_VECTOR);
-		set_intr_gate(i, entry);  // 设置中断门（自动关闭中断）
+		set_intr_gate(i, entry);  // 设置中断门
 	}
 
-#ifdef CONFIG_X86_LOCAL_APIC
-	// 步骤 3: 为系统向量设置中断门（APIC 伪中断等）
-	for_each_clear_bit_from(i, system_vectors, NR_VECTORS) {
-		// 不设置 system_vectors 位图中未分配的系统向量
-		// 否则它们会出现在 /proc/interrupts 中
-		entry = spurious_entries_start + IDT_ALIGN * (i - FIRST_SYSTEM_VECTOR);
-		set_intr_gate(i, entry);
-	}
-#endif
-	
-	// 步骤 4: 将 IDT 映射到 CPU 入口区域并重新加载
-	// CPU 入口区域是内核中的固定只读区域，用于存放 IDT 等关键数据结构
+	// 步骤 3: 将 IDT 映射到 CPU 入口区域并重新加载
 	idt_map_in_cea();
 	load_idt(&idt_descr);  // 加载 IDT：此时 BIOS IVT 被完全取代
-```
-
-**`load_idt` 函数定义：**
-
-**源代码位置：** `linux/arch/x86/include/asm/desc.h:112-115`
-
-```c
-// load_idt 是一个宏定义，实际调用 native_load_idt
-#define load_idt(dtr)    native_load_idt(dtr)
-```
-
-**源代码位置：** `linux/arch/x86/include/asm/desc.h:213-216`
-
-```c
-// native_load_idt - 加载 IDT 到 CPU 的 IDTR 寄存器
-static __always_inline void native_load_idt(const struct desc_ptr *dtr)
-{
-    asm volatile("lidt %0"::"m" (*dtr));  // 执行 LIDT 指令
 }
-```
-
-**`desc_ptr` 结构定义：**
-
-**源代码位置：** `linux/arch/x86/include/asm/desc_defs.h:164-167`
-
-```c
-// desc_ptr - 描述符表指针结构（用于 GDT 和 IDT）
-struct desc_ptr {
-    unsigned short size;      // 表的大小（字节数 - 1）
-    unsigned long address;     // 表的基址
-} __attribute__((packed));
-```
-
-**`idt_table` 和 `idt_descr` 定义：**
-
-**源代码位置：** `linux/arch/x86/kernel/idt.c:173-178`
-
-```c
-// idt_table - IDT 表本身（256 个条目，每个 16 字节，共 4KB）
-static gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
-
-// idt_descr - IDT 描述符（包含 IDT 的基址和大小）
-static struct desc_ptr idt_descr __ro_after_init = {
-    .size    = IDT_TABLE_SIZE - 1,           // IDT 大小 - 1（4096 - 1 = 4095）
-    .address = (unsigned long) idt_table,    // IDT 表的基址
-};
-```
-
-**`gate_desc` 结构定义（中断描述符）：**
-
-**源代码位置：** `linux/arch/x86/include/asm/desc_defs.h:134-143`
-
-```c
-// gate_struct - 中断门描述符结构（64位）
-struct gate_struct {
-    u16         offset_low;      // 处理程序地址的低 16 位
-    u16         segment;         // 段选择子（通常是 __KERNEL_CS）
-    struct idt_bits bits;         // 中断门属性（类型、DPL、P 位等）
-    u16         offset_middle;   // 处理程序地址的中 16 位
-    u32         offset_high;     // 处理程序地址的高 32 位（64位模式）
-    u32         reserved;         // 保留字段
-} __attribute__((packed));
-
-typedef struct gate_struct gate_desc;
-```
-
-**`idt_bits` 结构定义（中断门属性）：**
-
-**源代码位置：** `linux/arch/x86/include/asm/desc_defs.h:119-125`
-
-```c
-// idt_bits - 中断描述符的属性位
-struct idt_bits {
-    u16 ist   : 3,    // IST（Interrupt Stack Table）索引
-    zero  : 5,    // 保留位
-    type  : 5,    // 门类型（中断门、陷阱门、任务门）
-    dpl   : 2,    // 描述符特权级（0=内核，3=用户）
-    p     : 1;    // 存在位（1=有效，0=无效）
-} __attribute__((packed));
-```
-
-**`idt_table` 的内容填充：**
-
-`idt_table` 的内容不是静态定义的，而是通过函数动态填充的：
-
-**源代码位置：** `linux/arch/x86/kernel/idt.c:193-204`
-
-```c
-// idt_setup_from_table - 从 idt_data 表填充 IDT
-static __init void
-idt_setup_from_table(gate_desc *idt, const struct idt_data *t, int size, bool sys)
-{
-    gate_desc desc;
-    
-    for (; size > 0; t++, size--) {
-        idt_init_desc(&desc, t);              // 将 idt_data 转换为 gate_desc
-        write_idt_entry(idt, t->vector, &desc); // 写入到 idt_table[t->vector]
-        if (sys)
-            set_bit(t->vector, system_vectors);
-    }
-}
-```
-
-**填充 `idt_table` 的数据源：**
-
-1. **早期陷阱（early_idts）**：
-   - **源代码位置：** `linux/arch/x86/kernel/idt.c:63-76`
-   - 包含：调试异常（X86_TRAP_DB）、断点异常（X86_TRAP_BP）等
-   - 在 `idt_setup_early_traps()` 中使用
-
-2. **默认陷阱（def_idts）**：
-   - **源代码位置：** `linux/arch/x86/kernel/idt.c:84-109`
-   - 包含：除零错误、页故障、通用保护错误等所有 CPU 异常
-   - 在 `idt_setup_traps()` 中使用
-
-3. **APIC 中断（apic_idts）**：
-   - **源代码位置：** `linux/arch/x86/kernel/idt.c:112-169`
-   - 包含：Local APIC 相关的中断
-   - 在 `idt_setup_apic_and_irq_gates()` 中使用
-
-4. **IRQ 中断（动态设置）**：
-   - 在 `idt_setup_apic_and_irq_gates()` 中通过循环动态设置
-   - 为每个 IRQ 向量设置中断门，指向 `irq_entries_start`
-
-5. **系统调用（INT 0x80）**：
-   - **源代码位置：** `linux/arch/x86/kernel/idt.c:122-128`
-   - 在 `ia32_idt[]` 表中定义：`SYSG(IA32_SYSCALL_VECTOR, entry_INT80_32)`
-   - `IA32_SYSCALL_VECTOR` = 0x80（定义在 `arch/x86/include/asm/irq_vectors.h:38`）
-   - 在 `idt_setup_ia32_syscall_gate()` 中设置到 IDT[0x80]
-
-**INT 0x80 系统调用的完整实现路径：**
-
-**1. IDT 设置（源代码位置：`linux/arch/x86/kernel/idt.c:122-128`）：**
-
-```c
-// ia32_idt - 32位系统调用 IDT 条目
-static const struct idt_data ia32_idt[] __initconst = {
-#if defined(CONFIG_IA32_EMULATION)
-    SYSG(IA32_SYSCALL_VECTOR, asm_int80_emulation),  // 64位内核的 32位兼容模式
-#elif defined(CONFIG_X86_32)
-    SYSG(IA32_SYSCALL_VECTOR, entry_INT80_32),      // 32位内核
-#endif
-};
-```
-
-**2. 汇编入口点（源代码位置：`linux/arch/x86/entry/entry_32.S:933-983`）：**
-
-```asm
-// entry_INT80_32 - INT 0x80 系统调用的汇编入口点
-SYM_FUNC_START(entry_INT80_32)
-    ASM_CLAC
-    pushl   %eax                    // 保存系统调用号（orig_ax）
-    
-    SAVE_ALL pt_regs_ax=$-ENOSYS switch_stacks=1  // 保存所有寄存器到 pt_regs
-    
-    movl    %esp, %eax              // 传递 pt_regs 指针
-    call    do_int80_syscall_32     // 调用 C 处理函数
-    
-    // 恢复用户态并返回
-    RESTORE_REGS pop=4
-    CLEAR_CPU_BUFFERS
-    iret                            // 返回到用户空间
-SYM_FUNC_END(entry_INT80_32)
-```
-
-**3. C 处理函数（源代码位置：`linux/arch/x86/entry/syscall_32.c:246-263`）：**
-
-```c
-// do_int80_syscall_32 - INT 0x80 的 C 处理函数
-__visible noinstr void do_int80_syscall_32(struct pt_regs *regs)
-{
-    int nr = syscall_32_enter(regs);  // 获取系统调用号（从 regs->orig_ax）
-    
-    // 系统调用入口处理（审计、跟踪等）
-    nr = syscall_enter_from_user_mode(regs, nr);
-    
-    // 执行系统调用
-    do_syscall_32_irqs_on(regs, nr);
-    
-    // 系统调用退出处理
-    syscall_exit_to_user_mode(regs);
-}
-```
-
-**4. 系统调用分发（源代码位置：`linux/arch/x86/entry/syscall_32.c:73-87`）：**
-
-```c
-// do_syscall_32_irqs_on - 执行 32 位系统调用
-static __always_inline void do_syscall_32_irqs_on(struct pt_regs *regs, int nr)
-{
-    unsigned int unr = nr;
-    
-    if (likely(unr < IA32_NR_syscalls)) {
-        unr = array_index_nospec(unr, IA32_NR_syscalls);
-        regs->ax = ia32_sys_call(regs, unr);  // 调用实际的系统调用函数
-    } else {
-        regs->ax = __ia32_sys_ni_syscall(regs);  // 无效的系统调用号
-    }
-}
-```
-
-**5. 系统调用表（源代码位置：`linux/arch/x86/entry/syscall_32.c:44-50`）：**
-
-```c
-// ia32_sys_call - 根据系统调用号分发到具体函数
-long ia32_sys_call(const struct pt_regs *regs, unsigned int nr)
-{
-    switch (nr) {
-        #include <asm/syscalls_32.h>  // 包含所有系统调用的 case 语句
-        // 例如：case 1: return __ia32_sys_exit(regs);
-        //      case 3: return __ia32_sys_read(regs);
-        //      ...
-        default: return __ia32_sys_ni_syscall(regs);  // 无效的系统调用
-    }
-}
-```
-
-**INT 0x80 系统调用的完整流程：**
-
-```
-用户空间程序执行 INT 0x80
-    ↓
-CPU 查找 IDT[0x80]（在 idt_table 中）
-    ↓
-跳转到 entry_INT80_32（汇编入口点）
-    ├─ 保存寄存器到 pt_regs
-    ├─ 切换到内核栈
-    └─ 调用 do_int80_syscall_32(regs)
-        ↓
-do_int80_syscall_32（C 处理函数）
-    ├─ 获取系统调用号（regs->orig_ax）
-    ├─ 系统调用入口处理（审计、跟踪等）
-    ├─ 调用 do_syscall_32_irqs_on(regs, nr)
-    │   └─ 调用 ia32_sys_call(regs, nr)
-    │       └─ switch(nr) 分发到具体的系统调用函数
-    │           └─ 例如：__ia32_sys_read(regs)
-    └─ 系统调用退出处理
-        ↓
-返回到 entry_INT80_32
-    ├─ 恢复寄存器
-    ├─ 切换到用户栈
-    └─ iret 返回到用户空间
 ```
 
 **关键点：**
-- **IDT[0x80]** 指向 `entry_INT80_32`（汇编入口点）
-- **系统调用号**：存储在 `%eax` 寄存器中（通过 `regs->orig_ax` 访问）
-- **参数传递**：通过寄存器传递（`%ebx`, `%ecx`, `%edx`, `%esi`, `%edi`, `%ebp`）
-- **返回值**：通过 `%eax` 寄存器返回
+- **`load_idt(&idt_descr)`** 执行后，CPU 使用内核的 IDT，不再使用 BIOS 的 IVT
+- 所有中断（包括硬件中断和软件中断）都路由到内核的处理程序
+- **INT 0x80 系统调用**：IDT[0x80] 指向 `entry_INT80_32`，实现用户空间到内核空间的系统调用接口
 
-**`load_idt` 的工作原理：**
-
-1. **参数**：`&idt_descr` 是一个指向 `desc_ptr` 结构的指针
-2. **结构内容**：
-   - `size`：IDT 表的大小减 1（4095，表示 4096 字节）
-   - `address`：`idt_table` 数组的基址
-3. **执行**：调用 `native_load_idt()`，执行 `lidt` 指令
-4. **结果**：将 IDT 的基址和大小加载到 CPU 的 IDTR 寄存器
-5. **效果**：从这一刻起，CPU 使用内核的 IDT，不再使用 BIOS 的 IVT
-
-**关键点：**
-- `load_idt()` 是一个内联函数，直接执行 `lidt` 汇编指令
-- `idt_descr` 包含 IDT 表的完整信息（基址和大小）
-- 加载 IDT 后，所有中断（包括硬件中断和软件中断）都路由到内核的处理程序
-
-	// 步骤 5: 将 IDT 表设置为只读（防止被恶意修改）
-	set_memory_ro((unsigned long)&idt_table, 1);
-
-	// 步骤 6: 标记 IDT 设置完成
-	idt_setup_done = true;
-}
-```
-
-**说明：**
-- **第 2748 行**：设置 Local APIC 相关的中断门（CPU 内部集成的 APIC，不是 8259A PIC）
-- **第 2752-2756 行**：为外部中断（IRQ）设置中断门，指向 `irq_entries_start`
-- **第 2771 行**：加载新的 IDT（`load_idt(&idt_descr)`），**此时 BIOS 的 IVT 被完全取代**
-
-> **注意**：关于 BIOS IVT 与 Kernel IDT 的详细对比，请参见 [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md)。  
+> **详细说明**：关于内核接管中断系统的详细流程，包括早期 IDT 设置、8259A PIC 重新编程、APIC 和中断门设置的完整源代码分析，以及 INT 0x80 系统调用的完整实现路径，请参见 [Linux 内核中断系统接管详细流程](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)。  
+> 关于 BIOS IVT 与 Kernel IDT 的详细对比，请参见 [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md)。  
 > 关于 UEFI 中断处理机制，请参见 [UEFI 中断处理机制](UEFI_INTERRUPT_HANDLING.md)。
 
 ### 接管完成标志
