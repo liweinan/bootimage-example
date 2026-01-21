@@ -2513,7 +2513,7 @@ startup_raw.S（实模式入口点，0x8200）
             ├─ `%ecx` = `real_to_prot` 函数地址
             └─ `%eax` = `LOCAL(realidt)` 地址（实模式 IDT 地址）
         ↓
-_start（解压后的代码入口点）
+_start（startup.S，解压后的代码入口点）
     ├─ **源代码位置**：`grub/grub-core/kern/i386/pc/startup.S:56-124`
     ├─ **内存位置**：`0x100000`（1MB，解压后的位置）
     ├─ **运行模式**：保护模式
@@ -2524,7 +2524,7 @@ _start（解压后的代码入口点）
     │   │   ├─ `movl %edi, (LOCAL(prot_to_real_addr) - _start) (%esi)` - 保存 prot_to_real 地址
     │   │   └─ `movl %eax, (EXT_C(grub_realidt) - _start) (%esi)` - 保存 realidt 地址
     │   ├─ **步骤 2**：复制解压后的代码（除了模块部分）
-    │   │   └─ 使用 `rep movsb` 从 `%esi`（0x100000）复制到 `_start` 位置
+    │   │   └─ 使用 `rep movsb` 从 `%esi`（0x100000）复制到 `_start` 位置（也是 0x100000，通常冗余）
     │   ├─ **步骤 3**：清理 BSS 段（未初始化的全局变量）
     │   │   └─ 使用 `rep stosb` 将 BSS 段清零
     │   ├─ **步骤 4**：保存启动设备号
@@ -2575,17 +2575,18 @@ __start:
     
     // 步骤 1: 保存模式切换函数地址和 realidt 地址
     // 这些地址需要保存到解压后的代码中，供后续使用（如 grub_bios_interrupt）
+    // ⚠️ 注意：此时 %esi = 0x100000（解压后的代码基址），_start 也在 0x100000
     movl    %ecx, (LOCAL(real_to_prot_addr) - _start) (%esi)  // 保存 real_to_prot 地址
     movl    %edi, (LOCAL(prot_to_real_addr) - _start) (%esi)  // 保存 prot_to_real 地址
     movl    %eax, (EXT_C(grub_realidt) - _start) (%esi)       // 保存 realidt 地址
     
     // 步骤 2: 复制解压后的代码（除了模块部分）
-    // 从 %esi（0x100000）复制到 _start 位置
-    // ⚠️ 注意：这个复制操作可能是冗余的，因为代码已经解压到正确的位置
+    // ⚠️ 注意：%esi = 0x100000，_start 也在 0x100000，所以这是自己复制自己
+    // 这个复制操作可能是为了处理重定位或确保代码完整性，但通常代码已经解压到正确位置
     movl    $(_edata - _start), %ecx       // 复制长度（代码段大小，不包括 BSS 和模块）
-    movl    $(_start), %edi                 // 目标地址（_start 位置）
+    movl    $(_start), %edi                 // 目标地址（_start 位置，即 0x100000）
     rep                                     // 重复执行 movsb
-    movsb                                   // 从 %esi 复制到 %edi，每次 1 字节
+    movsb                                   // 从 %esi（0x100000）复制到 %edi（0x100000），每次 1 字节
     
     // 步骤 3: 清理 BSS 段（未初始化的全局变量）
     // BSS（Block Started by Symbol）段包含未初始化的全局变量，需要清零
@@ -2628,9 +2629,9 @@ LZMA 解压完成，%esi = 0x100000
     ↓
 jmp *%esi（间接跳转）
     ↓
-_start（1MB 以上，0x100000）
+_start（startup.S，1MB 以上，0x100000，32 位保护模式）
     ├─ 保存模式切换函数地址（供后续使用）
-    ├─ 复制代码（如果必要）
+    ├─ 复制代码（从 %esi=0x100000 到 _start=0x100000，通常冗余）
     ├─ 清理 BSS 段
     ├─ 保存启动设备号
     └─ call grub_main()
@@ -2714,8 +2715,8 @@ grub_main()（1MB 以上，0x100000+）
    - startup_raw.S 启用 A20 地址线（访问 1MB 以上内存）
    - startup_raw.S 切换到保护模式（调用 `real_to_prot`）
    - startup_raw.S 解压 GRUB Core（如果使用 LZMA 压缩）到 `0x100000`（1MB）
-   - 跳转到解压后的代码入口点（`_start`）
-   - `_start` 初始化 GRUB 核心功能（内存管理、设备驱动等）
+   - 跳转到解压后的代码入口点（`_start`，`startup.S`，位于 `0x100000`，32 位保护模式）
+   - `_start`（`startup.S`）初始化 GRUB 核心功能（内存管理、设备驱动等）
    - 调用 `grub_main()`（`grub/grub-core/kern/main.c`）
    - **此时 GRUB Core 已完全初始化，准备加载内核**
 
