@@ -149,6 +149,9 @@ DISPLAY=:1 make run-gui
 - **[BOOT_FLOW_NOTES.md](BOOT_FLOW_NOTES.md)** - 启动流程笔记
 - **[BOOT_FLOW_OPTIMIZATION_ANALYSIS.md](BOOT_FLOW_OPTIMIZATION_ANALYSIS.md)** - 启动流程优化分析
 - **[BOOT_FLOW_QA.md](BOOT_FLOW_QA.md)** - 启动流程问答
+- **[BOOT_FLOW_TIMELINE.md](BOOT_FLOW_TIMELINE.md)** - 启动流程完整时间线（从 QEMU 启动到 Linux 内核接管的详细时间序列）
+- **[BOOT_FLOW_SOURCE_INDEX.md](BOOT_FLOW_SOURCE_INDEX.md)** - 启动流程关键源代码文件索引
+- **[BOOTSECTOR_EXAMPLE.md](BOOTSECTOR_EXAMPLE.md)** - 最小引导扇区程序示例
 - **[BOOTSECTOR_COMPARISON.md](BOOTSECTOR_COMPARISON.md)** - 引导扇区对比分析
 - **[SEABIOS_LOAD_BOOT_SECTOR.md](SEABIOS_LOAD_BOOT_SECTOR.md)** - SeaBIOS 如何加载引导扇区到 0x7C00
 - **[DISK_TO_MEMORY_TRANSFER.md](DISK_TO_MEMORY_TRANSFER.md)** - 磁盘数据拷贝到内存的详细过程（PIO/DMA）
@@ -160,7 +163,13 @@ DISPLAY=:1 make run-gui
 - **[GRUB_ISO_ANALYSIS.md](GRUB_ISO_ANALYSIS.md)** - GRUB ISO 镜像引导分析（boot.S、core.img 位置、内存布局等）
 - **[GRUB_ISO_BOOT_FILES.md](GRUB_ISO_BOOT_FILES.md)** - GRUB ISO 镜像中哪些文件在 boot 阶段被加载
 - **[GRUB_KERNEL_ADDR_ANALYSIS.md](GRUB_KERNEL_ADDR_ANALYSIS.md)** - GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000 的计算和设计原因分析
+- **[GRUB_BIOS_INTERRUPT_USAGE.md](GRUB_BIOS_INTERRUPT_USAGE.md)** - GRUB 在保护模式下调用 BIOS 服务的使用场景
+- **[GRUB_MODE_SWITCHING.md](GRUB_MODE_SWITCHING.md)** - GRUB 模式切换函数详解（real_to_prot、prot_to_real 实现细节）
 - **[CREATE_GRUB_ISO.md](CREATE_GRUB_ISO.md)** - 使用 grub-mkrescue 生成 GRUB ISO 镜像教程
+
+### Linux 内核相关文档
+
+- **[VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md)** - vmlinuz（bzImage）文件详细结构分析（boot_params、setup code、压缩内核等）
 
 ### 中断相关文档
 
