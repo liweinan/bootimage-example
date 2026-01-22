@@ -299,16 +299,114 @@ movl    %edx, 0x400(%esi)  // 0x400 是链接时计算的相对偏移
 
 **源代码位置**：`grub/grub-core/kern/i386/pc/startup.S:64-66`
 
+**AT&T 格式（GRUB 使用的格式）：**
+
 ```asm
 movl	%ecx, (LOCAL(real_to_prot_addr) - _start) (%esi)
 movl	%edi, (LOCAL(prot_to_real_addr) - _start) (%esi)
 movl	%eax, (EXT_C(grub_realidt) - _start) (%esi)
 ```
 
+**Intel 格式翻译：**
+
+```asm
+; Intel 格式（操作数顺序：目标在前，源在后）
+mov	[esi + (LOCAL(real_to_prot_addr) - _start)], ecx
+mov	[esi + (LOCAL(prot_to_real_addr) - _start)], edi
+mov	[esi + (EXT_C(grub_realidt) - _start)], eax
+```
+
+**AT&T 格式 vs Intel 格式对比：**
+
+| 特性 | AT&T 格式 | Intel 格式 |
+|------|----------|------------|
+| **操作数顺序** | 源操作数在前，目标操作数在后 | 目标操作数在前，源操作数在后 |
+| **寄存器** | `%ecx`, `%esi` | `ecx`, `esi` |
+| **立即数** | `$0x100000` | `0x100000` |
+| **内存寻址** | `disp(base)` 或 `disp(%base)` | `[base + disp]` |
+| **指令后缀** | `movl`（`l` = long，32 位） | `mov`（操作数大小由操作数决定） |
+
+**指令详细解释：**
+
+**1. `movl %ecx, (LOCAL(real_to_prot_addr) - _start) (%esi)`**
+
+**AT&T 格式解析：**
+- `movl`：32 位移动指令（`l` = long，32 位）
+- `%ecx`：源操作数（寄存器，包含 `real_to_prot` 函数地址）
+- `(LOCAL(real_to_prot_addr) - _start) (%esi)`：目标操作数（内存地址）
+
+**内存地址计算：**
+```
+AT&T 格式：disp(base)
+          = (LOCAL(real_to_prot_addr) - _start) (%esi)
+          = 偏移量 + 基址寄存器
+
+Intel 格式：[base + disp]
+          = [esi + (LOCAL(real_to_prot_addr) - _start)]
+```
+
+**计算过程：**
+
+1. **链接时计算相对偏移**：
+   ```
+   LOCAL(real_to_prot_addr) 的地址（链接时）：0x9000 + 0x100 = 0x9100
+   _start 的地址（链接时）：0x9000
+   相对偏移 = 0x9100 - 0x9000 = 0x100
+   ```
+
+2. **运行时计算实际地址**：
+   ```
+   %esi = 0x100000（代码基址，从 startup_raw.S 传递）
+   实际地址 = %esi + 相对偏移 = 0x100000 + 0x100 = 0x100100
+   ```
+
+3. **执行操作**：
+   ```
+   将 %ecx 的值（real_to_prot 函数地址）存储到内存地址 0x100100
+   ```
+
+**2. `movl %edi, (LOCAL(prot_to_real_addr) - _start) (%esi)`**
+
+**含义：**
+- 将 `%edi` 的值（`prot_to_real` 函数地址）存储到内存地址 `[esi + (LOCAL(prot_to_real_addr) - _start)]`
+- 计算方式与第一条指令相同
+
+**3. `movl %eax, (EXT_C(grub_realidt) - _start) (%esi)`**
+
+**含义：**
+- 将 `%eax` 的值（`realidt` 地址）存储到内存地址 `[esi + (EXT_C(grub_realidt) - _start)]`
+- 计算方式与第一条指令相同
+
+**完整示例（假设相对偏移）：**
+
+假设链接时计算的相对偏移：
+```
+LOCAL(real_to_prot_addr) - _start = 0x100
+LOCAL(prot_to_real_addr) - _start = 0x104
+EXT_C(grub_realidt) - _start = 0x108
+```
+
+运行时执行（`%esi = 0x100000`）：
+
+**AT&T 格式：**
+```asm
+movl	%ecx, 0x100(%esi)  ; 将 %ecx 存储到 [0x100000 + 0x100] = 0x100100
+movl	%edi, 0x104(%esi)  ; 将 %edi 存储到 [0x100000 + 0x104] = 0x100104
+movl	%eax, 0x108(%esi)  ; 将 %eax 存储到 [0x100000 + 0x108] = 0x100108
+```
+
+**Intel 格式（等价）：**
+```asm
+mov	[esi + 0x100], ecx  ; 将 ecx 存储到 [0x100000 + 0x100] = 0x100100
+mov	[esi + 0x104], edi  ; 将 edi 存储到 [0x100000 + 0x104] = 0x100104
+mov	[esi + 0x108], eax  ; 将 eax 存储到 [0x100000 + 0x108] = 0x100108
+```
+
 **关键点：**
 - `(%esi)` 是基址寄存器，指向 `_start` 的实际地址（运行时是 `0x100000`）
-- `(symbol - _start)` 是链接时计算的相对偏移（如 `0x400`）
-- 运行时地址 = `%esi` + 相对偏移 = `0x100000 + 0x400 = 0x100400`
+- `(symbol - _start)` 是链接时计算的相对偏移（如 `0x100`）
+- 运行时地址 = `%esi` + 相对偏移 = `0x100000 + 0x100 = 0x100100`
+- **这是位置无关代码（PIC）的典型实现方式**：通过基址寄存器 + 相对偏移访问所有符号
 
 **总结：**
 - ❌ **GRUB Core 不使用 relocator 表**：使用位置无关代码
@@ -405,22 +503,186 @@ grub_boot_device: 0x100000 + 0x200 = 0x100200
 
 ---
 
-### 7. startup.S 接收参数的方式
+### 7. startup.S 如何获取基地址
+
+**问题：`startup.S` 在一开始执行时，如何得知自己的基地址？**
+
+**答案：通过寄存器 `%esi` 传递基地址。**
+
+#### 基地址传递过程
+
+**1. startup_raw.S 设置基地址到 %esi**
+
+**源代码位置**：`grub/grub-core/boot/i386/pc/startup_raw.S:335-349`
+
+```asm
+#ifdef ENABLE_LZMA
+	movl	$GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR, %edi  // %edi = 0x100000（解压目标地址）
+	movl	$LOCAL(decompressor_end), %esi                 // %esi = 压缩代码位置
+	pushl	%edi                                          // 将 0x100000 压入栈
+	call	_LzmaDecodeA                                  // 解压到 %edi（0x100000）
+	pop	%ecx
+	popl	%esi                                          // 将之前压入的 0x100000 弹出到 %esi
+#endif
+```
+
+**执行流程**：
+1. `%edi` 被设置为 `0x100000`（解压目标地址）
+2. `%edi` 被压入栈（保存解压目标地址）
+3. 调用 `_LzmaDecodeA` 解压函数，将压缩代码解压到 `%edi` 指向的地址（`0x100000`）
+4. `popl %esi` 将之前压入的 `%edi`（即 `0x100000`）弹出到 `%esi`
+5. **此时 `%esi = 0x100000`，即解压后的代码基址**
+
+**2. startup_raw.S 跳转到 startup.S**
+
+**源代码位置**：`grub/grub-core/boot/i386/pc/startup_raw.S:356`
+
+```asm
+	jmp	*%esi  // 间接跳转到 %esi 指向的地址（0x100000）
+```
+
+**关键点**：
+- `%esi` 的值是 `0x100000`（解压后的代码基址）
+- `jmp *%esi` 跳转到 `0x100000`，即 `startup.S` 的 `_start` 函数
+- **跳转时，`%esi` 寄存器仍然保持 `0x100000` 的值**
+
+**3. startup.S 使用 %esi 作为基址**
 
 **源代码位置**：`grub/grub-core/kern/i386/pc/startup.S:64-66`
 
 ```asm
+	.code32
 	movl	%ecx, (LOCAL(real_to_prot_addr) - _start) (%esi)
 	movl	%edi, (LOCAL(prot_to_real_addr) - _start) (%esi)
 	movl	%eax, (EXT_C(grub_realidt) - _start) (%esi)
 ```
 
 **关键观察**：
-- `startup.S` 的 `_start` 函数使用 `%esi` 作为基址寄存器
-- 这证明 `_start` 期望 `%esi` 指向自己的位置（`0x100000`）
-- 这与 `startup_raw.S` 中 `popl %esi` 后 `%esi = 0x100000` 完全一致
+- `startup.S` 的 `_start` 函数**一开始就使用 `%esi` 作为基址寄存器**
+- `(%esi)` 表示使用 `%esi` 作为基址进行内存访问
+- `(symbol - _start)` 是链接时计算的相对偏移
+- **运行时地址 = `%esi` + 相对偏移 = `0x100000` + 偏移**
 
-**证明点 7**：`startup.S` 的 `_start` 函数使用 `%esi` 作为基址，证明它期望 `%esi` 指向 `0x100000`（即自己的位置）。
+#### 寄存器状态传递
+
+**跳转时的寄存器状态**：
+
+| 寄存器 | 值 | 说明 |
+|--------|-----|------|
+| `%esi` | `0x100000` | **解压后的代码基址**（传递给 startup.S） |
+| `%edi` | `prot_to_real` 地址 | 模式切换函数地址（1MB 以下，`0x8200+`） |
+| `%ecx` | `real_to_prot` 地址 | 模式切换函数地址（1MB 以下，`0x8200+`） |
+| `%eax` | `LOCAL(realidt)` 地址 | 实模式 IDT 地址（1MB 以下，`0x8200+`） |
+| `%edx` | 启动设备号 | 从 `LOCAL(boot_dev)` 读取 |
+
+**关键点**：
+- ✅ **`%esi` 寄存器传递基地址**：`startup_raw.S` 在跳转前将基地址（`0x100000`）设置到 `%esi`
+- ✅ **跳转后寄存器保持不变**：`jmp *%esi` 跳转时，所有寄存器（包括 `%esi`）的值保持不变
+- ✅ **startup.S 直接使用**：`startup.S` 的 `_start` 函数一开始就使用 `%esi` 作为基址，无需额外计算
+
+#### 为什么使用寄存器传递？
+
+1. **简单高效**：寄存器传递是最快的参数传递方式
+2. **位置无关**：代码可以在任何地址运行，只要 `%esi` 指向代码基址
+3. **无需重定位**：不需要重定位表或运行时地址计算
+4. **约定明确**：`%esi` 专门用于传递基地址，其他寄存器用于传递其他参数
+
+**证明点 7**：`startup.S` 的 `_start` 函数通过寄存器 `%esi` 获取基地址。`startup_raw.S` 在跳转前将基地址（`0x100000`）设置到 `%esi`，跳转后 `%esi` 保持不变，`startup.S` 直接使用 `%esi` 作为基址寄存器。
+
+#### startup.S 中所有使用 %esi 的地方
+
+**源代码位置**：`grub/grub-core/kern/i386/pc/startup.S`
+
+**1. _start 函数中使用 %esi 作为基址（第 64-66 行）**：
+
+```asm
+movl	%ecx, (LOCAL(real_to_prot_addr) - _start) (%esi)
+movl	%edi, (LOCAL(prot_to_real_addr) - _start) (%esi)
+movl	%eax, (EXT_C(grub_realidt) - _start) (%esi)
+```
+
+**说明**：
+- 这是 `_start` 函数**最开始的三条指令**
+- 使用 `(%esi)` 作为基址寄存器访问数据
+- `%esi` 的值是 `0x100000`（从 `startup_raw.S` 传递过来的基地址）
+- 这三条指令保存模式切换函数地址和 realidt 地址
+
+**2. 复制代码时使用 %esi 作为源地址（第 77 行）**：
+
+```asm
+rep
+movsb  // 从 %esi（源地址）复制到 %edi（目标地址）
+```
+
+**说明**：
+- `movsb` 指令从 `%esi` 指向的地址复制数据到 `%edi` 指向的地址
+- 此时 `%esi = 0x100000`（代码基址），`%edi = 0x100000`（也是代码基址）
+- 这是自己复制自己，通常冗余（代码已经解压到正确位置）
+
+**3. 跳转到 cont 标签（第 79-80 行）**：
+
+```asm
+movl	$LOCAL (cont), %esi
+jmp	*%esi
+LOCAL(cont):
+```
+
+**说明**：
+- 将 `cont` 标签的地址加载到 `%esi`
+- 使用 `jmp *%esi` 跳转到 `cont` 标签
+- **注意**：此时 `%esi` 的值被修改为 `cont` 标签的地址，不再是基地址
+- 这个跳转是为了处理位置无关代码的地址计算问题
+
+**4. grub_pxe_call 函数中保存和恢复 %esi（第 164、195 行）**：
+
+```asm
+FUNCTION(grub_pxe_call)
+	pushl	%ebp
+	movl	%esp, %ebp
+	pushl	%esi        // 保存 %esi（第 164 行）
+	pushl	%edi
+	pushl	%ebx
+	// ... 函数体 ...
+	popl	%ebx
+	popl	%edi
+	popl	%esi        // 恢复 %esi（第 195 行）
+	popl	%ebp
+	ret
+```
+
+**说明**：
+- 这是标准的函数调用约定，保存和恢复被调用者保存的寄存器
+- `%esi` 在这里作为通用寄存器使用，不是基址寄存器
+
+**5. 注释掉的模块复制代码（第 86-89 行，已禁用）**：
+
+```asm
+#if 0
+	movl	EXT_C(grub_kernel_image_size), %esi
+	addl	%ecx, %esi
+	addl	$_start, %esi
+	decl	%esi
+	// ...
+#endif
+```
+
+**说明**：
+- 这段代码已被注释掉（`#if 0`）
+- 原本用于复制模块，但现在不使用
+
+**总结：**
+
+| 行号 | 使用方式 | 说明 |
+|------|---------|------|
+| 64-66 | `(%esi)` 作为基址 | **最关键**：`_start` 函数一开始就使用 `%esi` 作为基址寄存器 |
+| 77 | `movsb` 使用 `%esi` 作为源地址 | 复制代码时，`%esi` 指向源地址（`0x100000`） |
+| 79-80 | 修改 `%esi` 并跳转 | 将 `cont` 标签地址加载到 `%esi` 并跳转（此时 `%esi` 不再是基址） |
+| 164, 195 | `pushl %esi` / `popl %esi` | 在 `grub_pxe_call` 函数中保存和恢复寄存器 |
+
+**关键点**：
+- ✅ **第 64-66 行是最重要的**：`_start` 函数一开始就使用 `%esi` 作为基址，证明基地址是通过 `%esi` 传递的
+- ✅ **第 77 行**：使用 `%esi` 作为源地址进行代码复制
+- ⚠️ **第 79-80 行**：修改了 `%esi` 的值，但这是在 `_start` 函数内部，不影响基地址的传递
 
 ---
 
