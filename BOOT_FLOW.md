@@ -1015,8 +1015,8 @@ boot_cdrom(struct drive_s *drive)
    │           - 包含位置：grub/grub-core/boot/i386/pc/startup_raw.S:359（include 语句）
    └─ 跳转到解压后的代码入口点（jmp *%esi）
     ↓
-6. 解压后的代码入口点（grub_stub_init）
-   ├─ 源代码位置：grub/grub-core/kern/i386/pc/init.c
+6. 解压后的代码入口点（_start，startup.S）
+   ├─ 源代码位置：grub/grub-core/kern/i386/pc/startup.S
    ├─ 内存位置：0x100000（1MB，如果使用 LZMA 压缩）或 0x8000+（如果不使用 LZMA 压缩）
    ├─ 运行模式：保护模式
    ├─ 初始化 GRUB 核心功能：
@@ -2470,7 +2470,7 @@ post_reed_solomon:
     movl    $prot_to_real, %edi
     movl    $real_to_prot, %ecx
     movl    $LOCAL(realidt), %eax
-    jmp     *%esi  // 跳转到 grub_stub_init()（0x100000）
+    jmp     *%esi  // 跳转到 _start（startup.S，0x100000）
 ```
 
 **LZMA 解压流程：**
@@ -2486,7 +2486,7 @@ post_reed_solomon:
 
 3. **跳转执行**：
    - 执行 `jmp *%esi` 跳转到解压后的代码
-   - 入口点是 `grub_stub_init()` 函数
+   - 入口点是 `_start`（`startup.S`）函数
 
 **执行流程：**
 
