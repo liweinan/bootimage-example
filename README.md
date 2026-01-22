@@ -166,6 +166,7 @@ DISPLAY=:1 make run-gui
 - **[GRUB_BIOS_INTERRUPT_USAGE.md](GRUB_BIOS_INTERRUPT_USAGE.md)** - GRUB 在保护模式下调用 BIOS 服务的使用场景
 - **[GRUB_MODE_SWITCHING.md](GRUB_MODE_SWITCHING.md)** - GRUB 模式切换函数详解（real_to_prot、prot_to_real 实现细节）
 - **[GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)** - GRUB 加载 Linux 内核详细流程（grub_cmd_linux、grub_linux_boot、grub_relocator32_boot 源代码分析）
+- **[GRUB_STARTUP_RAW_TO_STARTUP_PROOF.md](GRUB_STARTUP_RAW_TO_STARTUP_PROOF.md)** - GRUB startup_raw.S 解压后跳转到 startup.S 的证明（源代码分析、链接顺序、寄存器状态）
 - **[CREATE_GRUB_ISO.md](CREATE_GRUB_ISO.md)** - 使用 grub-mkrescue 生成 GRUB ISO 镜像教程
 
 ### Linux 内核相关文档

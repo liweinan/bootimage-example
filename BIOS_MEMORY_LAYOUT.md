@@ -307,7 +307,7 @@
            
            subgraph Above1MB["1MB-4GB RAM区域"]
                RAM4GB["0x100000 - 0xFFFFFFFF (前4GB RAM，统一区域)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址范围：1MB - 4GB<br/>访问模式：保护模式可访问<br/>内存类型：真正的物理RAM<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>此区域包含以下组件："]
-               GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000+ (1MB+)<br/>大小：约 50KB - 100KB（解压后，标准配置）<br/>解压时机：startup_raw.S 切换到保护模式后<br/>解压函数：_LzmaDecodeA<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>包含内容：<br/>• grub_main()（main.c）<br/>• 磁盘/文件系统框架（disk.c, file.c, fs.c）<br/>• 内存管理（mm.c）<br/>• 命令处理（command.c）<br/>• i386_pc 平台初始化（init.c, mmap.c）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：解析 grub.cfg、显示菜单、加载内核<br/>生命周期：解压后 → 内核加载前（会被覆盖）<br/>访问方式：保护模式，需要 A20 地址线"]
+               GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000+ (1MB+)<br/>大小：约 50KB - 100KB（解压后，标准配置）<br/>解压时机：startup_raw.S 切换到保护模式后<br/>解压函数：_LzmaDecodeA<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>包含内容：<br/>• _start（startup.S，解压后的代码入口点，32位保护模式）<br/>• grub_main()（main.c）<br/>• 磁盘/文件系统框架（disk.c, file.c, fs.c）<br/>• 内存管理（mm.c）<br/>• 命令处理（command.c）<br/>• i386_pc 平台初始化（init.c, mmap.c）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：解析 grub.cfg、显示菜单、加载内核<br/>生命周期：解压后 → 内核加载前（会被覆盖）<br/>访问方式：保护模式，需要 A20 地址线"]
                KernelLoad["Linux 内核镜像（压缩，bzImage 格式）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000 (1MB)<br/>大小：几 MB - 几十 MB（取决于内核配置）<br/>加载时机：GRUB 解析 grub.cfg 后<br/>加载方式：GRUB 通过文件系统读取<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>镜像结构：<br/>• 头部：setup 代码（实模式，约 32KB）<br/>• 主体：压缩的内核代码（vmlinux 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>关键点：<br/>• 会覆盖解压后的 GRUB Core<br/>• 包含自己的解压代码（setup）<br/>• 解压目标：0x1000000+ (16MB+)"]
                KernelDecomp["Linux 内核解压后（vmlinux）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x1000000+ (16MB+)<br/>大小：几十 MB - 几百 MB（取决于内核配置）<br/>解压时机：内核 setup 代码执行后<br/>解压方式：内核 setup 代码调用解压函数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>包含内容：<br/>• 内核核心代码（kernel/）<br/>• 设备驱动（drivers/）<br/>• 文件系统（fs/）<br/>• 网络栈（net/）<br/>• 内存管理（mm/）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：内核接管系统，GRUB 不再需要<br/>运行模式：长模式（64位）或保护模式（32位）"]
            end
@@ -359,6 +359,7 @@
      - 只有 C 代码部分被 LZMA 压缩（后 24KB）
      - diskboot.S 和 startup_raw.S 保持未压缩（前约 4.1KB，实模式代码）
 - **包含内容**：
+  - `_start`（`startup.S`，解压后的代码入口点，32位保护模式）
   - GRUB 核心 C 代码（`main.c`、`disk.c`、`file.c`、`fs.c` 等）
   - i386_pc 平台初始化代码（`kern/i386/pc/init.c`）
   - 内存管理、命令处理、文件系统框架等
@@ -581,9 +582,10 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
    - 解压后：在内存 `0x100000+`，解压后的代码（约 50KB - 100KB）
 
    **关键函数入口点**：
-   - `grub_stub_init()`：解压后的代码入口点（在 `kern/i386/pc/init.c` 中）
+   - `_start`（`startup.S`，解压后的代码入口点，32位保护模式）
+     - 源代码位置：`grub/grub-core/kern/i386/pc/startup.S`
      - 由 `startup_raw.S` 的 `jmp *%esi` 跳转到这里（`0x100000`）
-     - 初始化 i386_pc 平台特定功能
+     - 保存模式切换函数地址、清理 BSS 段、保存启动设备号
      - 调用 `grub_main()`
    - `grub_main()`：GRUB 主入口函数（在 `kern/main.c` 中）
      - 解析 `grub.cfg` 配置文件
