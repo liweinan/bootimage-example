@@ -401,6 +401,172 @@ dequeue_key(struct bregs *regs, int incr, int extended)
    - 更新缓冲区头指针（消耗按键）
    - 返回按键值
 
+**⚠️ 关键问题：保护模式下关闭中断时，切换到实模式后 INT 16h 如何读取键盘输入？**
+
+**问题：GRUB 运行在保护模式时关闭中断，INT 09 不工作。切换到实模式后，INT 16h 如何读取在保护模式下关闭中断时的键盘输入？**
+
+**答案：关键在于 `prot_to_real` 执行 `sti` 后，挂起的中断会被立即处理，INT 09 会执行并将扫描码存入 BIOS 缓冲区，然后 INT 16h 才能读取。**
+
+**完整的数据流程：**
+
+```
+阶段 1：保护模式下关闭中断时按键发生
+─────────────────────────────────────────
+保护模式（中断禁用，cli）：
+    ↓
+用户按下键盘
+    ↓
+键盘控制器（8042）：
+    ├─ 将扫描码存入输出缓冲区（硬件自动保存）✅
+    ├─ 设置 OBF 位 = 1（表示有数据）
+    └─ 通过 IRQ1 向 PIC 发送中断请求
+    ↓
+PIC（8259A）：
+    ├─ 在 IRR[1] 中设置位（IRR[1] = 1，挂起状态）
+    └─ 由于 CPU 中断被禁用（IF = 0），不向 CPU 发送中断信号
+    ↓
+结果：
+    ├─ 扫描码保存在键盘控制器的输出缓冲区（硬件层面）✅
+    ├─ 中断请求保存在 PIC 的 IRR[1] 中（挂起状态）✅
+    └─ INT 09 不执行（因为中断被禁用）❌
+```
+
+```
+阶段 2：切换到实模式并重新启用中断
+─────────────────────────────────────────
+调用 grub_bios_interrupt (0x16, &regs)
+    ↓
+PROT_TO_REAL（prot_to_real）
+    ├─ 保存保护模式 IDT（空）
+    ├─ 恢复实模式 IDT（IVT）
+    ├─ 清除 CR0.PE 位（退出保护模式）
+    └─ 执行 sti（重新启用中断）⚠️ 关键步骤
+    ↓
+实模式（CPU 现在使用 IVT，中断已启用）
+    ↓
+PIC 检测到 IF = 1（中断已启用）：
+    ├─ 检查 IRR[1] = 1（有挂起的键盘中断）
+    └─ 立即向 CPU 发送中断信号
+    ↓
+CPU 响应中断：
+    ├─ 查找 IVT[0x09] → entry_09 → handle_09()
+    └─ BIOS 的键盘中断处理程序立即执行 ⚠️ 关键步骤
+    ↓
+handle_09() 执行：
+    ├─ inb(0x64)  ; 读取状态，检查 OBF 位
+    ├─ inb(0x60)  ; 从键盘控制器的输出缓冲区读取扫描码
+    ├─ process_key(scancode)  ; 处理扫描码
+    │   └─ __process_key()  ; 转换为按键码
+    │       └─ enqueue_key(keycode)  ; 存入 BIOS 键盘缓冲区（BDA）
+    └─ pic_eoi1()  ; 发送 EOI
+    ↓
+结果：
+    ├─ 扫描码从键盘控制器的输出缓冲区被读取 ✅
+    └─ 按键码存入 BIOS 的键盘缓冲区（BDA）✅
+```
+
+```
+阶段 3：INT 16h 从 BIOS 缓冲区读取
+─────────────────────────────────────────
+执行 INT 16h AH=0x01 指令（检查键盘状态）
+    ├─ CPU 使用 IVT[0x16] 查找 BIOS 处理程序
+    ├─ 跳转到 BIOS 的 INT 16h 处理程序
+    ├─ BIOS 处理程序：
+    │   ├─ 检查键盘缓冲区（kbd_buf_head == kbd_buf_tail？）
+    │   ├─ 如果缓冲区为空：
+    │   │   └─ 设置 Zero Flag → 返回（非阻塞）
+    │   └─ 如果缓冲区有数据：
+    │       └─ 清除 Zero Flag → 返回（但不消耗按键）
+    └─ BIOS 返回，CPU 继续执行
+    ↓
+执行 INT 16h AH=0x00 指令（读取按键）
+    ├─ BIOS 处理程序：
+    │   ├─ 检查键盘缓冲区
+    │   ├─ 如果缓冲区为空（理论上不会发生，因为已经检查过）：
+    │   │   └─ yield_toirq() 等待硬件中断
+    │   └─ 如果缓冲区有数据：
+    │       ├─ 从缓冲区读取按键码
+    │       ├─ 更新 kbd_buf_head（消耗按键）
+    │       └─ 返回按键码
+    └─ BIOS 返回
+```
+
+**关键时间点分析：**
+
+| 时间点 | CPU 模式 | 中断状态 | INT 09 | 键盘控制器 | BIOS 缓冲区 | INT 16h |
+|--------|---------|---------|--------|-----------|------------|---------|
+| **T1：保护模式下按键** | 保护模式 | 禁用（cli） | ❌ 不执行 | ✅ 保存扫描码 | ❌ 空 | - |
+| **T2：prot_to_real 执行 sti** | 实模式 | **启用（sti）** | ⚠️ **立即执行** | ✅ 读取扫描码 | ✅ **存入按键码** | - |
+| **T3：INT 16h 执行** | 实模式 | 启用 | - | - | ✅ **读取按键码** | ✅ 返回按键码 |
+
+**关键理解：**
+
+1. **保护模式下关闭中断时**：
+   - 扫描码保存在键盘控制器的输出缓冲区（硬件自动保存）
+   - 中断请求保存在 PIC 的 IRR[1] 中（挂起状态）
+   - INT 09 不执行，BIOS 缓冲区为空
+
+2. **切换到实模式并执行 `sti` 后**：
+   - **挂起的中断会被立即处理**：PIC 检测到 IF = 1，立即发送中断信号
+   - **INT 09 立即执行**：从键盘控制器的输出缓冲区读取扫描码
+   - **数据转换和存储**：将扫描码转换为按键码，存入 BIOS 键盘缓冲区
+   - **这个过程在 INT 16h 执行之前完成**
+
+3. **INT 16h 执行时**：
+   - BIOS 缓冲区已经有数据（由 INT 09 在 `sti` 后立即存入）
+   - INT 16h 直接从 BIOS 缓冲区读取按键码
+   - **不需要直接访问键盘控制器的输出缓冲区**
+
+**源代码证据：**
+
+**`prot_to_real` 执行 `sti`（`grub-core/kern/i386/realmode.S:273-276`）：**
+
+```asm
+realcseg:
+    // ... 设置段寄存器 ...
+    
+#ifdef GRUB_MACHINE_PCBIOS
+    /* restore interrupts */
+    sti  // ⚠️ 关键：重新启用中断
+#endif
+    
+    /* return on new stack! */
+    retl
+```
+
+**关键点：**
+- `sti` 指令在 `prot_to_real` 的最后执行
+- 执行 `sti` 后，CPU 的 IF 标志被设置为 1
+- PIC 检测到 IF = 1，立即检查 IRR，如果有挂起的中断，立即发送给 CPU
+- CPU 响应中断，INT 09 立即执行
+
+**`dequeue_key` 从 BIOS 缓冲区读取（`seabios/src/kbd.c:54-105`）：**
+
+```c
+static void
+dequeue_key(struct bregs *regs, int incr, int extended)
+{
+    // ⚠️ 关键：从 BDA 的键盘缓冲区读取（不是从键盘控制器）
+    buffer_head = GET_BDA(kbd_buf_head);
+    buffer_tail = GET_BDA(kbd_buf_tail);
+    
+    if (buffer_head != buffer_tail) {
+        // 从 BIOS 缓冲区读取按键码
+        u16 keycode = GET_FARVAR(SEG_BDA, *(u16*)(buffer_head+0));
+        regs->ax = keycode;
+        // ...
+    } else {
+        // 缓冲区为空，等待硬件中断
+        if (incr)
+            yield_toirq();  // 等待 INT 09 处理并存入数据
+    }
+}
+```
+
+**关键点：**
+- `dequeue_key` 从 BIOS 缓冲区（BDA）读取，不是从键盘控制器读取
+- 如果缓冲区为空，`yield_toirq()` 会等待硬件中断（INT 09）处理并存入数据
+
 **完整流程：**
 
 ```
@@ -416,9 +582,17 @@ PROT_TO_REAL（prot_to_real）
     ├─ 保存保护模式 IDT（空）
     ├─ 恢复实模式 IDT（IVT）
     ├─ 清除 CR0.PE 位（退出保护模式）
-    └─ 执行 sti（重新启用中断）
+    └─ 执行 sti（重新启用中断）⚠️ 关键步骤
     ↓
 实模式（CPU 现在使用 IVT，中断已启用）
+    ↓
+⚠️ 挂起的中断被立即处理：
+    ├─ PIC 检测到 IF = 1，检查 IRR[1] = 1
+    ├─ 立即发送中断信号给 CPU
+    ├─ CPU 响应中断，INT 09 立即执行
+    ├─ handle_09() 从键盘控制器读取扫描码
+    ├─ process_key() 转换为按键码
+    └─ enqueue_key() 存入 BIOS 键盘缓冲区 ✅
     ↓
 执行 INT 16h AH=0x01 指令
     ├─ CPU 使用 IVT[0x16] 查找 BIOS 处理程序
@@ -592,6 +766,191 @@ handle_1601(struct bregs *regs)
 - **从缓冲区读取**：从 BIOS 键盘缓冲区读取按键码（由硬件中断存储）
 - **可能阻塞**：如果缓冲区为空，`AH=0x00` 会等待硬件中断产生新数据
 - **同步执行**：与用户程序的执行同步，程序等待结果返回
+
+**⚠️ 重要澄清：INT 16h 读取的是哪个缓冲区？**
+
+**问题：SeaBIOS 的 INT 16h（0x16）服务读取的是 INT 09 的缓冲区，还是键盘控制器的缓冲区，还是都处理？**
+
+**答案：INT 16h 读取的是 BIOS 的键盘缓冲区（BDA），而不是键盘控制器的输出缓冲区。**
+
+**数据流程：**
+
+```
+层次 1：键盘控制器输出缓冲区（硬件）
+    ├─ 位置：8042 芯片内部
+    ├─ 大小：1 字节（一个扫描码）
+    ├─ 数据：原始扫描码（如 0x1E）
+    └─ 访问：I/O 端口 0x60
+    ↓
+INT 09 硬件中断处理（handle_09）：
+    ├─ inb(0x60)  ; 从键盘控制器的输出缓冲区读取扫描码
+    ├─ process_key(scancode)  ; 处理扫描码
+    │   └─ __process_key()  ; 转换为按键码
+    │       └─ enqueue_key(keycode)  ; 存入 BIOS 键盘缓冲区
+    └─ pic_eoi1()  ; 发送 EOI
+    ↓
+层次 2：BIOS 键盘缓冲区（软件，BDA）
+    ├─ 位置：BDA（BIOS Data Area）
+    ├─ 大小：32 字节（16 个按键码）
+    ├─ 数据：处理后的按键码（如 0x1E61，扫描码 + ASCII）
+    └─ 访问：通过 BDA 指针访问
+    ↓
+INT 16h 软件中断服务（handle_16）：
+    ├─ handle_1600()  ; 读取按键（阻塞）
+    │   └─ dequeue_key(regs, 1, 0)  ; 从 BIOS 键盘缓冲区读取
+    └─ handle_1601()  ; 检查状态（非阻塞）
+        └─ dequeue_key(regs, 0, 0)  ; 检查 BIOS 键盘缓冲区
+```
+
+**源代码证据：**
+
+**1. INT 16h 从 BIOS 键盘缓冲区读取（`seabios/src/kbd.c:54-105`）：**
+
+```c
+static void
+dequeue_key(struct bregs *regs, int incr, int extended)
+{
+    yield();
+    u16 buffer_head;
+    u16 buffer_tail;
+    
+    // ⚠️ 关键：从 BDA 获取缓冲区指针（BIOS 键盘缓冲区）
+    for (;;) {
+        buffer_head = GET_BDA(kbd_buf_head);  // 从 BDA 读取头指针
+        buffer_tail = GET_BDA(kbd_buf_tail);  // 从 BDA 读取尾指针
+
+        if (buffer_head != buffer_tail)
+            break;
+        if (!incr) {
+            regs->flags |= F_ZF;  // 缓冲区为空，设置 Zero Flag
+            return;
+        }
+        yield_toirq();  // 等待硬件中断产生新数据
+    }
+
+    // ⚠️ 关键：从 BDA 的键盘缓冲区读取按键码
+    u16 keycode = GET_FARVAR(SEG_BDA, *(u16*)(buffer_head+0));
+    
+    // 处理扩展键转换
+    // ...
+    
+    regs->ax = keycode;  // 返回按键码
+
+    if (!incr) {
+        regs->flags &= ~F_ZF;
+        return;
+    }
+    
+    // 更新缓冲区头指针（消耗按键）
+    buffer_head += 2;
+    if (buffer_head >= buffer_end)
+        buffer_head = buffer_start;
+    SET_BDA(kbd_buf_head, buffer_head);  // 更新 BDA 中的头指针
+}
+```
+
+**关键点：**
+- `GET_BDA(kbd_buf_head)` 和 `GET_BDA(kbd_buf_tail)`：从 BDA 获取缓冲区指针
+- `GET_FARVAR(SEG_BDA, *(u16*)(buffer_head+0))`：从 BDA 的键盘缓冲区读取按键码
+- **没有直接访问键盘控制器的输出缓冲区**（没有 `inb(0x60)` 调用）
+
+**2. INT 09 从键盘控制器读取并存入 BIOS 缓冲区（`seabios/src/hw/ps2port.c:389-417`）：**
+
+```c
+void VISIBLE16
+handle_09(void)
+{
+    // ⚠️ 关键：从键盘控制器的输出缓冲区读取扫描码
+    u8 v = inb(PORT_PS2_STATUS);  // 0x64: 状态端口
+    v = inb(PORT_PS2_DATA);       // 0x60: 数据端口（从键盘控制器读取）
+    
+    // 处理扫描码
+    process_key(v);
+}
+
+void
+process_key(u8 key)
+{
+    __process_key(key);  // 处理扫描码，转换为按键码
+}
+
+static void
+__process_key(u8 scancode)
+{
+    // 处理扫描码，转换为按键码
+    // ...
+    if (keycode)
+        enqueue_key(keycode);  // ⚠️ 关键：存入 BIOS 键盘缓冲区（BDA）
+}
+```
+
+**关键点：**
+- `inb(PORT_PS2_DATA)`：从键盘控制器的输出缓冲区读取扫描码
+- `enqueue_key(keycode)`：将按键码存入 BIOS 键盘缓冲区（BDA）
+
+**3. enqueue_key() 存入 BIOS 缓冲区（`seabios/src/kbd.c:32-52`）：**
+
+```c
+u8
+enqueue_key(u16 keycode)
+{
+    u16 buffer_start = GET_BDA(kbd_buf_start_offset);
+    u16 buffer_end   = GET_BDA(kbd_buf_end_offset);
+    u16 buffer_head = GET_BDA(kbd_buf_head);
+    u16 buffer_tail = GET_BDA(kbd_buf_tail);
+
+    u16 temp_tail = buffer_tail;
+    buffer_tail += 2;  // 每个按键码占 2 字节
+    if (buffer_tail >= buffer_end)
+        buffer_tail = buffer_start;  // 循环缓冲区
+
+    if (buffer_tail == buffer_head)
+        return 0;  // 缓冲区满
+
+    // ⚠️ 关键：存储按键码到 BDA 的键盘缓冲区
+    SET_FARVAR(SEG_BDA, *(u16*)(temp_tail+0), keycode);
+    SET_BDA(kbd_buf_tail, buffer_tail);
+    return 1;
+}
+```
+
+**关键点：**
+- `SET_FARVAR(SEG_BDA, ...)`：将按键码存入 BDA 的键盘缓冲区
+- **这是 BIOS 的软件缓冲区，不是键盘控制器的硬件缓冲区**
+
+**完整的数据流对比：**
+
+| 阶段 | 数据位置 | 数据类型 | 访问方式 | 处理程序 |
+|------|---------|---------|---------|---------|
+| **1. 按键发生** | 键盘控制器输出缓冲区 | 扫描码（1 字节） | I/O 端口 0x60 | 硬件自动保存 |
+| **2. 硬件中断** | 键盘控制器输出缓冲区 | 扫描码（1 字节） | `inb(0x60)` | INT 09（handle_09） |
+| **3. 数据转换** | 处理中 | 扫描码 → 按键码 | 内存处理 | INT 09（__process_key） |
+| **4. 软件存储** | BIOS 键盘缓冲区（BDA） | 按键码（2 字节） | BDA 指针 | INT 09（enqueue_key） |
+| **5. 软件读取** | BIOS 键盘缓冲区（BDA） | 按键码（2 字节） | BDA 指针 | INT 16h（dequeue_key） |
+
+**关键理解：**
+
+1. **INT 09 负责**：
+   - 从键盘控制器的输出缓冲区读取扫描码（硬件层面）
+   - 将扫描码转换为按键码（软件处理）
+   - 将按键码存入 BIOS 键盘缓冲区（软件层面）
+
+2. **INT 16h 负责**：
+   - 从 BIOS 键盘缓冲区读取按键码（软件层面）
+   - **不直接访问键盘控制器的输出缓冲区**
+
+3. **两个缓冲区的区别**：
+   - **键盘控制器的输出缓冲区**：硬件层面，1 字节，存储原始扫描码
+   - **BIOS 键盘缓冲区（BDA）**：软件层面，32 字节，存储处理后的按键码
+
+4. **数据流向**：
+   - 键盘控制器输出缓冲区 → INT 09 读取 → 处理转换 → BIOS 键盘缓冲区 → INT 16h 读取
+
+**总结：**
+- **INT 16h 读取的是 BIOS 的键盘缓冲区（BDA）**，而不是键盘控制器的输出缓冲区
+- **INT 09 负责从键盘控制器读取并存入 BIOS 缓冲区**
+- **INT 16h 负责从 BIOS 缓冲区读取并返回给程序**
+- **两者通过 BIOS 键盘缓冲区（BDA）进行数据交换**
 
 **3. 完整的数据流**
 
