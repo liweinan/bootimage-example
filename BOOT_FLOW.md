@@ -1743,6 +1743,30 @@ startup_raw.S 的位置（diskboot.S 加载第二个扇区开始）：
 - startup_raw.S 位置：`0x8200+`（第二个扇区开始）
 - **没有重叠**：块列表在第一个扇区的末尾，startup_raw.S 从第二个扇区开始
 
+**实模式下的内存使用分析：**
+
+- **1MB 内存是否够用？**
+  - **够用**：在实模式阶段（引导扇区 → GRUB Core），所有代码和数据都在 1MB 范围内：
+    - `0x7C00 - 0x7DFF`：引导扇区（512 字节）
+    - `0x8000 - 0x9FFF`：GRUB Core（约 8KB）
+    - `0xA000 - 0xBFFF`：GRUB 文件系统驱动（可选）
+    - `0xF0000 - 0xFFFFF`：BIOS ROM（只读）
+  - **总计使用**：约 10-20KB，远小于 1MB 的可用空间（约 640KB 常规 RAM）
+
+- **地址会不会冲突？**
+  - **不会冲突**：内存布局是精心设计的，各组件使用不同的地址范围：
+    - 引导扇区：`0x7C00 - 0x7DFF`（512 字节）
+    - GRUB Core：`0x8000+`（与引导扇区不重叠）
+    - BIOS ROM：`0xF0000 - 0xFFFFF`（只读，不影响）
+    - 可用空间：`0x0000 - 0x7BFF`、`0x8000 - 0x9FFF` 之间等
+  - **设计原则**：引导扇区选择 `0x7C00` 是为了避免与 BIOS 数据区（`0x0000 - 0x03FF`）和栈空间冲突
+
+- **为什么需要切换到保护模式？**
+  - 内核镜像通常较大（几 MB 到几十 MB），无法放入前 1MB
+  - GRUB Core 解压后也需要 1MB 以上的空间（如果使用 LZMA 压缩）
+  - 因此 GRUB Core 需要**先切换到保护模式**，然后才能访问 1MB 以上的内存来加载内核和解压代码
+  - 这是为什么 `startup_raw.S` 需要"切换到保护模式"的原因
+
 **3. diskboot.S 读取块列表的代码（包含跳转到 startup_raw.S）：**
 
 以下代码展示了 `diskboot.S` 的完整执行流程：从读取块列表到跳转到 `startup_raw.S`。代码包含两个主要部分：
@@ -2659,7 +2683,7 @@ grub_main()（1MB 以上，0x100000+）
 
 > **注意**：关于 `startup_raw.S` 中的中断状态变化、`real_to_prot` 和 `prot_to_real` 函数的详细实现说明、返回地址处理机制等，请参见 [GRUB 模式切换函数详解](GRUB_MODE_SWITCHING.md)。
 
-### 引导过程的完整内存布局和关键步骤
+### 引导过程的完整内存布局
 
 **完整内存布局（引导过程）：**
 
@@ -2698,52 +2722,6 @@ grub_main()（1MB 以上，0x100000+）
 - `0x100000`（1MB）：GRUB Core 解压后地址（如果使用 LZMA 压缩）、内核镜像加载地址
 - `0xF0000 - 0xFFFFF`：BIOS ROM
 
-**引导过程的关键步骤总结：**
-
-1. **BIOS → 引导扇区**：
-   - BIOS 调用 INT 13h（AH=0x02）读取磁盘第一个扇区
-   - 加载到 `0x7C00`，验证签名 `0xAA55`
-   - 跳转到 `0x0000:0x7C00` 执行
-
-2. **引导扇区 → GRUB Core**：
-   - 引导扇区代码（boot.S）从 kernel_sector 读取 GRUB Core 第一个扇区（diskboot.S）
-   - 加载 diskboot.S 到 `0x8000`
-   - diskboot.S 使用块列表加载完整的 GRUB Core（包括 startup_raw.S）
-   - 跳转到 GRUB Core（startup_raw.S 入口点 0x8200）
-
-3. **GRUB Core → grub_main()**：
-   - `startup_raw.S` 启用 A20 地址线（访问 1MB 以上内存）
-   - `startup_raw.S` 切换到保护模式（调用 `real_to_prot`）
-   - `startup_raw.S` 解压 GRUB Core（如果使用 LZMA 压缩）到 `0x100000`（1MB）
-   - 跳转到解压后的代码入口点（`startup.S` 的 `_start` 函数，位于 `0x100000`，32 位保护模式）
-   - `startup.S` 的 `_start` 函数初始化 GRUB 核心功能（内存管理、设备驱动等）
-   - 调用 `grub_main()`（`grub/grub-core/kern/main.c`）
-   - **此时 GRUB Core 已完全初始化，准备加载内核**
-
-**实模式下的内存使用分析：**
-
-- **1MB 内存是否够用？**
-  - **够用**：在实模式阶段（引导扇区 → GRUB Core），所有代码和数据都在 1MB 范围内：
-    - `0x7C00 - 0x7DFF`：引导扇区（512 字节）
-    - `0x8000 - 0x9FFF`：GRUB Core（约 8KB）
-    - `0xA000 - 0xBFFF`：GRUB 文件系统驱动（可选）
-    - `0xF0000 - 0xFFFFF`：BIOS ROM（只读）
-  - **总计使用**：约 10-20KB，远小于 1MB 的可用空间（约 640KB 常规 RAM）
-
-- **地址会不会冲突？**
-  - **不会冲突**：内存布局是精心设计的，各组件使用不同的地址范围：
-    - 引导扇区：`0x7C00 - 0x7DFF`（512 字节）
-    - GRUB Core：`0x8000+`（与引导扇区不重叠）
-    - BIOS ROM：`0xF0000 - 0xFFFFF`（只读，不影响）
-    - 可用空间：`0x0000 - 0x7BFF`、`0x8000 - 0x9FFF` 之间等
-  - **设计原则**：引导扇区选择 `0x7C00` 是为了避免与 BIOS 数据区（`0x0000 - 0x03FF`）和栈空间冲突
-
-- **为什么需要切换到保护模式？**
-  - 内核镜像通常较大（几 MB 到几十 MB），无法放入前 1MB
-  - GRUB Core 解压后也需要 1MB 以上的空间（如果使用 LZMA 压缩）
-  - 因此 GRUB Core 需要**先切换到保护模式**，然后才能访问 1MB 以上的内存来加载内核和解压代码
-  - 这是为什么 `startup_raw.S` 需要"切换到保护模式"的原因
-
 ---
 
 ## GRUB 加载 Linux 内核
@@ -2753,77 +2731,6 @@ grub_main()（1MB 以上，0x100000+）
 **执行流程衔接：**
 
 从 `_start` 调用 `grub_main()` 后，GRUB 开始加载 Linux 内核：
-
-```
-grub_main()（grub/grub-core/kern/main.c）
-    ├─ 源代码位置：grub/grub-core/kern/main.c
-    ├─ 解析 grub.cfg 配置文件
-    ├─ 显示启动菜单（如果配置）
-    ├─ 用户选择启动 Linux 内核
-    └─ 执行 linux 命令 → grub_cmd_linux()
-        ↓
-grub_cmd_linux()（grub/grub-core/loader/i386/linux.c）
-    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
-    ├─ 加载内核镜像到内存（0x100000）
-    ├─ 设置内核启动参数（boot_params）
-    └─ 注册启动函数 grub_linux_boot()
-        ↓
-grub_linux_boot() → grub_relocator32_boot()
-    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
-    └─ 跳转到内核入口点（code32_start）
-        ↓
-grub_relocator32_boot() 跳转到内核入口点（code32_start）
-    ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
-    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 的偏移）
-    └─ 寄存器状态：
-        ├─ ESI = boot_params 地址
-        ├─ ESP = 栈指针
-        └─ EIP = code32_start（内核入口点）
-    ↓
-Linux 内核 Setup 代码（实模式）
-    ├─ 源代码位置：linux/arch/x86/boot/header.S
-    ├─ 内存位置：0x100000（1MB）或内核指定的地址
-    ├─ 运行模式：实模式（初始阶段）
-    ├─ 验证内核签名（boot_flag = 0xAA55）
-    ├─ 初始化基本环境
-    ├─ 切换到保护模式
-    └─ 跳转到压缩内核解压代码
-        ↓
-压缩内核解压代码（startup_32）
-    ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
-    ├─ 运行模式：32 位保护模式 → 64 位长模式
-    ├─ 设置页表（身份映射：物理地址 = 线性地址）
-    ├─ 切换到 64 位长模式
-    ├─ 解压内核（gzip 解压）
-    └─ 跳转到 startup_64
-        ↓
-startup_64（64 位内核入口点）
-    ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
-    ├─ 运行模式：64 位长模式
-    ├─ 保存 boot_params 结构地址（%RSI → %R15）
-    ├─ 设置初始内核栈
-    ├─ 设置 GS 段基址（per-CPU 数据）
-    ├─ 设置 GDT 和早期 IDT
-    ├─ 切换到内核代码段（__KERNEL_CS）
-    ├─ 激活内存加密（SEV/SME，如果支持）
-    ├─ 验证和清理 CPU 配置（verify_cpu）
-    └─ 继续内核初始化流程
-        ↓
-内核继续初始化（x86_64_start_kernel）
-    ├─ 源代码位置：linux/arch/x86/kernel/head64.c
-    ├─ 设置早期中断处理程序（idt_setup_early_handler）
-    │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
-    ├─ TDX 早期初始化（tdx_early_init，如果支持）
-    ├─ 复制引导数据（copy_bootdata）
-    ├─ 加载微码更新（load_ucode_boot）
-    ├─ 设置内核高地址映射
-    └─ 启动内核预留区域初始化（x86_64_start_reservations）
-        └─ 最终调用 start_kernel()
-```
-
-**本节内容：**
-
-本节将详细说明 `grub_main()` 如何加载 Linux 内核并跳转到内核入口点：
 
 ```
 grub_main()（grub/grub-core/kern/main.c）
