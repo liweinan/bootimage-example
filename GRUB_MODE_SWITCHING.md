@@ -1,5 +1,7 @@
 # GRUB 模式切换函数详解
 
+**重要说明：本文档主要描述 GRUB 在 BIOS 模式（i386_pc）下的模式切换机制。UEFI 模式（i386_efi/x86_64_efi）的实现完全不同，不需要模式切换。详见本文档的 [UEFI 模式说明](#uefi-模式说明)。**
+
 ## 从实模式到保护模式的切换
 
 **模式切换的关键步骤（real_to_prot）：**
@@ -122,6 +124,552 @@ protidt:
    - 当 GRUB 需要调用 BIOS 服务（如 INT 13h 读取磁盘）时，通过 `prot_to_real` 切换回实模式
    - `prot_to_real` 会恢复实模式的 IDT（IVT），然后调用 BIOS 服务
    - 调用完成后，再次通过 `real_to_prot` 切换回保护模式
+
+**⚠️ 关键问题：保护模式下发生硬件中断怎么办？**
+
+**问题：如果 GRUB 在保护模式下运行时，发生了硬件中断（如键盘按键、定时器中断等）怎么办？**
+
+**答案：GRUB 在保护模式下不需要处理硬件中断，原因如下：**
+
+1. **中断被禁用（`cli`）**：
+   - GRUB 在保护模式下执行 `cli` 禁用中断
+   - CPU 的 IF（Interrupt Flag）标志被清除
+   - **硬件中断请求会被 PIC（可编程中断控制器）记录，但 CPU 不会响应**
+   - 中断请求会保持"挂起"（pending）状态，直到中断被重新启用
+
+2. **中断挂起机制**：
+   - 当硬件设备（如键盘、定时器）产生中断请求时，PIC 会记录这个请求
+   - 如果 CPU 的 IF 标志为 0（中断禁用），PIC 会保持中断请求为挂起状态
+   - **中断不会丢失**：当重新启用中断时（`sti`），挂起的中断会被立即处理
+
+3. **GRUB 不需要处理硬件中断**：
+   - **GRUB 是引导加载程序**，不是操作系统，不需要响应实时硬件事件
+   - GRUB 的主要任务是：
+     - 加载配置文件（`grub.cfg`）
+     - 显示启动菜单（等待用户选择）
+     - 加载 Linux 内核
+   - **关键点：用户交互（键盘输入）的处理方式**：
+     - **菜单显示循环**：运行在保护模式下（`grub-core/normal/menu.c`）
+     - **键盘输入读取**：通过 `grub_getkey()` → `grub_console_getkey()` → `grub_bios_interrupt (0x16, &regs)` 实现
+     - **BIOS 服务调用**：`grub_bios_interrupt` 会切换到实模式，调用 BIOS 的 INT 16h 服务读取键盘
+     - **BIOS 处理中断**：在实模式下，BIOS 的 INT 16h 服务会处理键盘硬件中断（IRQ 1）
+     - **切换回保护模式**：读取完成后，切换回保护模式继续菜单循环
+   - **因此**：GRUB 不需要自己处理键盘硬件中断，而是通过 BIOS 服务间接获取键盘输入
+
+4. **切换到实模式时的处理**：
+   - 当 GRUB 需要调用 BIOS 服务（如读取磁盘）时，会通过 `prot_to_real` 切换回实模式
+   - `prot_to_real` 函数在返回前会执行 `sti`（第 275 行），重新启用中断
+   - **此时，任何挂起的中断会被处理**：
+     - 如果挂起的是键盘中断，BIOS 会处理它
+     - 如果挂起的是定时器中断，BIOS 会处理它
+     - 这些中断由 BIOS 的 IVT 处理程序处理，GRUB 不需要关心
+
+5. **设计优势**：
+   - **简化代码**：GRUB 不需要实现中断处理程序
+   - **减少复杂性**：不需要管理 IDT、中断优先级等
+   - **快速执行**：保护模式下的代码执行时间短，中断禁用的时间窗口很小
+   - **安全性**：避免在空 IDT 状态下处理中断导致系统崩溃
+
+**总结：GRUB 在保护模式下禁用中断，硬件中断请求会被挂起。当切换到实模式并重新启用中断时，挂起的中断会由 BIOS 处理。GRUB 本身不需要处理任何硬件中断。**
+
+**📝 详细说明：GRUB 菜单显示和键盘输入的处理流程**
+
+**源代码分析：**
+
+1. **菜单显示循环**（`grub-core/normal/menu.c:615-644`）：
+   ```c
+   // 菜单循环在保护模式下运行
+   while (1) {
+       int key;
+       key = grub_getkey_noblock ();  // 非阻塞读取键盘
+       if (key != GRUB_TERM_NO_KEY) {
+           // 处理按键
+       }
+       // ... 其他逻辑
+   }
+   ```
+
+2. **键盘输入读取**（`grub-core/term/i386/pc/console.c:203-239`）：
+   ```c
+   static int
+   grub_console_getkey (struct grub_term_input *term)
+   {
+       struct grub_bios_int_registers regs;
+       
+       // 步骤 1: 检查是否有按键等待（INT 16h, AH=0x01）
+       regs.eax = 0x0100;
+       regs.flags = GRUB_CPU_INT_FLAGS_DEFAULT;
+       grub_bios_interrupt (0x16, &regs);  // 切换到实模式，调用 BIOS
+       
+       if (regs.flags & GRUB_CPU_INT_FLAGS_ZERO)
+           return GRUB_TERM_NO_KEY;  // 没有按键
+       
+       // 步骤 2: 读取按键（INT 16h, AH=0x00）
+       regs.eax = 0x0000;
+       regs.flags = GRUB_CPU_INT_FLAGS_DEFAULT;
+       grub_bios_interrupt (0x16, &regs);  // 切换到实模式，调用 BIOS
+       
+       // 返回按键值
+       return regs.eax & 0xff;
+   }
+   ```
+
+3. **BIOS 中断调用**（`grub-core/kern/i386/int.S:19-134`）：
+   ```asm
+   FUNCTION(grub_bios_interrupt)
+       // 步骤 1: 保存寄存器（在保护模式下）
+       pushf
+       cli
+       popf
+       // ... 保存其他寄存器
+       
+       // 步骤 2: 准备 BIOS 中断参数
+       movb %al, intno  // 中断号（如 0x16）
+       // ... 准备寄存器值
+       
+       // 步骤 3: 切换到实模式
+       PROT_TO_REAL     // 调用 prot_to_real
+       .code16          // 现在在实模式下
+       
+       // 步骤 4: 执行 BIOS 中断调用
+       .byte 0xcd       // INT 指令的操作码
+   intno:
+       .byte 0          // 中断号（如 0x16）
+       // ⚠️ 关键：此时在实模式下，CPU 使用 IVT
+       // BIOS 的 INT 16h 处理程序会：
+       //   1. 处理键盘硬件中断（IRQ 1）
+       //   2. 从键盘缓冲区读取扫描码
+       //   3. 返回 ASCII 字符和扫描码
+       
+       // 步骤 5: 切换回保护模式
+       REAL_TO_PROT     // 调用 real_to_prot
+       .code32          // 现在在保护模式下
+       
+       // 步骤 6: 恢复寄存器并返回
+       // ... 恢复寄存器
+       ret
+   ```
+
+**完整流程：**
+
+```
+保护模式（菜单循环，menu.c）
+    ↓
+调用 grub_getkey_noblock()
+    ↓
+调用 grub_console_getkey()
+    ↓
+调用 grub_bios_interrupt (0x16, &regs)
+    ↓
+PROT_TO_REAL（prot_to_real）
+    ├─ 保存保护模式 IDT（空）
+    ├─ 恢复实模式 IDT（IVT）
+    ├─ 清除 CR0.PE 位（退出保护模式）
+    └─ 执行 sti（重新启用中断）
+    ↓
+实模式（CPU 现在使用 IVT，中断已启用）
+    ↓
+执行 INT 16h 指令
+    ├─ CPU 使用 IVT[0x16] 查找 BIOS 处理程序
+    ├─ 跳转到 BIOS 的 INT 16h 处理程序
+    ├─ BIOS 处理程序：
+    │   ├─ 如果键盘缓冲区为空，等待键盘中断（IRQ 1）
+    │   ├─ 键盘硬件中断发生时，BIOS 处理程序处理中断
+    │   ├─ 从键盘缓冲区读取扫描码
+    │   └─ 返回 ASCII 字符和扫描码
+    └─ BIOS 返回，CPU 继续执行
+    ↓
+REAL_TO_PROT（real_to_prot）
+    ├─ 保存实模式 IDT（IVT）
+    ├─ 加载保护模式 IDT（空）
+    ├─ 设置 CR0.PE 位（进入保护模式）
+    └─ 执行 cli（禁用中断）
+    ↓
+保护模式（菜单循环继续，获得按键值）
+```
+
+**关键点：**
+
+1. **菜单循环在保护模式下运行**：菜单显示、超时处理、选择逻辑等都在保护模式下执行
+
+2. **键盘输入通过 BIOS 服务获取**：
+   - 每次读取键盘时，都会切换到实模式
+   - 在实模式下调用 BIOS 的 INT 16h 服务
+   - BIOS 服务会处理键盘硬件中断（IRQ 1）
+   - 返回按键值后，切换回保护模式
+
+3. **不需要 GRUB 处理硬件中断**：
+   - GRUB 不需要实现键盘中断处理程序
+   - BIOS 的 INT 16h 服务已经处理了所有键盘硬件中断
+   - GRUB 只需要调用 BIOS 服务，然后获取结果
+
+4. **中断处理的时机和按键存储机制**：
+   - **保护模式下按键发生时**：
+     - 键盘硬件产生中断请求（IRQ 1）
+     - 由于保护模式下中断被禁用（`cli`），中断请求被 PIC 挂起（pending）
+     - **按键数据不会立即存入缓冲区**（因为 BIOS 的键盘中断处理程序还没有执行）
+   - **切换到实模式后**：
+     - `prot_to_real` 执行 `sti`，重新启用中断
+     - **挂起的中断会被立即处理**：BIOS 的键盘中断处理程序（INT 09h）会执行
+     - BIOS 处理程序从键盘控制器读取扫描码，转换为按键码，存入 BIOS 的键盘缓冲区（BDA）
+   - **调用 INT 16h 读取按键**：
+     - 如果缓冲区为空，INT 16h 会等待键盘中断（此时挂起的中断会被处理）
+     - 如果缓冲区有数据，直接从缓冲区读取并返回
+   - **关键理解**：
+     - **不是 CPU 保存按键状态**，而是 **BIOS 的键盘缓冲区**保存按键数据
+     - **按键数据在切换到实模式后才被处理**：挂起的中断在实模式下被处理，数据存入缓冲区
+     - **GRUB 通过主动调用 BIOS 服务来读取**：程序循环调用 `grub_getkey()`，切换到实模式，调用 INT 16h，从缓冲区读取按键
+
+**📝 详细说明：挂起的中断保存在哪里？**
+
+**答案：挂起的中断保存在 PIC（8259A 可编程中断控制器）的内部寄存器中。**
+
+**PIC 的内部寄存器结构：**
+
+8259A PIC 有三个重要的内部寄存器，用于管理中断请求：
+
+1. **IRR（Interrupt Request Register，中断请求寄存器）**：
+   - **位置**：PIC 芯片内部（硬件寄存器）
+   - **大小**：8 位（主 PIC 和从 PIC 各有一个）
+   - **作用**：记录哪些 IRQ 线有**挂起的中断请求**
+   - **工作原理**：
+     - 当硬件设备（如键盘）产生中断请求时，PIC 会在 IRR 中设置相应的位
+     - 例如：键盘（IRQ1）产生中断时，IRR 的第 1 位（bit 1）被设置为 1
+     - **即使 CPU 的 IF 标志为 0（中断禁用），IRR 中的位仍然会被设置**
+     - 这就是"挂起"（pending）状态的存储位置
+
+2. **ISR（In-Service Register，正在服务寄存器）**：
+   - **位置**：PIC 芯片内部（硬件寄存器）
+   - **大小**：8 位（主 PIC 和从 PIC 各有一个）
+   - **作用**：记录哪些中断**正在被 CPU 处理**
+   - **工作原理**：
+     - 当 PIC 向 CPU 发送中断信号，CPU 响应后，PIC 会将 IRR 中的位清除，并在 ISR 中设置相应的位
+     - 中断处理完成后，需要发送 EOI（End of Interrupt）给 PIC，PIC 才会清除 ISR 中的位
+
+3. **IMR（Interrupt Mask Register，中断屏蔽寄存器）**：
+   - **位置**：PIC 芯片内部（硬件寄存器）
+   - **大小**：8 位（主 PIC 和从 PIC 各有一个）
+   - **作用**：记录哪些 IRQ 被**软件屏蔽**（禁用）
+   - **工作原理**：
+     - 如果某个 IRQ 在 IMR 中被屏蔽，即使硬件产生中断请求，PIC 也不会在 IRR 中设置相应的位
+     - 这是软件层面的屏蔽，与 CPU 的 IF 标志（`cli`/`sti`）不同
+
+**挂起中断的存储机制：**
+
+```
+保护模式下按键发生时：
+    ↓
+键盘硬件产生中断请求（IRQ1）
+    ↓
+PIC 在 IRR 中设置 bit 1（IRR[1] = 1）
+    ↓
+PIC 检查 CPU 的 IF 标志（通过 INTA 信号）
+    ↓
+IF = 0（中断禁用）→ PIC 不向 CPU 发送中断信号
+    ↓
+IRR[1] = 1 保持设置状态（挂起状态）
+    ↓
+切换到实模式后：
+    ↓
+执行 sti（IF = 1，中断启用）
+    ↓
+PIC 检测到 IF = 1，向 CPU 发送中断信号
+    ↓
+CPU 响应中断，PIC 清除 IRR[1]，设置 ISR[1]
+    ↓
+CPU 跳转到 BIOS 的键盘中断处理程序（INT 09h）
+    ↓
+BIOS 处理程序读取扫描码，存入键盘缓冲区
+    ↓
+发送 EOI 给 PIC，PIC 清除 ISR[1]
+```
+
+**关键点：**
+
+1. **挂起状态存储在 PIC 的 IRR 寄存器中**：
+   - IRR 是 PIC 芯片内部的硬件寄存器
+   - 每个 IRQ 对应 IRR 中的一个位
+   - 当硬件产生中断请求时，PIC 会在 IRR 中设置相应的位
+   - **即使 CPU 中断被禁用，IRR 中的位仍然会被设置**
+
+2. **PIC 与 CPU 的交互**：
+   - PIC 通过 INTR 引脚向 CPU 发送中断信号
+   - CPU 通过 IF 标志控制是否响应中断
+   - 如果 IF = 0，PIC 不会发送中断信号，但 IRR 中的位仍然保持设置
+
+3. **中断处理的时机**：
+   - 当 IF 从 0 变为 1（执行 `sti`）时，PIC 会检查 IRR
+   - 如果 IRR 中有设置的位，PIC 会立即向 CPU 发送中断信号
+   - CPU 响应后，PIC 会清除 IRR 中的位，设置 ISR 中的位
+
+4. **PIC 寄存器访问**：
+   - PIC 的寄存器通过 I/O 端口访问（主 PIC：0x20-0x21，从 PIC：0xA0-0xA1）
+   - 可以通过 `inb`/`outb` 指令读取/写入 PIC 寄存器
+   - 但通常不需要直接访问，PIC 会自动管理 IRR 和 ISR
+
+**总结：**
+- **挂起的中断保存在 PIC 的 IRR（Interrupt Request Register）寄存器中**
+- **IRR 是 PIC 芯片内部的硬件寄存器**，每个 IRQ 对应一个位
+- **即使 CPU 中断被禁用（`cli`），IRR 中的位仍然会被设置**
+- **当重新启用中断（`sti`）时，PIC 会检查 IRR，如果有挂起的中断，会立即发送给 CPU**
+
+**📝 详细说明：中断挂起时，具体的按键值保存在哪里？**
+
+**答案：按键值（扫描码）保存在键盘控制器（8042/PS2）的输出缓冲区（Output Buffer）中。**
+
+**键盘控制器的物理位置：**
+
+1. **历史实现（IBM PC/AT，1984 年）**：
+   - 8042 是一个**独立的芯片**，直接焊接在主板上
+   - 物理位置：主板上，通常靠近键盘接口（PS/2 接口）
+   - 芯片型号：Intel 8042 或兼容芯片（如 VIA VT82C42、Winbond W83C42、Holtek HT6542 等）
+
+2. **现代实现（1990 年代至今）**：
+   - 8042 的功能已经**集成到芯片组（Chipset）**中
+   - 物理位置：芯片组内部（如南桥芯片或 I/O 控制器）
+   - **不再是独立的芯片**，而是芯片组的一部分
+   - 功能完全兼容：软件接口（I/O 端口 0x60、0x64）保持不变
+
+3. **关键点**：
+   - **无论物理实现如何，软件接口都是相同的**（I/O 端口 0x60、0x64）
+   - 从软件角度看，键盘控制器的行为完全一致
+   - 物理位置的变化不影响编程接口
+
+**键盘控制器的输出缓冲区：**
+
+1. **位置**：键盘控制器（8042）内部（无论是独立芯片还是芯片组集成）
+2. **大小**：通常只能保存**1 个字节**（一个扫描码）
+3. **访问方式**：通过 I/O 端口 0x60 读取
+4. **状态指示**：通过 I/O 端口 0x64 的状态寄存器中的 OBF（Output Buffer Full）位表示
+
+**完整的数据流：**
+
+```
+用户按下键盘
+    ↓
+键盘硬件产生扫描码
+    ↓
+键盘控制器（8042）接收扫描码
+    ↓
+键盘控制器将扫描码存入输出缓冲区（1 字节）
+    ↓
+键盘控制器设置状态寄存器的 OBF 位（bit 0 = 1）
+    ↓
+键盘控制器通过 IRQ1 向 PIC 发送中断请求
+    ↓
+PIC 在 IRR[1] 中设置位（IRR[1] = 1）
+    ↓
+如果 CPU 中断被禁用（IF = 0）：
+    ├─ PIC 不向 CPU 发送中断信号
+    ├─ IRR[1] = 1 保持设置（挂起状态）
+    └─ 扫描码留在键盘控制器的输出缓冲区中
+    ↓
+切换到实模式，执行 sti（IF = 1）
+    ↓
+PIC 检测到 IF = 1，向 CPU 发送中断信号
+    ↓
+CPU 响应中断，跳转到 BIOS 键盘中断处理程序（INT 09h）
+    ↓
+BIOS 处理程序：
+    ├─ 读取状态端口（0x64）检查 OBF 位
+    ├─ 从数据端口（0x60）读取扫描码（从键盘控制器的输出缓冲区读取）
+    ├─ 处理扫描码，转换为按键码
+    └─ 存入 BIOS 的键盘缓冲区（BDA）
+```
+
+**关键点：**
+
+1. **扫描码保存在键盘控制器的输出缓冲区中**：
+   - 键盘控制器（8042）有一个内部的输出缓冲区
+   - 当按键发生时，扫描码会被存入这个缓冲区
+   - 缓冲区大小通常只有 1 字节（一个扫描码）
+   - 通过 I/O 端口 0x60 可以读取这个缓冲区中的扫描码
+
+2. **状态寄存器（0x64）的 OBF 位**：
+   - OBF（Output Buffer Full）= 1：表示输出缓冲区有数据可读
+   - OBF = 0：表示输出缓冲区为空
+   - BIOS 中断处理程序会检查这个位，确认是否有数据可读
+
+3. **连续按键的处理**：
+   - **键盘控制器的输出缓冲区只能保存 1 个扫描码**
+   - 如果连续按多个键：
+     - 第一个扫描码在输出缓冲区中
+     - 后续的扫描码会等待，直到第一个被读取
+     - 或者可能会丢失（取决于键盘控制器的设计）
+   - **键盘控制器会通过 IRQ1 持续发送中断请求**，直到所有扫描码被读取
+
+4. **中断挂起时的状态**：
+   - **PIC 的 IRR[1] = 1**：表示有键盘中断请求（挂起状态）
+   - **键盘控制器的输出缓冲区**：包含一个扫描码（等待读取）
+   - **状态寄存器的 OBF 位 = 1**：表示输出缓冲区有数据
+
+5. **切换到实模式后的处理**：
+   - 中断被重新启用（`sti`）
+   - PIC 发送中断信号
+   - BIOS 中断处理程序执行
+   - 从键盘控制器的输出缓冲区（端口 0x60）读取扫描码
+   - 处理扫描码，存入 BIOS 的键盘缓冲区
+
+**源代码证据：**
+
+**BIOS 键盘中断处理程序（`seabios/src/kbd.c:1558-1589`）：**
+```c
+void VISIBLE16
+handle_09(void)
+{
+    // 读取键盘控制器状态（检查 OBF 位）
+    u8 v = inb(PORT_PS2_STATUS);  // PORT_PS2_STATUS = 0x64
+    
+    // 从键盘控制器读取扫描码（从输出缓冲区读取）
+    v = inb(PORT_PS2_DATA);  // PORT_PS2_DATA = 0x60
+    
+    // 处理扫描码
+    process_key(v);
+}
+```
+
+**关键理解：**
+
+- **PIC 的 IRR**：只记录"有中断请求"（位图），不保存具体的按键值
+- **键盘控制器的输出缓冲区**：保存具体的扫描码（1 字节）
+- **BIOS 的键盘缓冲区**：保存处理后的按键码（16 个按键码，每个 2 字节）
+
+**数据存储层次：**
+
+```
+层次 1：键盘控制器输出缓冲区（硬件）
+  ├─ 位置：8042 芯片内部
+  ├─ 大小：1 字节（一个扫描码）
+  └─ 访问：I/O 端口 0x60
+
+层次 2：PIC 的 IRR 寄存器（硬件）
+  ├─ 位置：8259A PIC 芯片内部
+  ├─ 大小：8 位（位图）
+  └─ 作用：记录"有中断请求"（不保存具体值）
+
+层次 3：BIOS 键盘缓冲区（软件）
+  ├─ 位置：BDA（BIOS Data Area）
+  ├─ 大小：32 字节（16 个按键码）
+  └─ 访问：通过 BDA 指针访问
+```
+
+**总结：**
+- **中断挂起时，具体的按键值（扫描码）保存在键盘控制器（8042）的输出缓冲区中**
+- **输出缓冲区通过 I/O 端口 0x60 访问**
+- **状态寄存器（0x64）的 OBF 位指示是否有数据可读**
+- **键盘控制器的输出缓冲区通常只能保存 1 个扫描码**
+- **连续按键时，后续扫描码会等待或可能丢失**
+
+**⚠️ 重要限制：连续按键的保存能力**
+
+**问题：如果按了一堆按键，全都能保存吗？**
+
+**答案：不能全部保存，有两个层面的限制：**
+
+**1. PIC 的 IRR 寄存器限制：**
+
+- **IRR 是位图寄存器**：每个 IRQ 对应一个位（0 或 1）
+- **只能表示"有"或"没有"**：IRR[1] = 1 表示"有键盘中断请求"，但不能表示"有多少个按键"
+- **连续按键的处理**：
+  - 每个按键都会触发一次 IRQ1 中断请求
+  - 如果中断被禁用，每个中断请求都会在 IRR[1] 中设置位
+  - **但由于是同一个 IRQ，IRR[1] 只能保持为 1**（不能累加）
+  - 当切换到实模式并启用中断后，**只会处理一个中断**（第一个挂起的中断）
+  - 处理完成后，如果键盘控制器还在发送中断请求，会再次触发中断
+
+**2. BIOS 键盘缓冲区的限制：**
+
+- **缓冲区大小**：32 字节（16 个按键码，每个按键码占 2 字节）
+- **位置**：BDA（BIOS Data Area）中的 `kbd_buf` 字段
+- **循环缓冲区**：使用 `kbd_buf_head` 和 `kbd_buf_tail` 指针管理
+- **缓冲区满的处理**：
+  ```c
+  // seabios/src/kbd.c:32-52
+  u8 enqueue_key(u16 keycode)
+  {
+      // ...
+      if (buffer_tail == buffer_head)
+          return 0;  // 缓冲区满，返回失败
+      // ...
+  }
+  ```
+  - 如果缓冲区满了（`buffer_tail == buffer_head`），`enqueue_key()` 会返回 0
+  - **新的按键数据会丢失**（不会被存入缓冲区）
+
+**实际场景分析：**
+
+**场景 1：保护模式下快速按多个键**
+
+```
+保护模式（中断禁用）：
+按键 1 → IRR[1] = 1（挂起）
+按键 2 → IRR[1] = 1（仍然是 1，不能累加）
+按键 3 → IRR[1] = 1（仍然是 1，不能累加）
+...
+按键 N → IRR[1] = 1（仍然是 1，不能累加）
+
+切换到实模式（中断启用）：
+    ↓
+PIC 检测到 IRR[1] = 1 → 发送中断信号
+    ↓
+CPU 响应中断 → BIOS 键盘中断处理程序执行
+    ↓
+读取键盘控制器 → 获取扫描码（可能是按键 1、2、3... 中的任意一个）
+    ↓
+转换为按键码 → 存入键盘缓冲区
+    ↓
+发送 EOI → PIC 清除 IRR[1]
+    ↓
+如果键盘控制器还有数据 → 再次触发 IRQ1 → IRR[1] = 1
+    ↓
+重复上述过程，直到键盘控制器的数据被读取完
+```
+
+**关键点：**
+- **PIC 的 IRR 只能记录"有中断请求"，不能记录"有多少个"**
+- **每个按键都会触发一次中断**，但中断被禁用时，这些中断请求会被"合并"（IRR[1] 保持为 1）
+- **切换到实模式后，会逐个处理这些中断**，但处理速度取决于中断处理程序的执行速度
+
+**场景 2：缓冲区满的情况**
+
+```
+保护模式下按了 20 个键：
+    ↓
+切换到实模式，开始处理中断
+    ↓
+前 16 个按键 → 成功存入缓冲区
+    ↓
+第 17 个按键 → 缓冲区满（buffer_tail == buffer_head）
+    ↓
+enqueue_key() 返回 0 → 按键丢失
+    ↓
+第 18、19、20 个按键 → 全部丢失
+```
+
+**关键点：**
+- **BIOS 键盘缓冲区只能保存 16 个按键**
+- **如果缓冲区满了，新的按键会丢失**
+- **GRUB 需要及时读取缓冲区**，避免缓冲区满导致按键丢失
+
+**GRUB 的处理策略：**
+
+1. **频繁轮询**：
+   - GRUB 的菜单循环会频繁调用 `grub_getkey_noblock()`（非阻塞读取）
+   - 这样可以及时从缓冲区读取按键，避免缓冲区满
+
+2. **快速处理**：
+   - 每次切换到实模式读取键盘时，会尽可能快地处理
+   - 减少在保护模式下的时间，增加切换到实模式的频率
+
+3. **实际限制**：
+   - 如果用户在保护模式下快速按了很多键（超过 16 个），部分按键可能会丢失
+   - 但在实际使用中，GRUB 的菜单循环会频繁切换到实模式读取键盘，通常不会出现缓冲区满的情况
+
+**总结：**
+- **PIC 的 IRR 寄存器**：只能记录"有中断请求"（位图），不能记录"有多少个"
+- **BIOS 键盘缓冲区**：只能保存 16 个按键（32 字节）
+- **连续按键的处理**：会逐个处理，但如果缓冲区满了，新的按键会丢失
+- **实际使用**：GRUB 的频繁轮询机制通常可以避免按键丢失
 
 **⚠️ 重要风险：空 IDT 与 CPU 异常处理**
 
@@ -648,3 +1196,227 @@ REAL_TO_PROT（real_to_prot）
 > **注意**：关于 A20 地址线的详细技术说明，请参见 [A20 地址线技术详解](A20_ADDRESS_LINE.md)。
 
 > **相关文档**：关于 `grub_bios_interrupt` 的使用场景和调用时机，请参见 [GRUB 在保护模式下调用 BIOS 服务的使用场景](GRUB_BIOS_INTERRUPT_USAGE.md)。
+
+---
+
+## UEFI 模式说明
+
+**重要：本文档前面描述的模式切换机制（`real_to_prot`、`prot_to_real`、`grub_bios_interrupt`）仅适用于 BIOS 模式（i386_pc）。UEFI 模式（i386_efi/x86_64_efi）的实现完全不同。**
+
+### UEFI 模式的关键差异
+
+**1. UEFI 固件已经在保护模式/长模式下运行：**
+
+- **UEFI 固件本身**：在保护模式（32位）或长模式（64位）下运行
+- **GRUB 启动时**：直接以保护模式/长模式启动，**不需要模式切换**
+- **无需 `real_to_prot`**：GRUB 启动时已经在保护模式/长模式下
+- **无需 `prot_to_real`**：不需要切换回实模式
+
+**2. 使用 EFI 服务而不是 BIOS 中断：**
+
+- **BIOS 模式**：通过 `grub_bios_interrupt()` 调用 BIOS 中断服务（INT 10h, INT 13h, INT 16h 等）
+- **UEFI 模式**：直接调用 EFI 服务（函数调用接口）
+- **无需模式切换**：EFI 服务在保护模式/长模式下直接可用
+
+**3. GRUB 源代码对比：**
+
+**BIOS 模式（i386_pc）的启动代码**（`grub-core/kern/i386/pc/startup.S`）：
+```asm
+_start:
+    // 接收参数（通过寄存器）
+    // %esi = 解压后的代码基址（0x100000）
+    // %edi = prot_to_real 函数地址
+    // %ecx = real_to_prot 函数地址
+    // %eax = realidt 地址
+    // %edx = 启动设备号
+    
+    // 保存模式切换函数地址
+    movl %ecx, (LOCAL(real_to_prot_addr) - _start) (%esi)
+    movl %edi, (LOCAL(prot_to_real_addr) - _start) (%esi)
+    // ... 清理 BSS、调用 grub_main()
+```
+
+**UEFI 模式（i386_efi）的启动代码**（`grub-core/kern/i386/efi/startup.S`）：
+```asm
+_start:
+    /*
+     * EFI_SYSTEM_TABLE * and EFI_HANDLE are passed on the stack.
+     */
+    movl 4(%esp), %eax
+    movl %eax, EXT_C(grub_efi_image_handle)
+    movl 8(%esp), %eax
+    movl %eax, EXT_C(grub_efi_system_table)
+    call EXT_C(grub_main)
+    ret
+```
+
+**关键差异：**
+- **BIOS 模式**：需要保存 `real_to_prot` 和 `prot_to_real` 函数地址，用于后续模式切换
+- **UEFI 模式**：直接保存 `EFI_SYSTEM_TABLE` 和 `EFI_HANDLE`，用于调用 EFI 服务
+- **UEFI 模式没有模式切换函数**：因为不需要切换模式
+
+**4. 键盘输入的实现对比：**
+
+**BIOS 模式**（`grub-core/term/i386/pc/console.c:203-239`）：
+```c
+static int
+grub_console_getkey (struct grub_term_input *term)
+{
+    struct grub_bios_int_registers regs;
+    
+    // 检查是否有按键等待（INT 16h, AH=0x01）
+    regs.eax = 0x0100;
+    grub_bios_interrupt (0x16, &regs);  // 切换到实模式，调用 BIOS
+    
+    // 读取按键（INT 16h, AH=0x00）
+    regs.eax = 0x0000;
+    grub_bios_interrupt (0x16, &regs);  // 切换到实模式，调用 BIOS
+    
+    return regs.eax & 0xff;
+}
+```
+
+**UEFI 模式**（`grub-core/term/efi/console.c:240-253`）：
+```c
+static int
+grub_console_getkey_con (struct grub_term_input *term)
+{
+    grub_efi_simple_input_interface_t *i;
+    grub_efi_input_key_t key;
+    grub_efi_status_t status;
+    
+    // 直接从 EFI_SYSTEM_TABLE 获取输入接口
+    i = grub_efi_system_table->con_in;
+    
+    // 直接调用 EFI 服务（函数调用，无需模式切换）
+    status = i->read_key_stroke (i, &key);
+    
+    if (status != GRUB_EFI_SUCCESS)
+        return GRUB_TERM_NO_KEY;
+    
+    return grub_efi_translate_key(key);
+}
+```
+
+**关键差异：**
+- **BIOS 模式**：需要调用 `grub_bios_interrupt()`，内部会切换到实模式
+- **UEFI 模式**：直接调用 EFI 服务（`read_key_stroke()`），**无需模式切换**
+
+**5. 磁盘访问的实现对比：**
+
+**BIOS 模式**（`grub-core/disk/i386/pc/biosdisk.c`）：
+```c
+// 读取磁盘扇区
+regs.eax = 0x4200;  // AH=0x42: Extended Read
+regs.edx = drive;
+// ... 设置其他寄存器
+grub_bios_interrupt (0x13, &regs);  // 切换到实模式，调用 BIOS INT 13h
+```
+
+**UEFI 模式**（`grub-core/disk/efi/efidisk.c:542-607`）：
+```c
+static grub_efi_status_t
+grub_efidisk_readwrite (struct grub_disk *disk, grub_disk_addr_t sector,
+                        grub_size_t size, char *buf, int wr)
+{
+    struct grub_efidisk_data *d;
+    grub_efi_block_io_t *bio;
+    grub_efi_status_t status;
+    
+    d = disk->data;
+    bio = d->block_io;  // 从 EFI 协议获取 Block I/O 接口
+    
+    // 直接调用 EFI Block I/O 服务（函数调用，无需模式切换）
+    if (wr)
+        status = bio->write_blocks (bio, bio->media->media_id, sector, 
+                                     num_bytes, buf);
+    else
+        status = bio->read_blocks (bio, bio->media->media_id, sector, 
+                                   num_bytes, buf);
+    
+    return status;
+}
+```
+
+**关键差异：**
+- **BIOS 模式**：需要调用 `grub_bios_interrupt (0x13, &regs)`，内部会切换到实模式
+- **UEFI 模式**：直接调用 EFI Block I/O 协议的服务（`read_blocks()`/`write_blocks()`），**无需模式切换**
+
+**6. 源代码验证：**
+
+**验证 UEFI 模式不使用模式切换函数：**
+```bash
+# 在 UEFI 平台代码中搜索模式切换函数
+$ grep -rn "real_to_prot\|prot_to_real\|grub_bios_interrupt" \
+    grub-core/kern/i386/efi/ \
+    grub-core/term/efi/ \
+    grub-core/disk/efi/
+# 结果：没有找到任何匹配
+```
+
+**验证 UEFI 模式使用 EFI 服务：**
+```bash
+# 在 UEFI 平台代码中搜索 EFI 服务调用
+$ grep -rn "grub_efi_system_table\|EFI_SYSTEM_TABLE\|read_key_stroke\|read_blocks" \
+    grub-core/term/efi/ \
+    grub-core/disk/efi/
+# 结果：找到大量 EFI 服务调用
+```
+
+**7. 平台特定的代码组织：**
+
+**GRUB 的构建系统**（`grub-core/Makefile.core.def`）：
+```def
+kernel = {
+  name = kernel;
+  
+  // BIOS 平台
+  i386_pc_startup = kern/i386/pc/startup.S;
+  
+  // UEFI 平台
+  i386_efi_startup = kern/i386/efi/startup.S;
+  x86_64_efi_startup = kern/x86_64/efi/startup.S;
+  
+  // 平台特定的源文件
+  i386_pc = kern/i386/pc/init.c;      // BIOS 初始化
+  i386_efi = kern/i386/efi/init.c;    // UEFI 初始化
+  
+  // 平台特定的终端驱动
+  i386_pc = term/i386/pc/console.c;   // BIOS 控制台（使用 INT 16h）
+  efi = term/efi/console.c;          // UEFI 控制台（使用 EFI 服务）
+  
+  // 平台特定的磁盘驱动
+  i386_pc = disk/i386/pc/biosdisk.c;  // BIOS 磁盘（使用 INT 13h）
+  efi = disk/efi/efidisk.c;           // UEFI 磁盘（使用 EFI Block I/O）
+}
+```
+
+**关键点：**
+- **不同的平台使用不同的源文件**：`i386_pc` vs `i386_efi`
+- **不同的服务接口**：BIOS 中断 vs EFI 服务
+- **不同的实现方式**：模式切换 vs 直接函数调用
+
+**8. 总结对比：**
+
+| 特性 | BIOS 模式（i386_pc） | UEFI 模式（i386_efi/x86_64_efi） |
+|------|---------------------|--------------------------------|
+| **启动模式** | 实模式 → 保护模式（需要切换） | 保护模式/长模式（直接启动） |
+| **模式切换函数** | `real_to_prot`、`prot_to_real` | **不需要** |
+| **BIOS 中断调用** | `grub_bios_interrupt()` | **不使用** |
+| **键盘输入** | `grub_bios_interrupt (0x16, &regs)` | `grub_efi_system_table->con_in->read_key_stroke()` |
+| **磁盘访问** | `grub_bios_interrupt (0x13, &regs)` | `bio->read_blocks()` / `bio->write_blocks()` |
+| **视频输出** | `grub_bios_interrupt (0x10, &regs)` | `grub_efi_system_table->con_out->output_string()` |
+| **中断处理** | 禁用中断，需要时切换回实模式 | **不需要处理**（UEFI 已建立 IDT） |
+| **代码复杂度** | 需要实现模式切换机制 | **更简单**（直接函数调用） |
+
+**结论：**
+
+- **你的理解完全正确**：UEFI 已经运行在保护模式/长模式下，所以不需要 `real_to_prot` 和 `prot_to_real` 的来回切换
+- **GRUB 对 UEFI 有完全不同的支持**：
+  - 使用不同的启动代码（`kern/i386/efi/startup.S`）
+  - 使用不同的服务接口（EFI 服务而不是 BIOS 中断）
+  - 使用不同的驱动实现（`term/efi/console.c`、`disk/efi/efidisk.c`）
+- **UEFI 模式的优势**：
+  - **更简单**：不需要模式切换，直接函数调用
+  - **更安全**：UEFI 已建立完整的 IDT，可以处理中断
+  - **更现代**：使用标准接口（EFI 协议），而不是硬件特定的中断
