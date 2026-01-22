@@ -2536,7 +2536,7 @@ startup_raw.S（实模式入口点，0x8200）
             ├─ `%edi` = `prot_to_real` 函数地址
             ├─ `%ecx` = `real_to_prot` 函数地址
             └─ `%eax` = `LOCAL(realidt)` 地址（实模式 IDT 地址）
-        > **详细证明**：关于 `startup_raw.S` 解压后如何跳转到 `startup.S` 的完整证明过程（包括链接地址、运行地址、位置无关代码等），请参见 [GRUB startup_raw.S 解压后跳转到 startup.S 的证明](GRUB_STARTUP_RAW_TO_STARTUP_PROOF.md)。
+        > **详细证明**：关于 `startup_raw.S` 解压后如何跳转到 `startup.S` 的完整证明过程（包括链接地址、运行地址、位置无关代码等），请参见 [GRUB startup_raw.S 解压后跳转到 startup.S 的证明](GRUB_STARTUP_RAW_TO_STARTUP_PROOF.md)。关于构建系统如何确保 `startup.S` 是第一个链接的文件，请参见 [i386_pc_startup 变量在 GRUB 构建系统中的使用说明](GRUB_I386_PC_STARTUP_USAGE.md)。
         ↓
 startup.S（_start，解压后的代码入口点，0x100000）
     ├─ **源代码位置**：`grub/grub-core/kern/i386/pc/startup.S:56-124`
@@ -2568,6 +2568,7 @@ grub_main() 执行
 - **初始化**：`_start` 负责保存模式切换函数地址、清理 BSS 段，然后调用 `grub_main()`
 - **压缩格式**：前约 4.1KB 未压缩 + 后约 24KB LZMA 压缩，解压到 1MB 以上
 - > **详细证明**：关于 `startup_raw.S` 解压后如何跳转到 `startup.S` 的完整证明过程（包括链接地址、运行地址、位置无关代码、链接器工作原理等），请参见 [GRUB startup_raw.S 解压后跳转到 startup.S 的证明](GRUB_STARTUP_RAW_TO_STARTUP_PROOF.md)。
+- > **构建系统说明**：关于 `i386_pc_startup` 变量如何在 GRUB 构建系统中确保 `startup.S` 是第一个链接的文件，请参见 [i386_pc_startup 变量在 GRUB 构建系统中的使用说明](GRUB_I386_PC_STARTUP_USAGE.md)。
 
 **步骤 8 的详细源代码分析：**
 
