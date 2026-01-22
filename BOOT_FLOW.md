@@ -2468,7 +2468,7 @@ post_reed_solomon:
 
 ```
 startup_raw.S（实模式入口点，0x8200）
-    ├─ 源代码位置：grub/grub-core/boot/i386/pc/startup_raw.S
+    ├─ 源代码位置：`grub/grub-core/boot/i386/pc/startup_raw.S`
     ├─ 运行模式：实模式
     ├─ 步骤 1: 初始化实模式环境
     │   ├─ 设置段寄存器（ds, ss, es）
@@ -2513,10 +2513,10 @@ startup_raw.S（实模式入口点，0x8200）
             ├─ `%ecx` = `real_to_prot` 函数地址
             └─ `%eax` = `LOCAL(realidt)` 地址（实模式 IDT 地址）
         ↓
-_start（startup.S，解压后的代码入口点）
+startup.S（_start，解压后的代码入口点，0x100000）
     ├─ **源代码位置**：`grub/grub-core/kern/i386/pc/startup.S:56-124`
     ├─ **内存位置**：`0x100000`（1MB，解压后的位置）
-    ├─ **运行模式**：保护模式
+    ├─ **运行模式**：保护模式（32 位）
     ├─ **函数签名**：`void _start(grub_addr_t esi, grub_addr_t edi, grub_addr_t ecx, grub_addr_t eax, grub_addr_t edx)`
     ├─ **执行步骤**：
     │   ├─ **步骤 1**：保存模式切换函数地址和 realidt 地址
@@ -2629,7 +2629,7 @@ LZMA 解压完成，%esi = 0x100000
     ↓
 jmp *%esi（间接跳转）
     ↓
-_start（startup.S，1MB 以上，0x100000，32 位保护模式）
+startup.S（_start，解压后的代码入口点，0x100000，32 位保护模式）
     ├─ 保存模式切换函数地址（供后续使用）
     ├─ 复制代码（从 %esi=0x100000 到 _start=0x100000，通常冗余）
     ├─ 清理 BSS 段
@@ -2712,11 +2712,11 @@ grub_main()（1MB 以上，0x100000+）
    - 跳转到 GRUB Core（startup_raw.S 入口点 0x8200）
 
 3. **GRUB Core → grub_main()**：
-   - startup_raw.S 启用 A20 地址线（访问 1MB 以上内存）
-   - startup_raw.S 切换到保护模式（调用 `real_to_prot`）
-   - startup_raw.S 解压 GRUB Core（如果使用 LZMA 压缩）到 `0x100000`（1MB）
-   - 跳转到解压后的代码入口点（`_start`，`startup.S`，位于 `0x100000`，32 位保护模式）
-   - `_start`（`startup.S`）初始化 GRUB 核心功能（内存管理、设备驱动等）
+   - `startup_raw.S` 启用 A20 地址线（访问 1MB 以上内存）
+   - `startup_raw.S` 切换到保护模式（调用 `real_to_prot`）
+   - `startup_raw.S` 解压 GRUB Core（如果使用 LZMA 压缩）到 `0x100000`（1MB）
+   - 跳转到解压后的代码入口点（`startup.S` 的 `_start` 函数，位于 `0x100000`，32 位保护模式）
+   - `startup.S` 的 `_start` 函数初始化 GRUB 核心功能（内存管理、设备驱动等）
    - 调用 `grub_main()`（`grub/grub-core/kern/main.c`）
    - **此时 GRUB Core 已完全初始化，准备加载内核**
 
