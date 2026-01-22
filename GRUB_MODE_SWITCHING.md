@@ -250,6 +250,157 @@ protidt:
        ret
    ```
 
+**📝 详细说明：`grub_getkey_noblock()` 的非阻塞实现**
+
+**源代码位置：`grub-core/kern/term.c:87-105`**
+
+```c
+int
+grub_getkey_noblock (void)
+{
+    grub_term_input_t term;
+    
+    // 轮询 USB 设备（如果支持）
+    if (grub_term_poll_usb)
+        grub_term_poll_usb (0);
+    
+    // 轮询网络设备（如果支持）
+    if (grub_net_poll_cards_idle)
+        grub_net_poll_cards_idle ();
+    
+    // 遍历所有活动的终端输入设备
+    FOR_ACTIVE_TERM_INPUTS(term)
+    {
+        int key = term->getkey (term);  // 调用平台特定的 getkey 实现
+        if (key != GRUB_TERM_NO_KEY)
+            return key;  // 有按键，立即返回
+    }
+    
+    return GRUB_TERM_NO_KEY;  // 没有按键，返回"无按键"
+}
+```
+
+**关键点：`grub_getkey_noblock()` 本身不阻塞，它依赖于底层 `term->getkey()` 的实现。**
+
+**BIOS 模式下的非阻塞实现（`grub-core/term/i386/pc/console.c:203-239`）：**
+
+```c
+static int
+grub_console_getkey (struct grub_term_input *term)
+{
+    struct grub_bios_int_registers regs;
+    
+    // ⚠️ 关键步骤 1：使用 INT 16h AH=0x01 检查键盘状态（非阻塞）
+    regs.eax = 0x0100;  // AH=0x01: Check Keyboard Status
+    regs.flags = GRUB_CPU_INT_FLAGS_DEFAULT;
+    grub_bios_interrupt (0x16, &regs);  // 切换到实模式，调用 BIOS
+    
+    // 检查 Zero Flag：如果设置了，说明缓冲区为空，没有按键
+    if (regs.flags & GRUB_CPU_INT_FLAGS_ZERO)
+        return GRUB_TERM_NO_KEY;  // 立即返回，不阻塞
+    
+    // ⚠️ 关键步骤 2：只有在确认有按键后，才调用 INT 16h AH=0x00 读取按键
+    regs.eax = 0x0000;  // AH=0x00: Read Character
+    regs.flags = GRUB_CPU_INT_FLAGS_DEFAULT;
+    grub_bios_interrupt (0x16, &regs);  // 切换到实模式，调用 BIOS
+    
+    // 返回按键值
+    return regs.eax & 0xff;
+}
+```
+
+**BIOS INT 16h 的两个功能对比：**
+
+| 功能 | AH 值 | 行为 | 返回值 |
+|------|-------|------|--------|
+| **检查键盘状态** | `0x01` | **非阻塞**：只检查缓冲区是否有数据，不等待 | 如果缓冲区为空，设置 Zero Flag；如果有数据，清除 Zero Flag |
+| **读取按键** | `0x00` | **阻塞**：如果缓冲区为空，等待硬件中断直到有按键 | 返回按键码（AX 寄存器） |
+
+**BIOS INT 16h AH=0x01 的实现原理（SeaBIOS 源代码）：**
+
+```c
+// seabios/src/kbd.c:244-270
+static void
+handle_1601(struct bregs *regs)
+{
+    // 调用 dequeue_key，但 incr=0（不增加缓冲区头指针，不阻塞）
+    dequeue_key(regs, 0, 0);  // incr=0 表示非阻塞模式
+}
+
+static void
+dequeue_key(struct bregs *regs, int incr, int extended)
+{
+    u16 buffer_head = GET_BDA(kbd_buf_head);
+    u16 buffer_tail = GET_BDA(kbd_buf_tail);
+    
+    // 检查缓冲区是否为空
+    if (buffer_head == buffer_tail) {
+        // 缓冲区为空
+        if (incr) {
+            // 阻塞模式（AH=0x00）：等待硬件中断
+            yield_toirq();  // 等待键盘硬件中断
+            // 重新检查缓冲区
+            buffer_head = GET_BDA(kbd_buf_head);
+            buffer_tail = GET_BDA(kbd_buf_tail);
+        } else {
+            // 非阻塞模式（AH=0x01）：立即返回，设置 Zero Flag
+            regs->flags |= F_ZF;  // 设置 Zero Flag
+            return;
+        }
+    }
+    
+    // 缓冲区有数据，读取按键码
+    u16 keycode = GET_FARVAR(SEG_BDA, *(u16*)(buffer_head+0));
+    regs->ax = keycode;  // 返回按键码
+    
+    if (incr) {
+        // 阻塞模式：更新缓冲区头指针（消耗按键）
+        buffer_head += 2;
+        if (buffer_head >= buffer_end)
+            buffer_head = buffer_start;
+        SET_BDA(kbd_buf_head, buffer_head);
+    }
+    
+    regs->flags &= ~F_ZF;  // 清除 Zero Flag（有按键）
+}
+```
+
+**关键差异：**
+
+1. **AH=0x01（非阻塞检查）**：
+   - 调用 `dequeue_key(regs, 0, 0)`，`incr=0`
+   - 如果缓冲区为空，**立即设置 Zero Flag 并返回**，不等待
+   - 如果缓冲区有数据，返回按键码，但**不更新缓冲区头指针**（不消耗按键）
+
+2. **AH=0x00（阻塞读取）**：
+   - 调用 `dequeue_key(regs, 1, 0)`，`incr=1`
+   - 如果缓冲区为空，**调用 `yield_toirq()` 等待硬件中断**，直到有按键
+   - 如果缓冲区有数据，返回按键码，并**更新缓冲区头指针**（消耗按键）
+
+**为什么 `grub_getkey_noblock()` 需要先检查再读取？**
+
+**原因：Apple BootCamp 的 Bug**
+
+```c
+/*
+ * Due to a bug in apple's bootcamp implementation, INT 16/AH = 0 would
+ * cause the machine to hang at the second keystroke. However, we can
+ * work around this problem by ensuring the presence of keystroke with
+ * INT 16/AH = 1 before calling INT 16/AH = 0.
+ */
+```
+
+**工作流程：**
+
+1. **先调用 INT 16h AH=0x01**：检查是否有按键（非阻塞）
+   - 如果 Zero Flag 被设置 → 缓冲区为空 → 立即返回 `GRUB_TERM_NO_KEY`
+   - 如果 Zero Flag 被清除 → 缓冲区有数据 → 继续下一步
+
+2. **再调用 INT 16h AH=0x00**：读取按键（此时已知有数据，不会阻塞）
+   - 从缓冲区读取按键码
+   - 更新缓冲区头指针（消耗按键）
+   - 返回按键值
+
 **完整流程：**
 
 ```
@@ -259,7 +410,57 @@ protidt:
     ↓
 调用 grub_console_getkey()
     ↓
-调用 grub_bios_interrupt (0x16, &regs)
+调用 grub_bios_interrupt (0x16, &regs)  // AH=0x01: 检查键盘状态
+    ↓
+PROT_TO_REAL（prot_to_real）
+    ├─ 保存保护模式 IDT（空）
+    ├─ 恢复实模式 IDT（IVT）
+    ├─ 清除 CR0.PE 位（退出保护模式）
+    └─ 执行 sti（重新启用中断）
+    ↓
+实模式（CPU 现在使用 IVT，中断已启用）
+    ↓
+执行 INT 16h AH=0x01 指令
+    ├─ CPU 使用 IVT[0x16] 查找 BIOS 处理程序
+    ├─ 跳转到 BIOS 的 INT 16h 处理程序
+    ├─ BIOS 处理程序：
+    │   ├─ 检查键盘缓冲区（kbd_buf_head == kbd_buf_tail？）
+    │   ├─ 如果缓冲区为空：
+    │   │   └─ 设置 Zero Flag → 返回（非阻塞）
+    │   └─ 如果缓冲区有数据：
+    │       └─ 清除 Zero Flag → 返回（但不消耗按键）
+    └─ BIOS 返回，CPU 继续执行
+    ↓
+REAL_TO_PROT（real_to_prot）
+    ├─ 保存实模式 IDT（IVT）
+    ├─ 加载保护模式 IDT（空）
+    ├─ 设置 CR0.PE 位（进入保护模式）
+    └─ 执行 cli（禁用中断）
+    ↓
+保护模式（检查 Zero Flag）
+    ├─ 如果 Zero Flag 被设置 → 返回 GRUB_TERM_NO_KEY（没有按键）
+    └─ 如果 Zero Flag 被清除 → 继续下一步
+    ↓
+调用 grub_bios_interrupt (0x16, &regs)  // AH=0x00: 读取按键
+    ↓
+PROT_TO_REAL（prot_to_real）
+    ↓
+实模式
+    ↓
+执行 INT 16h AH=0x00 指令
+    ├─ BIOS 处理程序：
+    │   ├─ 检查键盘缓冲区
+    │   ├─ 如果缓冲区为空（理论上不会发生，因为已经检查过）：
+    │   │   └─ yield_toirq() 等待硬件中断
+    │   └─ 如果缓冲区有数据：
+    │       ├─ 从缓冲区读取按键码
+    │       ├─ 更新 kbd_buf_head（消耗按键）
+    │       └─ 返回按键码
+    └─ BIOS 返回
+    ↓
+REAL_TO_PROT（real_to_prot）
+    ↓
+保护模式（返回按键值）
     ↓
 PROT_TO_REAL（prot_to_real）
     ├─ 保存保护模式 IDT（空）
@@ -288,14 +489,200 @@ REAL_TO_PROT（real_to_prot）
 保护模式（菜单循环继续，获得按键值）
 ```
 
+**📝 键盘硬件中断 vs 软件中断的区别（SeaBIOS 实现）**
+
+**关键概念：键盘处理采用"生产者-消费者"模式**
+
+| 特性 | 硬件中断（IRQ1，向量 0x09） | 软件中断（INT 16h，向量 0x16） |
+|------|---------------------------|------------------------------|
+| **触发方式** | **硬件自动触发**（用户按下键盘） | **程序主动调用**（`INT 0x16` 指令） |
+| **中断向量** | 0x09（硬件中断向量） | 0x16（软件中断向量） |
+| **处理程序** | `handle_09()` | `handle_16()` |
+| **源代码位置** | `seabios/src/hw/ps2port.c:389-417` | `seabios/src/kbd.c:244-270` |
+| **功能角色** | **生产者**：接收键盘数据并存储到缓冲区 | **消费者**：从缓冲区读取数据并返回给程序 |
+| **执行时机** | **异步**：按键时立即触发 | **同步**：程序需要时调用 |
+| **数据流向** | 键盘硬件 → 扫描码 → 缓冲区 | 缓冲区 → 按键码 → 用户程序 |
+| **是否阻塞** | 不阻塞（硬件中断立即处理） | 可能阻塞（如果缓冲区为空，等待硬件中断） |
+
+**1. 硬件中断（IRQ1 → 向量 0x09）**
+
+**触发流程：**
+```
+用户按下键盘
+    ↓
+键盘控制器产生 IRQ1 硬件中断
+    ↓
+PIC 将 IRQ1 映射到向量 0x09
+    ↓
+CPU 查找 IVT[0x09] → entry_09 → handle_09()
+```
+
+**处理函数（`seabios/src/hw/ps2port.c:389-417`）：**
+```c
+// INT09h : Keyboard Hardware Service Entry Point
+void VISIBLE16
+handle_09(void)
+{
+    // 步骤 1: 读取键盘控制器状态
+    u8 v = inb(PORT_PS2_STATUS);  // 0x64: 状态端口
+    
+    // 步骤 2: 从键盘控制器读取扫描码
+    v = inb(PORT_PS2_DATA);  // 0x60: 数据端口
+    
+    // 步骤 3: 处理扫描码（转换为按键码并存储到缓冲区）
+    process_key(v);
+    
+    // 步骤 4: 发送 EOI 给 PIC（通知中断处理完成）
+    pic_eoi1();
+}
+```
+
+**关键点：**
+- **硬件自动触发**：用户按下键盘时，硬件自动产生中断
+- **立即处理**：中断处理程序立即执行，不等待程序调用
+- **数据存储**：将扫描码转换为按键码，存储到 BIOS 键盘缓冲区（BDA）
+- **异步执行**：与用户程序的执行无关，独立运行
+
+**2. 软件中断（INT 16h → 向量 0x16）**
+
+**触发流程：**
+```
+用户程序需要读取键盘
+    ↓
+程序执行 INT 0x16 指令
+    ↓
+CPU 查找 IVT[0x16] → entry_16 → handle_16()
+```
+
+**处理函数（`seabios/src/kbd.c:244-270`）：**
+```c
+void
+handle_16(struct bregs *regs)
+{
+    // 根据功能号（AH）调用相应的处理函数
+    switch (regs->ah) {
+    case 0x00: handle_1600(regs); break;  // 读取按键（阻塞）
+    case 0x01: handle_1601(regs); break;  // 检查按键状态（非阻塞）
+    case 0x02: handle_1602(regs); break;  // 获取 Shift 标志状态
+    // ... 其他功能
+    }
+}
+
+// INT 16h/AH=0x00: 读取按键（阻塞）
+void
+handle_1600(struct bregs *regs)
+{
+    // 从缓冲区读取按键码
+    dequeue_key(regs, 1, 0);  // incr=1: 阻塞模式
+    // 返回：AX = 按键码
+}
+
+// INT 16h/AH=0x01: 检查按键状态（非阻塞）
+void
+handle_1601(struct bregs *regs)
+{
+    // 检查缓冲区是否有数据（不消耗按键）
+    dequeue_key(regs, 0, 0);  // incr=0: 非阻塞模式
+    // 返回：如果缓冲区为空，设置 Zero Flag
+}
+```
+
+**关键点：**
+- **程序主动调用**：用户程序需要键盘输入时，主动调用 `INT 0x16`
+- **从缓冲区读取**：从 BIOS 键盘缓冲区读取按键码（由硬件中断存储）
+- **可能阻塞**：如果缓冲区为空，`AH=0x00` 会等待硬件中断产生新数据
+- **同步执行**：与用户程序的执行同步，程序等待结果返回
+
+**3. 完整的数据流**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 硬件中断（IRQ1，向量 0x09）- 生产者                       │
+└─────────────────────────────────────────────────────────┘
+用户按下键盘
+    ↓
+键盘控制器产生 IRQ1 硬件中断
+    ↓
+PIC 路由到向量 0x09
+    ↓
+CPU 查找 IVT[0x09] → entry_09 → handle_09()
+    ↓
+handle_09():
+    ├─ inb(0x64)  ; 读取状态
+    ├─ inb(0x60)  ; 读取扫描码
+    ├─ process_key(scancode)  ; 处理扫描码
+    │   └─ __process_key()  ; 转换为按键码
+    │       └─ enqueue_key(keycode)  ; 存储到缓冲区
+    └─ pic_eoi1()  ; 发送 EOI
+    ↓
+按键码存储到 BIOS 键盘缓冲区（BDA）
+```
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 软件中断（INT 16h，向量 0x16）- 消费者                   │
+└─────────────────────────────────────────────────────────┘
+用户程序需要读取键盘
+    ↓
+程序执行 INT 0x16 指令
+    ↓
+CPU 查找 IVT[0x16] → entry_16 → handle_16()
+    ↓
+handle_16():
+    ├─ switch (ah)
+    ├─ case 0x00: handle_1600()  ; 读取按键（阻塞）
+    │   └─ dequeue_key(regs, 1, 0)  ; 从缓冲区读取
+    │       ├─ 如果缓冲区为空 → yield_toirq() 等待硬件中断
+    │       └─ 如果缓冲区有数据 → 读取按键码，返回
+    └─ case 0x01: handle_1601()  ; 检查状态（非阻塞）
+        └─ dequeue_key(regs, 0, 0)  ; 检查缓冲区（不消耗）
+            └─ 如果缓冲区为空 → 设置 Zero Flag
+    ↓
+返回按键码给用户程序（AX 寄存器）
+```
+
+**4. 它们的关系**
+
+**生产者-消费者模式：**
+- **硬件中断（生产者）**：接收键盘数据，存储到缓冲区
+- **软件中断（消费者）**：从缓冲区读取数据，返回给程序
+- **缓冲区（桥梁）**：硬件中断写入，软件中断读取
+
+**关键设计优势：**
+1. **解耦**：硬件中断和软件中断独立工作，互不干扰
+2. **缓冲**：缓冲区可以存储多个按键，程序可以按需读取
+3. **异步处理**：硬件中断立即处理按键，不等待程序
+4. **同步接口**：程序通过软件中断同步获取按键数据
+
+**5. 实际使用示例**
+
+**硬件中断（自动执行，程序无需关心）：**
+```c
+// 用户按下键盘 → 硬件自动触发 → handle_09() 自动执行
+// 程序不需要做任何事情，按键数据自动存储到缓冲区
+```
+
+**软件中断（程序主动调用）：**
+```asm
+; 读取按键（阻塞，等待按键）
+mov ah, 0x00
+int 0x16
+; 返回：AX = 按键码
+
+; 检查按键状态（非阻塞）
+mov ah, 0x01
+int 0x16
+; 返回：如果 Zero Flag 被设置，说明没有按键
+```
+
 **关键点：**
 
 1. **菜单循环在保护模式下运行**：菜单显示、超时处理、选择逻辑等都在保护模式下执行
 
 2. **键盘输入通过 BIOS 服务获取**：
    - 每次读取键盘时，都会切换到实模式
-   - 在实模式下调用 BIOS 的 INT 16h 服务
-   - BIOS 服务会处理键盘硬件中断（IRQ 1）
+   - 在实模式下调用 BIOS 的 INT 16h 服务（软件中断）
+   - BIOS 的 INT 16h 服务从缓冲区读取数据（由硬件中断存储）
    - 返回按键值后，切换回保护模式
 
 3. **不需要 GRUB 处理硬件中断**：
@@ -307,7 +694,12 @@ REAL_TO_PROT（real_to_prot）
    - **保护模式下按键发生时**：
      - 键盘硬件产生中断请求（IRQ 1）
      - 由于保护模式下中断被禁用（`cli`），中断请求被 PIC 挂起（pending）
-     - **按键数据不会立即存入缓冲区**（因为 BIOS 的键盘中断处理程序还没有执行）
+     - **⚠️ 重要澄清：键盘数据保存在哪里？**
+       - **硬件层面**：扫描码保存在**键盘控制器的输出缓冲区**（8042 芯片内部，硬件寄存器）
+       - **软件层面**：按键码保存在**BIOS 的键盘缓冲区**（BDA，软件缓冲区）
+       - **关键区别**：键盘控制器的输出缓冲区 ≠ BIOS 的键盘缓冲区
+       - **保护模式下**：扫描码保存在键盘控制器的输出缓冲区（硬件自动保存，不需要软件中断）
+       - **切换到实模式后**：硬件中断被处理，BIOS 的 `handle_09()` 从键盘控制器读取扫描码，转换为按键码，存入 BIOS 的键盘缓冲区（软件缓冲区）
    - **切换到实模式后**：
      - `prot_to_real` 执行 `sti`，重新启用中断
      - **挂起的中断会被立即处理**：BIOS 的键盘中断处理程序（INT 09h）会执行
@@ -559,6 +951,357 @@ handle_09(void)
 - **状态寄存器（0x64）的 OBF 位指示是否有数据可读**
 - **键盘控制器的输出缓冲区通常只能保存 1 个扫描码**
 - **连续按键时，后续扫描码会等待或可能丢失**
+
+**⚠️ 重要问题：既然键盘控制器自己就能保存按键，那 INT 09 的价值是什么？**
+
+**问题：键盘控制器的输出缓冲区可以保存扫描码（硬件自动保存），为什么还需要 INT 09 硬件中断处理程序？**
+
+**答案：INT 09 的价值在于及时处理、数据转换、缓冲存储和状态管理。**
+
+**1. 及时处理，避免数据丢失**
+
+**键盘控制器的限制：**
+- **输出缓冲区只能保存 1 个扫描码**（硬件限制）
+- **如果连续按多个键**：
+  - 第一个扫描码在输出缓冲区中
+  - 后续的扫描码会等待，直到第一个被读取
+  - **如果长时间不读取，后续扫描码可能会丢失**
+
+**INT 09 的作用：**
+- **及时响应**：硬件中断立即触发，INT 09 立即执行
+- **快速读取**：从键盘控制器的输出缓冲区读取扫描码，释放缓冲区空间
+- **避免溢出**：及时处理可以避免后续扫描码丢失
+
+**场景对比：**
+
+```
+没有 INT 09（或 INT 09 不工作）：
+用户快速按了 5 个键
+    ↓
+键盘控制器：
+    ├─ 扫描码 1 → 存入输出缓冲区 ✅
+    ├─ 扫描码 2 → 等待（缓冲区满）⏳
+    ├─ 扫描码 3 → 等待（缓冲区满）⏳
+    ├─ 扫描码 4 → 等待（缓冲区满）⏳
+    └─ 扫描码 5 → 等待（缓冲区满）⏳
+    ↓
+如果长时间不读取：
+    ├─ 扫描码 1 可能被覆盖或丢失 ❌
+    └─ 扫描码 2-5 可能丢失 ❌
+
+有 INT 09（正常工作）：
+用户快速按了 5 个键
+    ↓
+按键 1 → IRQ1 → INT 09 立即执行 → 读取扫描码 1 → 存入 BIOS 缓冲区 ✅
+按键 2 → IRQ1 → INT 09 立即执行 → 读取扫描码 2 → 存入 BIOS 缓冲区 ✅
+按键 3 → IRQ1 → INT 09 立即执行 → 读取扫描码 3 → 存入 BIOS 缓冲区 ✅
+按键 4 → IRQ1 → INT 09 立即执行 → 读取扫描码 4 → 存入 BIOS 缓冲区 ✅
+按键 5 → IRQ1 → INT 09 立即执行 → 读取扫描码 5 → 存入 BIOS 缓冲区 ✅
+    ↓
+所有扫描码都被及时处理，存入 BIOS 缓冲区（可以保存 16 个按键码）✅
+```
+
+**2. 数据转换（扫描码 → 按键码）**
+
+**扫描码 vs 按键码：**
+
+| 特性 | 扫描码（硬件层面） | 按键码（软件层面） |
+|------|-----------------|-----------------|
+| **格式** | 原始硬件数据（1 字节） | ASCII + 扫描码（2 字节） |
+| **示例** | `0x1E`（'a' 键的扫描码） | `0x1E61`（扫描码 + ASCII 'a'） |
+| **修饰键** | 不包含修饰键信息 | 包含 Shift、Ctrl、Alt 等修饰键信息 |
+| **特殊键** | 原始扫描码 | 处理后的按键码（考虑 Caps Lock、Num Lock 等） |
+
+**INT 09 的数据转换功能（`seabios/src/kbd.c:456-579`）：**
+
+```c
+static void
+__process_key(u8 scancode)
+{
+    // 1. 处理多字节扫描码序列（E0、E1 前缀）
+    if (scancode == 0xe0 || scancode == 0xe1) {
+        // 扩展键序列（如方向键、功能键等）
+        SET_BDA(kbd_flag1, flags1 | eflag);
+        return;
+    }
+    
+    // 2. 处理按键释放（扫描码 & 0x80）
+    int key_release = scancode & 0x80;
+    scancode &= ~0x80;
+    
+    // 3. 处理特殊键（Caps Lock、Num Lock、Scroll Lock）
+    switch (scancode) {
+    case 0x3a: /* Caps Lock */
+        kbd_set_flag(key_release, KF0_CAPS, 0, KF0_CAPSACTIVE);
+        return;
+    case 0x45: /* Num Lock */
+        kbd_set_flag(key_release, KF0_NUM, 0, KF0_NUMACTIVE);
+        return;
+    // ...
+    }
+    
+    // 4. 处理修饰键（Shift、Ctrl、Alt）
+    case 0x2a: /* L Shift */
+        kbd_set_flag(key_release, KF0_LSHIFT, 0, 0);
+        return;
+    case 0x1d: /* Ctrl */
+        kbd_set_flag(key_release, KF0_CTRLACTIVE | KF0_LCTRL, 0, 0);
+        return;
+    case 0x38: /* Alt */
+        kbd_set_flag(key_release, KF0_ALTACTIVE | KF0_LALT, 0, 0);
+        return;
+    
+    // 5. 扫描码转换为按键码（考虑修饰键）
+    struct scaninfo *info = &scan_to_keycode[scancode];
+    u16 flags0 = GET_BDA(kbd_flag0);
+    u16 keycode;
+    
+    if (flags0 & KF0_ALTACTIVE) {
+        keycode = GET_GLOBAL(info->alt);  // Alt 组合键
+    } else if (flags0 & KF0_CTRLACTIVE) {
+        keycode = GET_GLOBAL(info->control);  // Ctrl 组合键
+    } else {
+        u8 useshift = flags0 & (KF0_RSHIFT|KF0_LSHIFT) ? 1 : 0;
+        if (useshift)
+            keycode = GET_GLOBAL(info->shift);  // Shift 组合键（如 'A'）
+        else
+            keycode = GET_GLOBAL(info->normal);  // 普通键（如 'a'）
+    }
+    
+    // 6. 存储到 BIOS 键盘缓冲区
+    if (keycode)
+        enqueue_key(keycode);
+}
+```
+
+**关键转换功能：**
+- **多字节序列处理**：处理 E0、E1 前缀的扩展键（如方向键、功能键）
+- **修饰键组合**：考虑 Shift、Ctrl、Alt 等修饰键，生成正确的按键码
+- **特殊键状态**：处理 Caps Lock、Num Lock、Scroll Lock 的状态切换
+- **按键释放**：区分按键按下和释放（扫描码最高位）
+
+**示例：用户按下 Shift+A**
+
+```
+硬件层面（扫描码）：
+    ├─ 扫描码 0x2A（左 Shift 按下）
+    └─ 扫描码 0x1E（'a' 键按下）
+    ↓
+INT 09 处理：
+    ├─ 处理扫描码 0x2A → 设置 Shift 标志
+    └─ 处理扫描码 0x1E → 检测到 Shift 标志 → 转换为 'A'（0x1E41）
+    ↓
+软件层面（按键码）：
+    └─ 按键码 0x1E41（扫描码 0x1E + ASCII 'A'）
+```
+
+**3. 缓冲存储（从硬件缓冲区到软件缓冲区）**
+
+**两个缓冲区的对比：**
+
+| 特性 | 键盘控制器的输出缓冲区 | BIOS 的键盘缓冲区 |
+|------|---------------------|-----------------|
+| **位置** | 8042 芯片内部（硬件寄存器） | BDA（BIOS Data Area，内存） |
+| **大小** | **1 字节**（一个扫描码） | **32 字节**（16 个按键码） |
+| **数据类型** | 扫描码（原始硬件数据） | 按键码（处理后的软件数据） |
+| **访问方式** | I/O 端口 0x60 | 内存地址（BDA 指针） |
+| **保存机制** | 硬件自动保存 | 软件处理保存 |
+
+**INT 09 的缓冲存储功能：**
+- **及时转移**：从硬件缓冲区（1 字节）读取扫描码
+- **数据转换**：将扫描码转换为按键码
+- **软件存储**：存入 BIOS 的键盘缓冲区（可以保存 16 个按键码）
+
+**价值：**
+- **扩大容量**：从 1 个扫描码扩展到 16 个按键码
+- **数据持久化**：从硬件寄存器转移到内存，数据不会因硬件重置而丢失
+- **程序访问**：程序可以通过 INT 16h 从 BIOS 缓冲区读取按键码
+
+**4. 状态管理（特殊键和 LED 灯）**
+
+**INT 09 的状态管理功能：**
+
+```c
+// 处理 Caps Lock
+case 0x3a: /* Caps Lock */
+    kbd_set_flag(key_release, KF0_CAPS, 0, KF0_CAPSACTIVE);
+    // 切换 Caps Lock 状态，更新 LED 灯
+    return;
+
+// 处理 Num Lock
+case 0x45: /* Num Lock */
+    kbd_set_flag(key_release, KF0_NUM, 0, KF0_NUMACTIVE);
+    // 切换 Num Lock 状态，更新 LED 灯
+    return;
+
+// 处理 Scroll Lock
+case 0x46: /* Scroll Lock */
+    kbd_set_flag(key_release, KF0_SCROLL, 0, KF0_SCROLLACTIVE);
+    // 切换 Scroll Lock 状态，更新 LED 灯
+    return;
+
+// 处理 Ctrl+Alt+Del（系统重置）
+case 0x53: /* Del */
+    if ((GET_BDA(kbd_flag0) & (KF0_CTRLACTIVE|KF0_ALTACTIVE))
+        == (KF0_CTRLACTIVE|KF0_ALTACTIVE) && !key_release) {
+        // Ctrl+Alt+Del - 重置系统
+        SET_BDA(soft_reset_flag, 0x1234);
+        reset();
+    }
+    break;
+```
+
+**状态管理功能：**
+- **特殊键状态**：跟踪 Caps Lock、Num Lock、Scroll Lock 的状态
+- **LED 灯控制**：根据特殊键状态更新键盘 LED 灯
+- **系统功能**：处理 Ctrl+Alt+Del 等特殊组合键
+- **修饰键状态**：跟踪 Shift、Ctrl、Alt 的按下/释放状态
+
+**5. 中断处理机制（EOI 和键盘拦截）**
+
+**INT 09 的中断处理功能：**
+
+```c
+void VISIBLE16
+handle_09(void)
+{
+    // 1. 读取扫描码
+    v = inb(PORT_PS2_DATA);
+    
+    // 2. 处理扫描码
+    process_key(v);
+    
+    // 3. 发送 EOI 给 PIC（通知中断处理完成）
+    pic_eoi1();
+    
+    // 4. 重新启用键盘（某些旧程序需要）
+    i8042_command(I8042_CMD_KBD_ENABLE, NULL);
+}
+```
+
+**中断处理机制：**
+- **EOI（End of Interrupt）**：通知 PIC 中断处理完成，允许后续中断
+- **键盘拦截**：支持 INT 15h/AH=4Fh 键盘拦截功能（TSR、病毒扫描等）
+- **键盘启用**：某些旧程序期望 ISR 重新启用键盘
+
+**总结：INT 09 的价值**
+
+| 功能 | 价值 | 如果没有 INT 09 |
+|------|------|----------------|
+| **及时处理** | 避免键盘控制器缓冲区溢出，防止数据丢失 | 连续按键时，后续扫描码可能丢失 |
+| **数据转换** | 扫描码 → 按键码（考虑修饰键、特殊键） | 程序需要自己处理扫描码转换 |
+| **缓冲存储** | 从硬件缓冲区（1 字节）转移到软件缓冲区（16 个按键码） | 程序需要频繁读取硬件缓冲区 |
+| **状态管理** | 跟踪特殊键状态、更新 LED 灯、处理系统功能 | 程序需要自己管理键盘状态 |
+| **中断处理** | 发送 EOI、支持键盘拦截 | 中断可能无法正常处理 |
+
+**关键理解：**
+- **键盘控制器只能保存原始扫描码**（硬件层面，1 字节）
+- **INT 09 提供完整的键盘处理服务**（软件层面，数据转换、缓冲存储、状态管理）
+- **两者配合工作**：键盘控制器负责硬件层面的数据保存，INT 09 负责软件层面的数据处理
+
+**⚠️ 重要澄清：保护模式下 INT 09 不工作，为什么键盘数据仍然可以保存？**
+
+**问题：在保护模式下，INT 09（硬件中断）不工作（中断被禁用，IDT 为空），为什么键盘数据仍然可以保存到缓冲区？**
+
+**答案：你的理解是正确的！键盘控制器（硬件）会保存扫描码，这不需要软件中断处理程序。**
+
+**关键区别：两个不同的"缓冲区"**
+
+1. **键盘控制器的输出缓冲区（硬件层面）**：
+   - **位置**：8042 键盘控制器芯片内部（硬件寄存器）
+   - **大小**：1 字节（一个扫描码）
+   - **保存机制**：**硬件自动保存**，不需要软件干预
+   - **工作原理**：
+     - 用户按下键盘 → 键盘控制器自动将扫描码存入输出缓冲区
+     - 这是硬件层面的操作，与 CPU 是否处理中断无关
+     - 即使中断被禁用，键盘控制器仍然会保存扫描码
+   - **访问方式**：通过 I/O 端口 0x60 读取
+   - **状态指示**：I/O 端口 0x64 的 OBF（Output Buffer Full）位
+
+2. **BIOS 的键盘缓冲区（软件层面）**：
+   - **位置**：BDA（BIOS Data Area），内存中的软件缓冲区
+   - **大小**：32 字节（16 个按键码，每个 2 字节）
+   - **保存机制**：**需要软件处理**，由 BIOS 的 `handle_09()` 函数处理
+   - **工作原理**：
+     - 硬件中断（INT 09）被触发 → BIOS 的 `handle_09()` 执行
+     - `handle_09()` 从键盘控制器的输出缓冲区读取扫描码
+     - 将扫描码转换为按键码，存入 BIOS 的键盘缓冲区
+   - **访问方式**：通过 BDA 指针访问（内存地址）
+
+**保护模式下的数据流程：**
+
+```
+保护模式下用户按下键盘：
+    ↓
+键盘控制器（硬件）：
+    ├─ 自动将扫描码存入输出缓冲区（硬件寄存器）
+    ├─ 设置 OBF 位 = 1（表示有数据）
+    └─ 通过 IRQ1 向 PIC 发送中断请求
+    ↓
+PIC（8259A）：
+    ├─ 在 IRR[1] 中设置位（记录中断请求）
+    └─ 由于 CPU 中断被禁用（cli），中断请求被挂起
+    ↓
+CPU：
+    ├─ 中断被禁用（cli），IDT 为空
+    ├─ 无法处理硬件中断
+    └─ 继续执行保护模式代码
+    ↓
+结果：
+    ├─ 扫描码保存在键盘控制器的输出缓冲区（硬件层面）✅
+    └─ 扫描码未存入 BIOS 的键盘缓冲区（软件层面）❌
+```
+
+**切换到实模式后的数据流程：**
+
+```
+切换到实模式（prot_to_real）：
+    ├─ 恢复 IVT（实模式中断向量表）
+    ├─ 执行 sti（重新启用中断）
+    └─ PIC 检测到 IRR[1] = 1 → 发送中断信号
+    ↓
+CPU 响应中断：
+    ├─ 查找 IVT[0x09] → entry_09 → handle_09()
+    └─ BIOS 的键盘中断处理程序执行
+    ↓
+handle_09() 执行：
+    ├─ inb(0x64)  ; 读取状态，检查 OBF 位
+    ├─ inb(0x60)  ; 从键盘控制器的输出缓冲区读取扫描码
+    ├─ process_key(scancode)  ; 处理扫描码
+    │   └─ 转换为按键码
+    │       └─ enqueue_key(keycode)  ; 存入 BIOS 的键盘缓冲区
+    └─ pic_eoi1()  ; 发送 EOI
+    ↓
+结果：
+    ├─ 扫描码从键盘控制器的输出缓冲区被读取 ✅
+    └─ 按键码存入 BIOS 的键盘缓冲区（软件层面）✅
+```
+
+**关键理解：**
+
+1. **键盘控制器的输出缓冲区（硬件）**：
+   - 这是硬件层面的保存，**不需要软件中断处理程序**
+   - 即使 CPU 中断被禁用，键盘控制器仍然会保存扫描码
+   - 这是硬件自动完成的操作
+
+2. **BIOS 的键盘缓冲区（软件）**：
+   - 这是软件层面的保存，**需要硬件中断处理程序**
+   - 只有当硬件中断被处理时，BIOS 的 `handle_09()` 才会执行
+   - `handle_09()` 从键盘控制器读取扫描码，转换为按键码，存入 BIOS 的键盘缓冲区
+
+3. **保护模式下的情况**：
+   - **硬件层面**：扫描码保存在键盘控制器的输出缓冲区 ✅（硬件自动保存）
+   - **软件层面**：扫描码未存入 BIOS 的键盘缓冲区 ❌（需要硬件中断处理）
+
+4. **切换到实模式后的情况**：
+   - **硬件中断被处理**：BIOS 的 `handle_09()` 执行
+   - **数据转移**：从键盘控制器的输出缓冲区读取 → 转换为按键码 → 存入 BIOS 的键盘缓冲区
+
+**你的理解完全正确：**
+- 在保护模式下，INT 09 不工作（中断被禁用，IDT 为空）
+- 但是键盘数据仍然可以保存，因为**键盘控制器（硬件）会自动保存扫描码**
+- 这不需要软件中断处理程序，是硬件层面的操作
+- 只有当切换到实模式并重新启用中断后，BIOS 的 `handle_09()` 才会执行，将扫描码从键盘控制器的输出缓冲区转移到 BIOS 的键盘缓冲区
 
 **⚠️ 重要限制：连续按键的保存能力**
 
