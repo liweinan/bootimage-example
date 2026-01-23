@@ -462,36 +462,73 @@ DEBIAN_VERSION="stable"
 
 生成的 `grub-linux.iso` 包含：
 
-1. **Linux Kernel (Debian Installer)**：带 initrd 的完整 Linux 内核启动项
-2. **Linux Kernel (No Initrd)**：不带 initrd 的内核启动项（备选）
-3. **GRUB2 Shell**：GRUB 命令行界面，用于测试和调试
+1. **Linux - Boot to Shell**：使用 Alpine Linux 内核，启动后直接进入 shell 环境
+2. **Linux - Boot to Shell (Verbose)**：详细模式启动，显示更多调试信息
+3. **Debug: List Files**：调试菜单，用于检查文件系统访问和文件是否存在
+
+**重要说明：**
+- 脚本使用 Alpine Linux netboot 内核（非安装器），启动后直接进入可用的 shell 环境
+- 支持使用 `--local` 参数使用本地系统内核
+- 所有启动项都需要 initrd，确保系统能正常启动
 
 ### 7.6 启动生成的 ISO
 
-**基本启动：**
+**基本启动（推荐）：**
 
 ```bash
-qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 512 -serial stdio
+qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 1024 -serial stdio
+```
+
+**使用 SDL 图形显示（推荐）：**
+
+```bash
+qemu-system-x86_64 -display sdl -cdrom grub-linux.iso -boot d -m 1024 -serial stdio
 ```
 
 **参数说明：**
 - `-cdrom grub-linux.iso`：指定 ISO 文件
 - `-boot d`：从 CD-ROM 启动
-- `-m 512`：分配 512MB 内存（可根据需要调整）
-- `-serial stdio`：将串口输出到终端（可以看到内核启动日志）
+- `-m 1024`：分配 1024MB 内存（Alpine 建议至少 512MB，推荐 1GB）
+- `-serial stdio`：**必须使用此参数**，将串口输出到终端（可以看到内核启动日志和 shell）
+- `-display sdl`：使用 SDL 图形显示（可选，提供更好的图形界面体验）
+
+**重要提示：**
+- **必须使用 `-serial stdio` 参数**：内核输出会显示在终端，而不是 QEMU 窗口
+- `-display sdl` 提供独立的图形窗口，适合需要同时查看图形界面和终端输出的场景
+- 如果看到黑屏，检查是否使用了 `-serial stdio` 参数
+- 内核启动后，Alpine Linux 会显示 shell 提示符，可以直接使用
+
+**启动流程：**
+1. GRUB 菜单显示（5 秒超时）
+2. 选择 "Linux - Boot to Shell" 菜单项
+3. 内核开始加载（输出显示在终端）
+4. 进入 Alpine Linux shell 环境
 
 **带网络支持：**
 
 ```bash
-qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 512 -serial stdio \
+qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 1024 -serial stdio \
     -netdev user,id=net0 -device e1000,netdev=net0
 ```
 
-**使用图形界面：**
+**使用图形界面（VGA 显示）：**
 
 ```bash
-qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 512 -vga std
+# 注意：即使使用 VGA，也建议同时使用 -serial stdio 查看内核日志
+qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 1024 -vga std -serial stdio
 ```
+
+**使用 SDL 图形显示（推荐图形界面）：**
+
+```bash
+# SDL 提供更好的图形界面体验，同时保留终端输出
+qemu-system-x86_64 -display sdl -cdrom grub-linux.iso -boot d -m 1024 -serial stdio
+```
+
+**显示选项说明：**
+- `-display sdl`：使用 SDL 图形显示（推荐，提供独立窗口）
+- `-vga std`：使用标准 VGA 显示（传统方式）
+- `-nographic`：无图形界面，所有输出到串口（适合服务器环境）
 
 ### 7.7 故障排除
 
@@ -528,12 +565,165 @@ sudo apt install grub-pc-bin wget
 - 检查工作目录是否有写权限
 - 查看详细错误信息
 
-**问题 4：内核无法启动**
+**问题 4：内核无法启动或黑屏**
 
 **解决方案：**
+- **确认使用了 `-serial stdio` 参数**：内核输出显示在终端，不是 QEMU 窗口
 - 确认内核文件已正确下载（检查 `iso/boot/vmlinuz` 文件大小）
 - 检查 grub.cfg 中的路径是否正确
-- 尝试使用不带 initrd 的启动项
+- 尝试使用 "Linux - Boot to Shell (Verbose)" 菜单项查看详细启动日志
+- 增加内存分配：使用 `-m 1024` 或更多
+
+**问题 5：GRUB 无法访问文件系统（"no server is specified" 错误）**
+
+**解决方案：**
+- 使用 "Debug: List Files" 菜单项检查文件系统访问
+- 确认文件确实存在于 ISO 中（参见下面的"挂载 ISO 查看文件"部分）
+- 检查 GRUB 模块是否正确加载（iso9660, loopback 等）
+
+### 7.9 调试方法
+
+#### 方法 1：使用 GRUB 调试菜单
+
+生成的 ISO 包含 "Debug: List Files" 菜单项，可以：
+- 检查根设备是否正确识别
+- 列出文件系统中的文件
+- 验证内核和 initrd 文件是否存在
+
+**使用步骤：**
+1. 启动 ISO
+2. 在 GRUB 菜单中选择 "Debug: List Files"
+3. 查看文件列表和访问状态
+
+#### 方法 2：在 GRUB 命令行手动调试
+
+如果菜单无法正常工作，可以在 GRUB 启动时按 `c` 进入命令行模式：
+
+```bash
+# 在 GRUB 菜单界面按 'c' 进入命令行
+grub> insmod iso9660
+grub> insmod loopback
+grub> search --file /boot/grub/grub.cfg
+grub> set root=$root
+grub> ls /
+grub> ls /boot/
+grub> ls /boot/vmlinuz
+grub> ls /boot/initrd.img
+```
+
+#### 方法 3：使用详细模式启动
+
+选择 "Linux - Boot to Shell (Verbose)" 菜单项，可以看到：
+- 内核加载过程
+- 驱动加载信息
+- 系统初始化日志
+- 错误信息（如果有）
+
+#### 方法 4：检查 QEMU 启动参数
+
+确保使用正确的启动参数：
+
+```bash
+# 正确：使用 -serial stdio 查看输出
+qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 1024 -serial stdio
+
+# 错误：没有 -serial stdio，输出不可见
+qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 1024
+```
+
+### 7.10 挂载 ISO 查看文件内容
+
+在生成 ISO 后，可以挂载 ISO 文件来检查其中的内容：
+
+#### 方法 1：使用 mount 命令（Linux/macOS）
+
+```bash
+# 创建挂载点
+mkdir -p /tmp/iso_mount
+
+# 挂载 ISO（Linux）
+sudo mount -o loop grub-linux.iso /tmp/iso_mount
+
+# 挂载 ISO（macOS）
+hdiutil attach grub-linux.iso -mountpoint /tmp/iso_mount
+
+# 查看文件结构
+ls -la /tmp/iso_mount/
+ls -la /tmp/iso_mount/boot/
+ls -la /tmp/iso_mount/boot/grub/
+
+# 检查关键文件
+ls -lh /tmp/iso_mount/boot/vmlinuz
+ls -lh /tmp/iso_mount/boot/initrd.img
+cat /tmp/iso_mount/boot/grub/grub.cfg
+
+# 卸载 ISO（Linux）
+sudo umount /tmp/iso_mount
+
+# 卸载 ISO（macOS）
+hdiutil detach /tmp/iso_mount
+
+# 清理挂载点
+rmdir /tmp/iso_mount
+```
+
+#### 方法 2：使用 7z 或 unzip（跨平台）
+
+```bash
+# 使用 7z 查看 ISO 内容（如果已安装）
+7z l grub-linux.iso
+
+# 使用 unzip 提取文件（某些 ISO 格式支持）
+unzip -l grub-linux.iso
+```
+
+#### 方法 3：使用 isoinfo（Linux）
+
+```bash
+# 查看 ISO 文件系统信息
+isoinfo -i grub-linux.iso -d
+
+# 列出 ISO 中的文件
+isoinfo -i grub-linux.iso -f
+
+# 提取特定文件
+isoinfo -i grub-linux.iso -x /BOOT/GRUB/GRUB.CFG
+```
+
+#### 验证文件完整性
+
+挂载 ISO 后，可以验证：
+
+1. **检查文件是否存在**：
+   ```bash
+   [ -f /tmp/iso_mount/boot/vmlinuz ] && echo "内核文件存在" || echo "内核文件缺失"
+   [ -f /tmp/iso_mount/boot/initrd.img ] && echo "initrd 文件存在" || echo "initrd 文件缺失"
+   [ -f /tmp/iso_mount/boot/grub/grub.cfg ] && echo "grub.cfg 存在" || echo "grub.cfg 缺失"
+   ```
+
+2. **检查文件大小**：
+   ```bash
+   ls -lh /tmp/iso_mount/boot/vmlinuz    # 应该显示几 MB 到几十 MB
+   ls -lh /tmp/iso_mount/boot/initrd.img # 应该显示几 MB 到几十 MB
+   ```
+
+3. **检查 grub.cfg 内容**：
+   ```bash
+   cat /tmp/iso_mount/boot/grub/grub.cfg
+   # 确认包含正确的启动项和文件路径
+   ```
+
+#### 常见问题排查
+
+**如果挂载后看不到文件：**
+- 确认 ISO 文件已正确生成（检查文件大小）
+- 尝试使用不同的挂载方法
+- 检查 ISO 文件是否损坏
+
+**如果文件大小异常：**
+- 内核文件（vmlinuz）通常为 5-50 MB
+- initrd 文件通常为 5-100 MB
+- 如果文件大小为 0 或异常小，说明下载或生成过程有问题
 
 ### 7.8 自定义脚本
 
