@@ -245,6 +245,26 @@ grub_main (void)
 - 解析并执行 `grub.cfg` 配置文件
 - **关键**：当遇到 `linux` 命令时，会调用 `grub_cmd_linux()` 加载内核
 
+**配置示例：**
+
+```bash
+# /boot/grub/grub.cfg
+menuentry "Linux 5.x.x" {
+    linux /boot/vmlinuz-5.x.x root=/dev/sda1 ro quiet
+    # ↑ 执行 linux 命令时，调用 grub_cmd_linux()
+    #   此时加载内核到内存，注册 grub_linux_boot()
+    #   但不会立即跳转，用户可以继续选择或修改
+    
+    initrd /boot/initrd.img-5.x.x
+    # ↑ 加载 initramfs（可选）
+}
+
+# 用户按 Enter 选择 "Linux 5.x.x" 时：
+# → GRUB 调用 grub_linux_boot()
+# → grub_linux_boot() 调用 grub_relocator32_boot()
+# → 跳转到内核入口点（code32_start）
+```
+
 **5. `grub_load_normal_mode()` - 加载 normal 模式**
 
 **功能：**
