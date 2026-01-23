@@ -622,10 +622,31 @@ GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数�
 
 - **`code32_start`**：内核入口点地址（传递给内核，内核从这里开始执行）
 - **`cmd_line_ptr`**：内核命令行参数地址（如 `root=/dev/sda1`）
-- **`ramdisk_image`**：initramfs 地址
-- **`ramdisk_size`**：initramfs 大小
+- **`ramdisk_image`**：initramfs 地址（由 GRUB 的 `grub_cmd_initrd()` 设置）
+- **`ramdisk_size`**：initramfs 大小（由 GRUB 的 `grub_cmd_initrd()` 设置）
 - **`e820_map`**：系统内存映射表
 - **`esi` 寄存器**：包含 `boot_params` 的地址（内核通过 `%esi` 访问）
+
+**GRUB 加载 initrd/initramfs 的流程：**
+
+1. **`grub_cmd_initrd()` 函数**（`grub/grub-core/loader/i386/linux.c`）：
+   - 当 `grub.cfg` 中执行 `initrd /boot/initrd.img` 命令时调用
+   - 读取 initrd 文件（支持 gzip 压缩，GRUB 会自动解压）
+   - 分配内存并加载 initrd 到内存（通常在高地址区域，如 0x2000000 附近）
+   - 在 `boot_params` 结构中设置：
+     - `ramdisk_image`：initrd 在内存中的地址
+     - `ramdisk_size`：initrd 的大小（解压后的大小）
+
+2. **内核读取 initrd**：
+   - 内核启动后，从 `boot_params.ramdisk_image` 读取 initrd 地址
+   - 从 `boot_params.ramdisk_size` 读取 initrd 大小
+   - 将 initrd 挂载为临时根文件系统（initramfs）
+   - 从 initrd 中加载驱动模块，初始化硬件
+   - 最后切换到真正的根文件系统
+
+**关键点：**
+- **GRUB 负责**：将 initrd 文件从磁盘读取、解压（如果需要）、加载到内存，并告诉内核位置
+- **内核负责**：从内存中读取 initrd，挂载为文件系统，加载驱动，切换到真正的根文件系统
 
 > **详细说明**：关于 vmlinuz 文件结构的完整分析，请参见 [附录：vmlinuz 文件详细结构分析](#附录vmlinuz-文件详细结构分析)。
 

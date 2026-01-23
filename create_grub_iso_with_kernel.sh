@@ -137,6 +137,7 @@ insmod part_msdos
 insmod part_gpt
 
 # 设置根设备为 CD-ROM（ISO）
+# 在 ISO 启动时，设备通常是 (cd0)
 set root='cd0'
 
 menuentry "Linux - Boot to Shell" {
@@ -146,14 +147,20 @@ menuentry "Linux - Boot to Shell" {
 }
 
 menuentry "Debug: List Files" {
+    echo "Current root: $root"
+    echo ""
+    echo "Trying to set root to cd0..."
     set root='cd0'
-    echo "Root device: $root"
+    echo "Root after setting: $root"
     echo ""
-    echo "Listing /boot directory:"
+    echo "Listing devices:"
+    ls
+    echo ""
+    echo "Trying to list root directory:"
+    ls /
+    echo ""
+    echo "Trying to list /boot directory:"
     ls /boot/
-    echo ""
-    echo "Listing /boot/grub directory:"
-    ls /boot/grub/
     echo ""
     echo "Press any key to return to menu..."
     read
