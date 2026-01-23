@@ -2,6 +2,82 @@
 
 本文档详细说明 GRUB 如何加载 Linux 内核镜像并跳转到内核入口点的完整过程，包括源代码分析和实现细节。
 
+## GRUB 加载内核的完整流程概述
+
+从 `_start` 调用 `grub_main()` 后，GRUB 开始加载 Linux 内核的完整流程：
+
+```
+grub_main()（grub/grub-core/kern/main.c）
+    ├─ 源代码位置：grub/grub-core/kern/main.c
+    ├─ 解析 grub.cfg 配置文件
+    ├─ 显示启动菜单（如果配置）
+    ├─ 用户选择启动 Linux 内核
+    └─ 执行 linux 命令 → grub_cmd_linux()
+        ↓
+grub_cmd_linux()（grub/grub-core/loader/i386/linux.c）
+    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
+    ├─ 加载内核镜像到内存（0x100000）
+    ├─ 设置内核启动参数（boot_params）
+    └─ 注册启动函数 grub_linux_boot()
+        ↓
+grub_linux_boot() → grub_relocator32_boot()
+    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
+    └─ 跳转到内核入口点（code32_start）
+        ↓
+grub_relocator32_boot() 跳转到内核入口点（code32_start）
+    ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
+    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 的偏移）
+    └─ 寄存器状态：
+        ├─ ESI = boot_params 地址
+        ├─ ESP = 栈指针
+        └─ EIP = code32_start（内核入口点）
+    ↓
+Linux 内核 Setup 代码（实模式）
+    ├─ 源代码位置：linux/arch/x86/boot/header.S
+    ├─ 内存位置：0x100000（1MB）或内核指定的地址
+    ├─ 运行模式：实模式（初始阶段）
+    ├─ 验证内核签名（boot_flag = 0xAA55）
+    ├─ 初始化基本环境
+    ├─ 切换到保护模式
+    └─ 跳转到压缩内核解压代码
+        ↓
+压缩内核解压代码（startup_32）
+    ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
+    ├─ 运行模式：32 位保护模式 → 64 位长模式
+    ├─ 设置页表（身份映射：物理地址 = 线性地址）
+    ├─ 切换到 64 位长模式
+    ├─ 解压内核（gzip 解压）
+    └─ 跳转到 startup_64
+        ↓
+startup_64（64 位内核入口点）
+    ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
+    ├─ 运行模式：64 位长模式
+    ├─ 保存 boot_params 结构地址（%RSI → %R15）
+    ├─ 设置初始内核栈
+    ├─ 设置 GS 段基址（per-CPU 数据）
+    ├─ 设置 GDT 和早期 IDT
+    ├─ 切换到内核代码段（__KERNEL_CS）
+    ├─ 激活内存加密（SEV/SME，如果支持）
+    ├─ 验证和清理 CPU 配置（verify_cpu）
+    └─ 继续内核初始化流程
+        ↓
+内核继续初始化（x86_64_start_kernel）
+    ├─ 源代码位置：linux/arch/x86/kernel/head64.c
+    ├─ 设置早期中断处理程序（idt_setup_early_handler）
+    │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
+    ├─ TDX 早期初始化（tdx_early_init，如果支持）
+    ├─ 复制引导数据（copy_bootdata）
+    ├─ 加载微码更新（load_ucode_boot）
+    ├─ 设置内核高地址映射
+    └─ 启动内核预留区域初始化（x86_64_start_reservations）
+        └─ 最终调用 start_kernel()
+```
+
+**关键点：**
+- **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
+- **用户交互触发**：跳转由用户在菜单中选择启动项时触发
+- **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点（`code32_start`）
+
 ## grub_main() 函数详细讲解
 
 **源代码位置：** `grub/grub-core/kern/main.c:304-370`
@@ -555,48 +631,6 @@ grub_load_modules (void)
 - normal 模式提供菜单显示、用户交互等功能
 - 如果 `normal.mod` 不存在或加载失败，会进入 rescue 模式
 
-**执行流程总结：**
-
-```
-grub_main() 执行流程：
-    ↓
-1. 初始化机器相关功能（grub_machine_init）
-    ├─ 初始化磁盘驱动
-    ├─ 初始化终端
-    └─ 初始化时间服务
-    ↓
-2. 加载嵌入的配置文件（grub_load_config）
-    └─ 从 core.img 中提取 grub.cfg 内容
-    ↓
-3. 加载嵌入的模块（grub_load_modules）
-    ├─ 文件系统驱动（ext2, fat, iso9660 等）
-    ├─ 磁盘驱动（biosdisk 等）
-    └─ 命令模块（linux, initrd 等）
-    ↓
-4. 设置根设备和前缀路径（grub_set_prefix_and_root）
-    └─ 确定 GRUB 资源的位置
-    ↓
-5. 注册核心命令（grub_register_core_commands）
-    └─ 注册 linux, initrd, set 等命令
-    ↓
-6. 执行嵌入的配置文件（grub_parser_execute）
-    ├─ 解析 grub.cfg
-    ├─ 执行 menuentry 命令（定义启动项）
-    ├─ 执行 linux 命令 → 调用 grub_cmd_linux() ⚠️ 关键步骤
-    │   └─ 加载内核镜像到内存，注册 grub_linux_boot()
-    └─ 执行 initrd 命令 → 调用 grub_cmd_initrd()
-        └─ 加载 initramfs 到内存
-    ↓
-7. 加载 normal 模式（grub_load_normal_mode）
-    ├─ 加载 normal.mod 模块
-    ├─ 显示启动菜单（如果配置）
-    └─ 等待用户选择启动项
-    ↓
-8. 用户选择启动项（按 Enter 键）
-    └─ 调用注册的启动函数 grub_linux_boot()
-        └─ 跳转到内核入口点
-```
-
 **关键点：**
 
 1. **配置文件执行时机**：
@@ -613,93 +647,20 @@ grub_main() 执行流程：
    - **normal 模式**：提供菜单显示和用户交互（需要 `normal.mod`）
    - **rescue 模式**：提供基本的命令行界面（如果 `normal.mod` 不可用）
 
-## GRUB 加载内核的完整流程概述
-
-从 `_start` 调用 `grub_main()` 后，GRUB 开始加载 Linux 内核的完整流程：
-
-```
-grub_main()（grub/grub-core/kern/main.c）
-    ├─ 源代码位置：grub/grub-core/kern/main.c
-    ├─ 解析 grub.cfg 配置文件
-    ├─ 显示启动菜单（如果配置）
-    ├─ 用户选择启动 Linux 内核
-    └─ 执行 linux 命令 → grub_cmd_linux()
-        ↓
-grub_cmd_linux()（grub/grub-core/loader/i386/linux.c）
-    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
-    ├─ 加载内核镜像到内存（0x100000）
-    ├─ 设置内核启动参数（boot_params）
-    └─ 注册启动函数 grub_linux_boot()
-        ↓
-grub_linux_boot() → grub_relocator32_boot()
-    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
-    └─ 跳转到内核入口点（code32_start）
-        ↓
-grub_relocator32_boot() 跳转到内核入口点（code32_start）
-    ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
-    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 的偏移）
-    └─ 寄存器状态：
-        ├─ ESI = boot_params 地址
-        ├─ ESP = 栈指针
-        └─ EIP = code32_start（内核入口点）
-    ↓
-Linux 内核 Setup 代码（实模式）
-    ├─ 源代码位置：linux/arch/x86/boot/header.S
-    ├─ 内存位置：0x100000（1MB）或内核指定的地址
-    ├─ 运行模式：实模式（初始阶段）
-    ├─ 验证内核签名（boot_flag = 0xAA55）
-    ├─ 初始化基本环境
-    ├─ 切换到保护模式
-    └─ 跳转到压缩内核解压代码
-        ↓
-压缩内核解压代码（startup_32）
-    ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
-    ├─ 运行模式：32 位保护模式 → 64 位长模式
-    ├─ 设置页表（身份映射：物理地址 = 线性地址）
-    ├─ 切换到 64 位长模式
-    ├─ 解压内核（gzip 解压）
-    └─ 跳转到 startup_64
-        ↓
-startup_64（64 位内核入口点）
-    ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
-    ├─ 运行模式：64 位长模式
-    ├─ 保存 boot_params 结构地址（%RSI → %R15）
-    ├─ 设置初始内核栈
-    ├─ 设置 GS 段基址（per-CPU 数据）
-    ├─ 设置 GDT 和早期 IDT
-    ├─ 切换到内核代码段（__KERNEL_CS）
-    ├─ 激活内存加密（SEV/SME，如果支持）
-    ├─ 验证和清理 CPU 配置（verify_cpu）
-    └─ 继续内核初始化流程
-        ↓
-内核继续初始化（x86_64_start_kernel）
-    ├─ 源代码位置：linux/arch/x86/kernel/head64.c
-    ├─ 设置早期中断处理程序（idt_setup_early_handler）
-    │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
-    ├─ TDX 早期初始化（tdx_early_init，如果支持）
-    ├─ 复制引导数据（copy_bootdata）
-    ├─ 加载微码更新（load_ucode_boot）
-    ├─ 设置内核高地址映射
-    └─ 启动内核预留区域初始化（x86_64_start_reservations）
-        └─ 最终调用 start_kernel()
-```
-
-**关键点：**
-- **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
-- **用户交互触发**：跳转由用户在菜单中选择启动项时触发
-- **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点（`code32_start`）
-
 ## GRUB 加载内核的详细流程
 
-**源代码位置：** 
-- `grub/grub-core/kern/main.c` - `grub_main()` 函数
-- `grub/grub-core/loader/i386/linux.c` - 内核加载相关函数
+本章节详细说明 GRUB 加载内核的各个步骤，包括源代码分析和实现细节。
 
-GRUB 加载 Linux 内核的过程包括以下步骤：
+### grub_cmd_linux() 函数详细讲解
 
-1. **grub_main()**（`grub/grub-core/kern/main.c:304`）解析 `grub.cfg` 配置文件，执行 `linux` 命令
-2. **grub_cmd_linux()**（`grub/grub-core/loader/i386/linux.c:680`）打开内核文件（如 `/boot/vmlinuz-5.x.x`），解析内核头部，加载内核镜像到内存
-3. **grub_linux_boot()**（`grub/grub-core/loader/i386/linux.c:761`）设置启动参数，通过 `grub_relocator32_boot()` 跳转到内核入口点
+**源代码位置：** `grub/grub-core/loader/i386/linux.c:680-725`
+
+**功能：**
+- 打开内核文件（如 `/boot/vmlinuz-5.x.x`）
+- 解析内核头部，验证内核签名
+- 加载内核镜像到内存（`0x100000`）
+- 设置内核启动参数（`boot_params`）
+- 注册启动函数 `grub_linux_boot()`
 
 **内核镜像结构概述：**
 
@@ -715,9 +676,7 @@ Linux 内核镜像（bzImage/vmlinuz）包含两部分：
    - 格式：gzip 压缩的 vmlinux
    - 加载地址：`0x100000`（1MB）或内核指定的地址
 
-**GRUB 加载内核的详细代码流程：**
-
-**源代码位置：** `grub/grub-core/loader/i386/linux.c:680-725`
+**完整源代码分析：**
 
 ```c
 // grub/grub-core/loader/i386/linux.c
@@ -786,6 +745,11 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
 }
 ```
 
+**关键点：**
+- **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
+- **用户交互触发**：跳转由用户在菜单中选择启动项时触发
+- **灵活性**：用户可以在加载内核后继续浏览菜单、修改参数或选择其他启动项
+
 **GRUB 菜单选择与启动函数的关系：**
 
 **执行时机说明：**
@@ -821,16 +785,16 @@ menuentry "Linux 5.x.x" {
 # → 跳转到内核入口点（code32_start）
 ```
 
-**关键点：**
-- **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
-- **用户交互触发**：跳转由用户在菜单中选择启动项时触发
-- **灵活性**：用户可以在加载内核后继续浏览菜单、修改参数或选择其他启动项
-
-**步骤 12：grub_linux_boot() 执行跳转**
-
-当用户选择启动内核时，GRUB 会调用注册的 `grub_linux_boot()` 函数，该函数通过 `grub_relocator32_boot()` 跳转到内核入口点：
+### grub_linux_boot() 函数详细讲解
 
 **源代码位置：** `grub/grub-core/loader/i386/linux.c:446-667`
+
+**功能：**
+- 准备 `boot_params` 结构（包含 `code32_start`）
+- 设置寄存器状态（ESI、ESP、EIP）
+- 通过 `grub_relocator32_boot()` 跳转到内核入口点
+
+**完整源代码分析：**
 
 ```c
 // grub/grub-core/loader/i386/linux.c
@@ -850,9 +814,16 @@ grub_linux_boot (void)
 }
 ```
 
-**步骤 13：grub_relocator32_boot() 执行跳转**
+### grub_relocator32_boot() 函数详细讲解
 
 **源代码位置：** `grub/grub-core/lib/i386/relocator.c:75-117`
+
+**功能：**
+- 设置寄存器值（`grub_relocator32_eip`、`grub_relocator32_esi`）
+- 准备 relocator 代码（切换到保护模式并跳转）
+- 执行跳转到内核入口点（`code32_start`）
+
+**完整源代码分析：**
 
 ```c
 // grub/grub-core/lib/i386/relocator.c
@@ -880,7 +851,7 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
 }
 ```
 
-**地址来源和加载过程：**
+### code32_start 地址的来源和传递过程
 
 **1. `code32_start` 的来源：**
 
@@ -934,11 +905,7 @@ relocator32_start:
 - **加载时机**：relocator 代码执行时，从 `grub_relocator32_eip` 读取并加载到 EIP 寄存器
 - **最终结果**：CPU 的 EIP 寄存器指向内核入口点（`code32_start`），开始执行内核代码
 
-**关键点：**
-- **`grub_cmd_linux()`** 只负责加载内核镜像到内存，注册启动函数，不执行跳转
-- **`grub_linux_boot()`** 在用户选择启动时被调用，准备跳转参数
-- **`grub_relocator32_boot()`** 实际执行跳转，切换到保护模式并跳转到内核入口点（`code32_start`）
-- **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点
+### 内存布局和启动参数
 
 **内存布局（加载后）：**
 

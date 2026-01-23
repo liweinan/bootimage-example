@@ -1827,29 +1827,6 @@ LOCAL(copy_buffer):
    - 由于块列表是从高地址向低地址排列（`%di` 递减），每次减少 12 字节正好移动到下一个条目
    - **验证**：如果 `GRUB_BOOT_MACHINE_LIST_SIZE` 不是 12，指针移动会错位
 
-3. **内存布局验证**：
-   - `.org 0x200 - GRUB_BOOT_MACHINE_LIST_SIZE`：定位到 `0x1F4`（512 - 12 = 500 字节）
-   - 块列表在 `0x81F4-0x81FF`，正好是 12 字节（0x1FF - 0x1F4 + 1 = 12）
-   - **验证**：如果 `GRUB_BOOT_MACHINE_LIST_SIZE` 不是 12，块列表位置会不正确
-
-// ========== 跳转到 startup_raw.S ==========
-LOCAL(bootit):
-    // 所有块列表条目处理完成，跳转到 startup_raw.S
-    // startup_raw.S 位于内存地址 0x8200（段地址 0x0000，偏移 0x8200）
-    // 源代码位置：grub/grub-core/boot/i386/pc/diskboot.S:310-320
-    
-    // 设置段寄存器
-    movw    $GRUB_BOOT_MACHINE_KERNEL_SEG, %ax  // %ax = 0x0000
-    movw    %ax, %ds                              // 设置数据段 = 0x0000
-    movw    %ax, %ss                              // 设置栈段 = 0x0000
-    
-    // 跳转到 startup_raw.S 入口点（0x0000:0x8200）
-    // 使用长跳转（ljmp）跳转到段地址 0x0000，偏移 0x8200
-    ljmp    $GRUB_BOOT_MACHINE_KERNEL_SEG, $(GRUB_BOOT_MACHINE_KERNEL_ADDR + 0x200)
-    // 等价于：ljmp $0x0000, $0x8200
-    // 这会跳转到物理地址 0x8200，即 startup_raw.S 的入口点（LOCAL(codestart)）
-```
-
 **4. 块列表字段的内存布局：**
 
 ```
@@ -2801,23 +2778,6 @@ startup_64（64 位内核入口点）
     └─ 启动内核预留区域初始化（x86_64_start_reservations）
         └─ 最终调用 start_kernel()
 ```
-
-### GRUB 加载内核的详细流程
-
-**源代码位置：**
-- `grub/grub-core/kern/main.c` - `grub_main()` 函数
-- `grub/grub-core/loader/i386/linux.c` - 内核加载相关函数
-
-GRUB 加载 Linux 内核的过程包括以下步骤：
-
-1. **grub_main()**（`grub/grub-core/kern/main.c:304`）解析 `grub.cfg` 配置文件，执行 `linux` 命令
-2. **grub_cmd_linux()**（`grub/grub-core/loader/i386/linux.c:680`）打开内核文件（如 `/boot/vmlinuz-5.x.x`），解析内核头部，加载内核镜像到内存
-3. **grub_linux_boot()**（`grub/grub-core/loader/i386/linux.c:761`）设置启动参数，通过 `grub_relocator32_boot()` 跳转到内核入口点
-
-**关键点：**
-- **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
-- **用户交互触发**：跳转由用户在菜单中选择启动项时触发
-- **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点（`code32_start`）
 
 > **详细说明**：关于 GRUB 加载内核的详细代码流程、内核镜像结构、内存布局、启动参数传递等，请参见 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md)。  
 > 关于 vmlinuz 文件结构的完整分析，请参见 [vmlinuz 文件详细结构分析](VMLINUZ_STRUCTURE.md)。
