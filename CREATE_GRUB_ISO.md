@@ -65,6 +65,171 @@ EOF
 grub-mkrescue -o grub.iso iso
 ```
 
+### 添加 Linux 内核并配置启动
+
+如果要包含 Linux 内核文件并配置好 grub.cfg 来启动 Linux，有两种方式：
+
+#### 方式 A：使用自动化脚本（推荐）
+
+项目根目录提供了自动化脚本 `create_grub_iso_with_kernel.sh`，可以自动下载所有所需文件并生成完整的 ISO：
+
+```bash
+# 运行脚本（假设已安装依赖工具）
+./create_grub_iso_with_kernel.sh
+```
+
+脚本功能：
+- 自动检查依赖工具（grub-mkrescue, wget）
+- 自动下载 Linux 内核文件（vmlinuz）和 initrd
+- 自动创建目录结构和 grub.cfg 配置
+- 自动生成 ISO 文件
+- 提供详细的进度输出和使用说明
+
+生成的 ISO 文件：`grub-linux.iso`
+
+#### 方式 B：手动步骤
+
+如果要手动创建，需要以下步骤：
+
+#### 步骤 1：获取 Linux 内核文件
+
+**方法 A：从已安装的 Linux 系统复制**
+
+```bash
+# 从当前系统复制内核文件（如果已安装 Linux）
+cp /boot/vmlinuz-$(uname -r) iso/boot/vmlinuz
+cp /boot/initrd.img-$(uname -r) iso/boot/initrd.img
+```
+
+**方法 B：下载预编译的内核（推荐用于测试）**
+
+```bash
+# 下载 Debian/Ubuntu 的内核文件（示例）
+# 注意：需要下载对应架构的内核（x86_64）
+wget -O iso/boot/vmlinuz https://mirrors.kernel.org/debian/dists/stable/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux
+wget -O iso/boot/initrd.img https://mirrors.kernel.org/debian/dists/stable/main/installer-amd64/current/images/netboot/debian-installer/amd64/initrd.gz
+```
+
+**方法 C：使用 QEMU 测试内核（最小化内核）**
+
+```bash
+# 下载或编译一个最小化的 Linux 内核用于测试
+# 例如：使用 Linux 内核源码编译，或使用预编译的测试内核
+```
+
+#### 步骤 2：配置 grub.cfg 启动 Linux
+
+创建包含 Linux 启动项的 grub.cfg：
+
+```bash
+cat > iso/boot/grub/grub.cfg << 'EOF'
+set timeout=5
+set default=0
+
+menuentry "Linux Kernel" {
+    # 设置根设备为 ISO（iso9660 文件系统）
+    set root='cd0'
+    
+    # 加载内核
+    linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200
+    
+    # 加载初始 RAM 磁盘（如果使用）
+    initrd /boot/initrd.img
+}
+
+menuentry "GRUB2 Shell" {
+    echo "Welcome to GRUB2 Shell!"
+    echo "You can type commands like ls, cat, multiboot, etc. to test."
+}
+EOF
+```
+
+**重要说明：**
+
+1. **根设备设置**：`set root='cd0'` 表示从 CD-ROM（ISO）启动
+2. **内核参数**：
+   - `root=/dev/ram0`：使用 RAM 作为根文件系统（适用于 initrd）
+   - `rw`：以读写模式挂载
+   - `console=ttyS0,115200`：设置串口控制台（QEMU 中可用 `-serial stdio` 查看）
+3. **文件路径**：确保 `vmlinuz` 和 `initrd.img` 在 ISO 的 `/boot/` 目录下
+
+#### 步骤 3：重新生成 ISO
+
+```bash
+grub-mkrescue -o grub.iso iso
+```
+
+#### 步骤 4：使用 QEMU 启动并测试
+
+```bash
+# 基本启动
+qemu-system-x86_64 -cdrom grub.iso -boot d -m 512
+
+# 带串口输出（可以看到内核启动日志）
+qemu-system-x86_64 -cdrom grub.iso -boot d -m 512 -serial stdio
+
+# 如果需要网络支持（某些内核需要）
+qemu-system-x86_64 -cdrom grub.iso -boot d -m 512 -netdev user,id=net0 -device e1000,netdev=net0
+```
+
+#### 完整示例脚本
+
+```bash
+#!/bin/bash
+# create_grub_iso_with_kernel.sh
+
+# 创建工作目录
+mkdir -p iso/boot/grub
+
+# 复制内核文件（从当前系统，如果存在）
+if [ -f /boot/vmlinuz-$(uname -r) ]; then
+    echo "复制内核文件..."
+    cp /boot/vmlinuz-$(uname -r) iso/boot/vmlinuz
+    cp /boot/initrd.img-$(uname -r) iso/boot/initrd.img 2>/dev/null || echo "警告：未找到 initrd.img"
+else
+    echo "错误：未找到内核文件，请手动下载或复制内核到 iso/boot/"
+    exit 1
+fi
+
+# 创建 grub.cfg
+cat > iso/boot/grub/grub.cfg << 'EOF'
+set timeout=5
+set default=0
+
+menuentry "Linux Kernel" {
+    set root='cd0'
+    linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200
+    initrd /boot/initrd.img
+}
+
+menuentry "GRUB2 Shell" {
+    echo "Welcome to GRUB2 Shell!"
+}
+EOF
+
+# 生成 ISO
+echo "生成 ISO..."
+grub-mkrescue -o grub.iso iso
+
+echo "完成！使用以下命令启动："
+echo "qemu-system-x86_64 -cdrom grub.iso -boot d -m 512 -serial stdio"
+```
+
+#### 常见问题
+
+1. **内核无法启动**：
+   - 检查内核文件是否正确复制到 `iso/boot/`
+   - 确认内核架构匹配（x86_64）
+   - 检查 grub.cfg 中的路径是否正确
+
+2. **找不到根文件系统**：
+   - 如果使用 initrd，确保 `initrd.img` 存在
+   - 调整内核参数中的 `root=` 参数
+
+3. **内核参数调整**：
+   - 根据实际需求调整内核命令行参数
+   - 例如：`quiet`（静默启动）、`nomodeset`（禁用图形模式）等
+
 **常见错误及解决**：
 
 - `xorriso not found` → 安装 `xorriso`
@@ -193,6 +358,30 @@ qemu-system-x86_64 -cdrom grub.iso -boot d -m 512
 ```
 
 完成以上步骤，你就可以自由地在 QEMU 中玩转 GRUB2 了！  
+
+## 7. 快速生成包含 Linux 内核的 ISO（一键脚本）
+
+使用项目提供的自动化脚本：
+
+```bash
+# 确保脚本有执行权限
+chmod +x create_grub_iso_with_kernel.sh
+
+# 运行脚本
+./create_grub_iso_with_kernel.sh
+```
+
+脚本会自动：
+1. 检查依赖工具（grub-mkrescue, wget）
+2. 下载 Debian 安装器的内核文件（vmlinuz 和 initrd.img）
+3. 创建完整的目录结构和 grub.cfg 配置
+4. 生成 `grub-linux.iso` 文件
+
+启动生成的 ISO：
+
+```bash
+qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 512 -serial stdio
+```
 
 后续如果要加载自己的 kernel/initrd，可直接在 `grub.cfg` 中添加 `multiboot` / `linux` / `initrd` 条目。
 
