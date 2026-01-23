@@ -361,7 +361,17 @@ qemu-system-x86_64 -cdrom grub.iso -boot d -m 512
 
 ## 7. 快速生成包含 Linux 内核的 ISO（一键脚本）
 
-使用项目提供的自动化脚本：
+### 7.1 脚本简介
+
+项目提供了自动化脚本 `create_grub_iso_with_kernel.sh`，可以一键完成所有步骤：
+- 自动检查依赖工具
+- 自动下载 Linux 内核和 initrd 文件
+- 自动创建目录结构和配置文件
+- 自动生成可启动的 ISO 文件
+
+### 7.2 使用方法
+
+**基本使用：**
 
 ```bash
 # 确保脚本有执行权限
@@ -371,16 +381,178 @@ chmod +x create_grub_iso_with_kernel.sh
 ./create_grub_iso_with_kernel.sh
 ```
 
-脚本会自动：
-1. 检查依赖工具（grub-mkrescue, wget）
-2. 下载 Debian 安装器的内核文件（vmlinuz 和 initrd.img）
-3. 创建完整的目录结构和 grub.cfg 配置
-4. 生成 `grub-linux.iso` 文件
+**脚本执行流程：**
 
-启动生成的 ISO：
+1. **检查依赖**：验证 `grub-mkrescue` 和 `wget` 是否已安装
+2. **清理旧文件**：删除之前生成的 ISO 和工作目录
+3. **创建目录结构**：创建 `iso/boot/grub` 目录结构
+4. **下载内核文件**：
+   - 从 Debian 镜像站下载 Linux 内核（vmlinuz）
+   - 下载初始 RAM 磁盘（initrd.gz）
+5. **创建配置文件**：生成包含多个启动项的 `grub.cfg`
+6. **生成 ISO**：使用 `grub-mkrescue` 生成 `grub-linux.iso`
+
+### 7.3 脚本配置选项
+
+脚本中的可配置变量（位于脚本开头）：
+
+```bash
+# ISO 文件名
+ISO_NAME="grub-linux.iso"
+
+# Debian 镜像源（可以根据网络情况修改）
+DEBIAN_MIRROR="https://mirrors.kernel.org/debian"
+
+# Debian 版本（可选：stable, bookworm, testing 等）
+DEBIAN_VERSION="bookworm"
+
+# 架构（amd64 或 i386）
+ARCH="amd64"
+```
+
+**修改配置示例：**
+
+```bash
+# 使用国内镜像源（如果下载速度慢）
+# 编辑脚本，修改 DEBIAN_MIRROR 变量：
+DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian"
+
+# 使用稳定版
+DEBIAN_VERSION="stable"
+```
+
+### 7.4 脚本输出说明
+
+脚本运行时会显示：
+
+- **绿色输出**：成功完成的操作
+- **黄色输出**：进行中的操作和提示信息
+- **红色输出**：错误信息
+
+**示例输出：**
+
+```
+=== GRUB ISO 生成脚本 ===
+
+检查依赖工具...
+✓ 依赖工具检查通过
+
+清理旧文件...
+✓ 清理完成
+
+创建目录结构...
+✓ 目录结构创建完成
+
+下载 Linux 内核文件...
+内核 URL: https://mirrors.kernel.org/debian/...
+✓ 内核文件下载完成: iso/boot/vmlinuz
+
+下载 initrd 文件...
+✓ initrd 文件下载完成: iso/boot/initrd.img
+
+创建 grub.cfg 配置文件...
+✓ grub.cfg 创建完成
+
+生成 ISO 文件...
+✓ ISO 文件生成成功: grub-linux.iso
+文件大小: 15M
+```
+
+### 7.5 生成的 ISO 内容
+
+生成的 `grub-linux.iso` 包含：
+
+1. **Linux Kernel (Debian Installer)**：带 initrd 的完整 Linux 内核启动项
+2. **Linux Kernel (No Initrd)**：不带 initrd 的内核启动项（备选）
+3. **GRUB2 Shell**：GRUB 命令行界面，用于测试和调试
+
+### 7.6 启动生成的 ISO
+
+**基本启动：**
 
 ```bash
 qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 512 -serial stdio
+```
+
+**参数说明：**
+- `-cdrom grub-linux.iso`：指定 ISO 文件
+- `-boot d`：从 CD-ROM 启动
+- `-m 512`：分配 512MB 内存（可根据需要调整）
+- `-serial stdio`：将串口输出到终端（可以看到内核启动日志）
+
+**带网络支持：**
+
+```bash
+qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 512 -serial stdio \
+    -netdev user,id=net0 -device e1000,netdev=net0
+```
+
+**使用图形界面：**
+
+```bash
+qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 512 -vga std
+```
+
+### 7.7 故障排除
+
+**问题 1：下载失败**
+
+```
+错误: 内核文件下载失败
+```
+
+**解决方案：**
+- 检查网络连接
+- 尝试修改脚本中的 `DEBIAN_MIRROR` 为其他镜像源
+- 手动下载文件到 `iso/boot/` 目录
+
+**问题 2：依赖工具未找到**
+
+```
+错误: 未找到 grub-mkrescue，请先安装
+```
+
+**解决方案：**
+```bash
+sudo apt install grub-pc-bin wget
+```
+
+**问题 3：ISO 生成失败**
+
+```
+错误: ISO 文件生成失败
+```
+
+**解决方案：**
+- 检查 `xorriso` 和 `mtools` 是否已安装：`sudo apt install xorriso mtools`
+- 检查工作目录是否有写权限
+- 查看详细错误信息
+
+**问题 4：内核无法启动**
+
+**解决方案：**
+- 确认内核文件已正确下载（检查 `iso/boot/vmlinuz` 文件大小）
+- 检查 grub.cfg 中的路径是否正确
+- 尝试使用不带 initrd 的启动项
+
+### 7.8 自定义脚本
+
+如果需要自定义脚本行为，可以：
+
+1. **修改内核来源**：编辑脚本中的 `KERNEL_URL` 和 `INITRD_URL`
+2. **修改 grub.cfg**：编辑脚本中生成 grub.cfg 的部分
+3. **添加更多启动项**：在 grub.cfg 生成部分添加新的 menuentry
+
+**示例：添加自定义启动项**
+
+编辑脚本，在 grub.cfg 生成部分添加：
+
+```bash
+menuentry "My Custom Kernel" {
+    set root='cd0'
+    linux /boot/my-kernel root=/dev/sda1 ro
+    initrd /boot/my-initrd
+}
 ```
 
 后续如果要加载自己的 kernel/initrd，可直接在 `grub.cfg` 中添加 `multiboot` / `linux` / `initrd` 条目。

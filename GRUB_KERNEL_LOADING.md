@@ -247,6 +247,8 @@ grub_main (void)
 
 **配置示例：**
 
+**示例 1：从硬盘启动（实际系统）**
+
 ```bash
 # /boot/grub/grub.cfg
 menuentry "Linux 5.x.x" {
@@ -264,6 +266,60 @@ menuentry "Linux 5.x.x" {
 # → grub_linux_boot() 调用 grub_relocator32_boot()
 # → 跳转到内核入口点（code32_start）
 ```
+
+**示例 2：从 ISO 启动（测试环境，如 create_grub_iso_with_kernel.sh 生成的配置）**
+
+```bash
+# iso/boot/grub/grub.cfg
+set root='cd0'  # 设置根设备为 CD-ROM
+
+menuentry "Linux Kernel (Debian Installer)" {
+    set root='cd0'
+    linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200
+    # ↑ 从 ISO 启动，使用 RAM 作为根文件系统
+    #   console=ttyS0,115200 用于串口输出（QEMU 中可用 -serial stdio 查看）
+    #   注意：脚本下载的文件名为 "linux"，但保存为 "vmlinuz"（Linux 内核标准命名）
+    
+    initrd /boot/initrd.img
+    # ↑ 加载初始 RAM 磁盘
+    #   注意：脚本下载的文件名为 "initrd.gz"（压缩格式），但保存为 "initrd.img"
+    #   GRUB 可以自动处理压缩的 initrd 文件（gzip 格式）
+}
+```
+
+**文件命名说明（create_grub_iso_with_kernel.sh）：**
+
+脚本下载的文件和最终保存的文件名：
+- **内核文件**：下载 `linux` → 保存为 `iso/boot/vmlinuz`（Linux 内核的标准命名）
+- **initrd 文件**：下载 `initrd.gz`（gzip 压缩）→ 保存为 `iso/boot/initrd.img`
+  - GRUB 的 `initrd` 命令可以自动识别并解压 gzip 压缩的 initrd 文件
+  - 文件扩展名 `.img` 是约定俗成的命名，实际内容可能是压缩的
+
+**vmlinuz 和 initrd 的关系：**
+
+- **vmlinuz**：压缩的 Linux 内核镜像文件，包含内核的核心代码
+- **initrd**：初始 RAM 磁盘，包含启动早期阶段所需的驱动程序和工具
+- **配合工作**：内核先加载，然后从 initrd 加载驱动，最后访问真正的根文件系统
+
+> **详细说明**：关于 vmlinuz 和 initrd 的详细关系、使用场景、是否需要 initrd 的判断方法、现代系统的 initramfs 等，请参见 [vmlinuz 和 initrd 的关系详解](VMLINUZ_INITRD_RELATIONSHIP.md)。
+
+**文件命名说明（create_grub_iso_with_kernel.sh）：**
+
+脚本下载的文件和最终保存的文件名：
+- **内核文件**：下载 `linux` → 保存为 `iso/boot/vmlinuz`（Linux 内核的标准命名）
+- **initrd 文件**：下载 `initrd.gz`（gzip 压缩）→ 保存为 `iso/boot/initrd.img`
+  - GRUB 的 `initrd` 命令可以自动识别并解压 gzip 压缩的 initrd 文件
+  - 文件扩展名 `.img` 是约定俗成的命名，实际内容可能是压缩的
+
+**配置说明：**
+
+- **硬盘启动**：`root=/dev/sda1` 表示从第一个 SATA 硬盘的第一个分区启动
+- **ISO 启动**：`root=/dev/ram0` 表示使用 RAM 作为根文件系统（适用于从 ISO 或网络启动）
+- **内核参数**：
+  - `ro`：只读模式挂载根文件系统（启动后通常会重新挂载为读写）
+  - `rw`：读写模式挂载
+  - `quiet`：静默启动（减少输出）
+  - `console=ttyS0,115200`：设置串口控制台（用于调试和查看启动日志）
 
 **5. `grub_load_normal_mode()` - 加载 normal 模式**
 

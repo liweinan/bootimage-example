@@ -17,14 +17,17 @@ BOOT_DIR="${WORK_DIR}/boot"
 GRUB_DIR="${BOOT_DIR}/grub"
 KERNEL_DIR="${BOOT_DIR}"
 
-# Debian 镜像源（可以根据需要修改）
-DEBIAN_MIRROR="https://mirrors.kernel.org/debian"
-DEBIAN_VERSION="bookworm"  # 可以根据需要修改为 stable, testing 等
-ARCH="amd64"
+# Alpine Linux 镜像源（轻量级，启动后直接进入 shell）
+ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine"
+ALPINE_VERSION="v3.19"  # 可以根据需要修改版本
+ARCH="x86_64"
 
-# 内核文件下载 URL（使用 Debian 安装器的内核）
-KERNEL_URL="${DEBIAN_MIRROR}/dists/${DEBIAN_VERSION}/main/installer-${ARCH}/current/images/netboot/debian-installer/${ARCH}/linux"
-INITRD_URL="${DEBIAN_MIRROR}/dists/${DEBIAN_VERSION}/main/installer-${ARCH}/current/images/netboot/debian-installer/${ARCH}/initrd.gz"
+# 内核文件下载 URL（使用 Alpine Linux 标准内核，启动后进入 shell）
+KERNEL_URL="${ALPINE_MIRROR}/${ALPINE_VERSION}/releases/${ARCH}/alpine-standard-${ALPINE_VERSION#v}-${ARCH}.iso"
+# 注意：Alpine ISO 包含内核，我们需要提取它，或者直接下载内核文件
+# 更简单的方式：使用 Alpine 的 netboot 内核
+KERNEL_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_VERSION}/releases/${ARCH}/netboot/vmlinuz-virt"
+INITRD_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_VERSION}/releases/${ARCH}/netboot/initramfs-virt"
 
 # 临时文件
 KERNEL_TMP="vmlinuz.tmp"
@@ -32,6 +35,18 @@ INITRD_TMP="initrd.gz.tmp"
 
 echo -e "${GREEN}=== GRUB ISO 生成脚本 ===${NC}"
 echo ""
+
+# 检查是否使用本地内核文件
+USE_LOCAL_KERNEL=false
+if [ "$1" = "--local" ] || [ "$1" = "-l" ]; then
+    USE_LOCAL_KERNEL=true
+    echo -e "${YELLOW}使用本地系统内核文件模式${NC}"
+    if [ ! -f /boot/vmlinuz-$(uname -r) ]; then
+        echo -e "${RED}错误: 未找到本地内核文件 /boot/vmlinuz-$(uname -r)${NC}"
+        exit 1
+    fi
+    echo ""
+fi
 
 # 检查依赖工具
 echo -e "${YELLOW}检查依赖工具...${NC}"
@@ -58,31 +73,57 @@ mkdir -p "${GRUB_DIR}"
 echo -e "${GREEN}✓ 目录结构创建完成${NC}"
 echo ""
 
-# 下载内核文件
-echo -e "${YELLOW}下载 Linux 内核文件...${NC}"
-echo "内核 URL: ${KERNEL_URL}"
-if wget --progress=bar:force -O "${KERNEL_TMP}" "${KERNEL_URL}" 2>&1 | grep -q "200 OK\|saved"; then
-    mv "${KERNEL_TMP}" "${KERNEL_DIR}/vmlinuz"
-    echo -e "${GREEN}✓ 内核文件下载完成: ${KERNEL_DIR}/vmlinuz${NC}"
+# 下载或复制内核文件
+if [ "$USE_LOCAL_KERNEL" = "true" ]; then
+    echo -e "${YELLOW}复制本地内核文件...${NC}"
+    KERNEL_VERSION=$(uname -r)
+    cp /boot/vmlinuz-${KERNEL_VERSION} "${KERNEL_DIR}/vmlinuz"
+    echo -e "${GREEN}✓ 内核文件复制完成: ${KERNEL_DIR}/vmlinuz${NC}"
+    echo ""
+    
+    # 尝试复制 initrd
+    if [ -f /boot/initrd.img-${KERNEL_VERSION} ]; then
+        cp /boot/initrd.img-${KERNEL_VERSION} "${KERNEL_DIR}/initrd.img"
+        echo -e "${GREEN}✓ initrd 文件复制完成: ${KERNEL_DIR}/initrd.img${NC}"
+        HAS_INITRD=true
+    elif [ -f /boot/initramfs-${KERNEL_VERSION}.img ]; then
+        cp /boot/initramfs-${KERNEL_VERSION}.img "${KERNEL_DIR}/initrd.img"
+        echo -e "${GREEN}✓ initrd 文件复制完成: ${KERNEL_DIR}/initrd.img${NC}"
+        HAS_INITRD=true
+    else
+        echo -e "${RED}错误: 未找到本地 initrd 文件${NC}"
+        echo "请确保系统有 initrd 或 initramfs 文件"
+        exit 1
+    fi
+    echo ""
 else
-    echo -e "${RED}错误: 内核文件下载失败${NC}"
-    rm -f "${KERNEL_TMP}"
-    exit 1
+    # 下载 Alpine Linux 内核文件
+    echo -e "${YELLOW}下载 Alpine Linux 内核文件...${NC}"
+    echo "内核 URL: ${KERNEL_URL}"
+    if wget --progress=bar:force -O "${KERNEL_TMP}" "${KERNEL_URL}" 2>&1 | grep -q "200 OK\|saved"; then
+        mv "${KERNEL_TMP}" "${KERNEL_DIR}/vmlinuz"
+        echo -e "${GREEN}✓ 内核文件下载完成: ${KERNEL_DIR}/vmlinuz${NC}"
+    else
+        echo -e "${RED}错误: 内核文件下载失败${NC}"
+        rm -f "${KERNEL_TMP}"
+        exit 1
+    fi
+    echo ""
+    
+    # 下载 initrd 文件
+    echo -e "${YELLOW}下载 initrd 文件...${NC}"
+    echo "initrd URL: ${INITRD_URL}"
+    if wget --progress=bar:force -O "${INITRD_TMP}" "${INITRD_URL}" 2>&1 | grep -q "200 OK\|saved"; then
+        mv "${INITRD_TMP}" "${KERNEL_DIR}/initrd.img"
+        echo -e "${GREEN}✓ initrd 文件下载完成: ${KERNEL_DIR}/initrd.img${NC}"
+        HAS_INITRD=true
+    else
+        echo -e "${RED}错误: initrd 文件下载失败${NC}"
+        rm -f "${INITRD_TMP}"
+        exit 1
+    fi
+    echo ""
 fi
-echo ""
-
-# 下载 initrd 文件
-echo -e "${YELLOW}下载 initrd 文件...${NC}"
-echo "initrd URL: ${INITRD_URL}"
-if wget --progress=bar:force -O "${INITRD_TMP}" "${INITRD_URL}" 2>&1 | grep -q "200 OK\|saved"; then
-    mv "${INITRD_TMP}" "${KERNEL_DIR}/initrd.img"
-    echo -e "${GREEN}✓ initrd 文件下载完成: ${KERNEL_DIR}/initrd.img${NC}"
-else
-    echo -e "${YELLOW}警告: initrd 文件下载失败，将创建不包含 initrd 的配置${NC}"
-    rm -f "${INITRD_TMP}"
-    HAS_INITRD=false
-fi
-echo ""
 
 # 创建 grub.cfg
 echo -e "${YELLOW}创建 grub.cfg 配置文件...${NC}"
@@ -90,18 +131,32 @@ cat > "${GRUB_DIR}/grub.cfg" << 'GRUB_EOF'
 set timeout=5
 set default=0
 
-# 设置 ISO 根设备
+# 加载必要的模块以支持 ISO 文件系统
+insmod iso9660
+insmod part_msdos
+insmod part_gpt
+
+# 设置根设备为 CD-ROM（ISO）
 set root='cd0'
 
-menuentry "Linux Kernel (Debian Installer)" {
+menuentry "Linux - Boot to Shell" {
     set root='cd0'
-    linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200
+    linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200 quiet
     initrd /boot/initrd.img
 }
 
-menuentry "Linux Kernel (No Initrd)" {
+menuentry "Debug: List Files" {
     set root='cd0'
-    linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200
+    echo "Root device: $root"
+    echo ""
+    echo "Listing /boot directory:"
+    ls /boot/
+    echo ""
+    echo "Listing /boot/grub directory:"
+    ls /boot/grub/
+    echo ""
+    echo "Press any key to return to menu..."
+    read
 }
 
 menuentry "GRUB2 Shell" {
@@ -118,10 +173,10 @@ menuentry "GRUB2 Shell" {
 }
 GRUB_EOF
 
-# 如果没有 initrd，移除包含 initrd 的菜单项
+# 检查是否有 initrd，如果没有则报错
 if [ "${HAS_INITRD:-true}" = "false" ]; then
-    sed -i '/menuentry "Linux Kernel (Debian Installer)"/,/^}$/d' "${GRUB_DIR}/grub.cfg"
-    echo -e "${YELLOW}已移除需要 initrd 的菜单项${NC}"
+    echo -e "${RED}错误: 未找到 initrd 文件，无法创建启动配置${NC}"
+    exit 1
 fi
 
 echo -e "${GREEN}✓ grub.cfg 创建完成${NC}"
@@ -162,4 +217,9 @@ echo ""
 echo "可选参数:"
 echo "  -netdev user,id=net0 -device e1000,netdev=net0  : 启用网络支持"
 echo "  -vga std            : 使用标准 VGA 显示"
+echo ""
+echo "使用说明:"
+echo "  - 默认使用 Alpine Linux 内核（轻量级，启动后进入 shell）"
+echo "  - 使用 --local 或 -l 参数可使用本地系统内核:"
+echo "    ${YELLOW}./create_grub_iso_with_kernel.sh --local${NC}"
 echo ""
