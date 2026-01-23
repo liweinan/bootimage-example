@@ -33,6 +33,9 @@ INITRD_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_VERSION}/releases/${A
 KERNEL_TMP="vmlinuz.tmp"
 INITRD_TMP="initrd.gz.tmp"
 
+# 本地缓存目录（用于保存已下载的文件）
+CACHE_DIR=".grub_iso_cache"
+
 echo -e "${GREEN}=== GRUB ISO 生成脚本 ===${NC}"
 echo ""
 
@@ -60,12 +63,15 @@ done
 echo -e "${GREEN}✓ 依赖工具检查通过${NC}"
 echo ""
 
-# 清理旧文件
+# 清理旧文件（保留缓存目录）
 echo -e "${YELLOW}清理旧文件...${NC}"
 rm -rf "${WORK_DIR}"
 rm -f "${ISO_NAME}" "${KERNEL_TMP}" "${INITRD_TMP}"
 echo -e "${GREEN}✓ 清理完成${NC}"
 echo ""
+
+# 创建缓存目录（如果不存在）
+mkdir -p "${CACHE_DIR}"
 
 # 创建目录结构
 echo -e "${YELLOW}创建目录结构...${NC}"
@@ -98,29 +104,50 @@ if [ "$USE_LOCAL_KERNEL" = "true" ]; then
     echo ""
 else
     # 下载 Alpine Linux 内核文件
-    echo -e "${YELLOW}下载 Alpine Linux 内核文件...${NC}"
-    echo "内核 URL: ${KERNEL_URL}"
-    if wget --progress=bar:force -O "${KERNEL_TMP}" "${KERNEL_URL}" 2>&1 | grep -q "200 OK\|saved"; then
-        mv "${KERNEL_TMP}" "${KERNEL_DIR}/vmlinuz"
-        echo -e "${GREEN}✓ 内核文件下载完成: ${KERNEL_DIR}/vmlinuz${NC}"
+    CACHED_KERNEL="${CACHE_DIR}/vmlinuz-alpine-${ALPINE_VERSION}"
+    CACHED_INITRD="${CACHE_DIR}/initrd-alpine-${ALPINE_VERSION}.img"
+    
+    # 检查本地缓存
+    if [ -f "${CACHED_KERNEL}" ]; then
+        echo -e "${YELLOW}使用本地缓存的内核文件...${NC}"
+        cp "${CACHED_KERNEL}" "${KERNEL_DIR}/vmlinuz"
+        echo -e "${GREEN}✓ 内核文件复制完成: ${KERNEL_DIR}/vmlinuz${NC}"
     else
-        echo -e "${RED}错误: 内核文件下载失败${NC}"
-        rm -f "${KERNEL_TMP}"
-        exit 1
+        echo -e "${YELLOW}下载 Alpine Linux 内核文件...${NC}"
+        echo "内核 URL: ${KERNEL_URL}"
+        if wget --progress=bar:force -O "${KERNEL_TMP}" "${KERNEL_URL}" 2>&1 | grep -q "200 OK\|saved"; then
+            mv "${KERNEL_TMP}" "${KERNEL_DIR}/vmlinuz"
+            # 保存到缓存
+            cp "${KERNEL_DIR}/vmlinuz" "${CACHED_KERNEL}"
+            echo -e "${GREEN}✓ 内核文件下载完成: ${KERNEL_DIR}/vmlinuz${NC}"
+        else
+            echo -e "${RED}错误: 内核文件下载失败${NC}"
+            rm -f "${KERNEL_TMP}"
+            exit 1
+        fi
     fi
     echo ""
     
     # 下载 initrd 文件
-    echo -e "${YELLOW}下载 initrd 文件...${NC}"
-    echo "initrd URL: ${INITRD_URL}"
-    if wget --progress=bar:force -O "${INITRD_TMP}" "${INITRD_URL}" 2>&1 | grep -q "200 OK\|saved"; then
-        mv "${INITRD_TMP}" "${KERNEL_DIR}/initrd.img"
-        echo -e "${GREEN}✓ initrd 文件下载完成: ${KERNEL_DIR}/initrd.img${NC}"
+    if [ -f "${CACHED_INITRD}" ]; then
+        echo -e "${YELLOW}使用本地缓存的 initrd 文件...${NC}"
+        cp "${CACHED_INITRD}" "${KERNEL_DIR}/initrd.img"
+        echo -e "${GREEN}✓ initrd 文件复制完成: ${KERNEL_DIR}/initrd.img${NC}"
         HAS_INITRD=true
     else
-        echo -e "${RED}错误: initrd 文件下载失败${NC}"
-        rm -f "${INITRD_TMP}"
-        exit 1
+        echo -e "${YELLOW}下载 initrd 文件...${NC}"
+        echo "initrd URL: ${INITRD_URL}"
+        if wget --progress=bar:force -O "${INITRD_TMP}" "${INITRD_URL}" 2>&1 | grep -q "200 OK\|saved"; then
+            mv "${INITRD_TMP}" "${KERNEL_DIR}/initrd.img"
+            # 保存到缓存
+            cp "${KERNEL_DIR}/initrd.img" "${CACHED_INITRD}"
+            echo -e "${GREEN}✓ initrd 文件下载完成: ${KERNEL_DIR}/initrd.img${NC}"
+            HAS_INITRD=true
+        else
+            echo -e "${RED}错误: initrd 文件下载失败${NC}"
+            rm -f "${INITRD_TMP}"
+            exit 1
+        fi
     fi
     echo ""
 fi
@@ -166,18 +193,6 @@ menuentry "Debug: List Files" {
     read
 }
 
-menuentry "GRUB2 Shell" {
-    echo "Welcome to GRUB2 Shell!"
-    echo ""
-    echo "Available commands:"
-    echo "  ls          - List files"
-    echo "  cat         - Display file contents"
-    echo "  set         - Set environment variables"
-    echo "  insmod      - Load module"
-    echo "  multiboot   - Load multiboot kernel"
-    echo ""
-    echo "Type 'exit' to return to menu"
-}
 GRUB_EOF
 
 # 检查是否有 initrd，如果没有则报错

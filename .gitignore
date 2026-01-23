@@ -14,3 +14,6 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# GRUB ISO 缓存目录
+.grub_iso_cache/
