@@ -104,6 +104,499 @@ protidt:
 
 **结论：`LOCAL(realidt)` 和 `protidt` 作为 `startup_raw.S` 的一部分，位于前 1MB 范围内（约 `0x8200+`），不会与解压程序（位于 `0x100000+`）重叠。**
 
+## 从保护模式到实模式的切换
+
+**prot_to_real 函数（源代码位置：`grub/grub-core/kern/i386/realmode.S:217-279`）：**
+
+```asm
+prot_to_real:
+    // 步骤 1: 设置 GDT
+    lgdt    gdtdesc
+    
+    // 步骤 2: 保存保护模式 IDT，恢复实模式 IDT（IVT）
+    sidt    protidt         // 保存保护模式 IDT（空）
+    lidt    LOCAL(realidt)  // 恢复实模式 IDT（IVT）
+    
+    // 步骤 3: 保存保护模式栈
+    movl    %esp, %eax
+    movl    %eax, protstack
+    
+    // 步骤 4: 保存返回地址（关键！）
+    movl    (%esp), %eax
+    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 1MB 以下的内存
+    
+    // 步骤 5-6: 切换到实模式（清除 CR0.PE 位等）
+    // ...
+    
+    // 步骤 7: 恢复中断
+    sti
+    
+    retl    // 返回，现在在实模式下
+```
+
+**⚠️ 关键问题：prot_to_real 执行后，GRUB 程序运行在 1MB 以上，如何解决？**
+
+**问题描述：**
+- GRUB 的解压后代码位于 `0x100000+`（1MB 以上）
+- 当从保护模式的代码（在 1MB 以上）调用 `prot_to_real` 时，返回地址指向 1MB 以上的代码
+- 切换到实模式后，实模式只能访问 1MB 以下的内存（`0x00000 - 0xFFFFF`）
+- **问题**：如何返回到 1MB 以上的代码？
+
+**解决方案：**
+
+1. **`prot_to_real` 和 `real_to_prot` 本身位于 1MB 以下**：
+   - 这两个函数被包含在 `startup_raw.S` 中（`startup_raw.S:119`：`#include "../../../kern/i386/realmode.S"`）
+   - `startup_raw.S` 被加载到内存地址 `0x8200`（1MB 以下）
+   - 因此，`prot_to_real` 和 `real_to_prot` 的代码本身位于 1MB 以下，可以在实模式下执行
+
+2. **返回地址的保存和恢复机制**：
+   - **`prot_to_real`**：保存返回地址到 `GRUB_MEMORY_MACHINE_REAL_STACK`（位于 1MB 以下，`0x2000 - 0x10`）
+   - **切换到实模式**：执行 BIOS 调用（在实模式下）
+   - **`real_to_prot`**：从 `GRUB_MEMORY_MACHINE_REAL_STACK` 恢复返回地址
+   - **切换回保护模式**：返回到保护模式的代码（此时已经在保护模式下，可以访问 1MB 以上的代码）
+
+**返回地址保存和恢复的源代码详解：**
+
+**1. GRUB_MEMORY_MACHINE_REAL_STACK 定义（源代码位置：`grub/include/grub/i386/memory_raw.h:29`）：**
+
+```c
+#define GRUB_MEMORY_MACHINE_REAL_STACK	(0x2000 - 0x10)
+```
+
+- **地址**：`0x1FF0`（1MB 以下，实模式可访问）
+- **用途**：临时存储返回地址，用于模式切换
+
+**2. prot_to_real 保存返回地址（源代码位置：`grub/grub-core/kern/i386/realmode.S:228-235`）：**
+
+```asm
+prot_to_real:
+    // ... (设置 GDT、IDT 等)
+    
+    // 步骤 1: 保存保护模式栈
+    movl    %esp, %eax
+    movl    %eax, protstack
+    
+    // 步骤 2: 保存返回地址到 1MB 以下的内存（关键！）
+    movl    (%esp), %eax                    // 从栈顶读取返回地址（指向 1MB 以上的代码）
+    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 0x1FF0（1MB 以下）
+    
+    // 步骤 3: 设置新的栈（使用 GRUB_MEMORY_MACHINE_REAL_STACK 作为栈）
+    movl    $GRUB_MEMORY_MACHINE_REAL_STACK, %eax
+    movl    %eax, %esp                      // 栈指针指向 0x1FF0
+    movl    %eax, %ebp
+    
+    // ... (切换到实模式)
+    
+    retl    // 返回到实模式代码（grub_bios_interrupt 的实模式部分）
+```
+
+**3. real_to_prot 恢复返回地址（源代码位置：`grub/grub-core/kern/i386/realmode.S:175-186`）：**
+
+```asm
+real_to_prot:
+    .code16
+    cli
+    
+    // ... (加载 GDT、设置 CR0.PE 位、跳转到保护模式)
+    
+    .code32
+protcseg:
+    // ... (重新加载段寄存器)
+    
+    // 步骤 1: 保存返回地址到 1MB 以下的内存（从实模式栈读取）
+    movl    (%esp), %eax                    // 从栈顶读取返回地址（实模式代码的返回地址）
+    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 0x1FF0
+    
+    // 步骤 2: 切换到保护模式栈
+    movl    protstack, %eax                  // 恢复保护模式栈指针
+    movl    %eax, %esp
+    movl    %eax, %ebp
+    
+    // 步骤 3: 恢复返回地址到保护模式栈（关键！）
+    movl    GRUB_MEMORY_MACHINE_REAL_STACK, %eax  // 从 0x1FF0 读取返回地址
+    movl    %eax, (%esp)                    // 将返回地址放到保护模式栈顶
+    
+    // ... (加载空 IDT)
+    
+    ret     // 返回到保护模式代码（1MB 以上，此时已在保护模式下，可以访问）
+```
+
+**4. grub_bios_interrupt 完整实现（源代码位置：`grub/grub-core/kern/i386/int.S:19-134`）：**
+
+```asm
+FUNCTION(grub_bios_interrupt)
+    // 步骤 1: 保存寄存器（在保护模式下）
+    pushf
+    cli
+    popf
+    pushl    %ebp
+    pushl    %ecx
+    pushl    %eax
+    pushl    %ebx
+    pushl    %esi
+    pushl    %edi
+    pushl    %edx
+    
+    // 步骤 2: 准备 BIOS 中断参数（在保护模式下）
+    movb     %al, intno                    // 保存中断号到 intno 位置（第 87 行）
+    movl     (%edx), %eax                  // 从参数结构读取 EAX 值
+    movl     %eax, LOCAL(bios_register_eax)  // 保存到局部变量
+    movw     4(%edx), %ax                  // 读取 ES 值
+    movw     %ax, LOCAL(bios_register_es)
+    movw     6(%edx), %ax                  // 读取 DS 值
+    movw     %ax, LOCAL(bios_register_ds)
+    movw     8(%edx), %ax                  // 读取 FLAGS 值
+    movw     %ax, LOCAL(bios_register_flags)
+    
+    movl     12(%edx), %ebx                // 读取 EBX 值
+    movl     16(%edx), %ecx                // 读取 ECX 值
+    movl     20(%edx), %edi                // 读取 EDI 值
+    movl     24(%edx), %esi                // 读取 ESI 值
+    movl     28(%edx), %edx                // 读取 EDX 值
+    
+    // 步骤 3: 切换到实模式（调用 prot_to_real）
+    PROT_TO_REAL                // 宏展开为：call prot_to_real
+    .code16                      // 现在在实模式下（16 位代码）
+    
+    // 步骤 4: 设置 BIOS 中断所需的寄存器（在实模式下）
+    pushf
+    cli
+    mov     %ds, %ax
+    push    %ax
+    
+    // 设置 ES 寄存器
+    .byte   0xb8                // movw imm16, %ax 的操作码
+LOCAL(bios_register_es):
+    .short  0                   // ES 值（在保护模式下已设置）
+    movw    %ax, %es
+    
+    // 设置 DS 寄存器
+    .byte   0xb8                // movw imm16, %ax 的操作码
+LOCAL(bios_register_ds):
+    .short  0                   // DS 值（在保护模式下已设置）
+    movw    %ax, %ds
+    
+    // 设置 FLAGS 寄存器
+    .byte   0xb8                // movw imm16, %ax 的操作码
+LOCAL(bios_register_flags):
+    .short  0                   // FLAGS 值（在保护模式下已设置）
+    push    %ax
+    popf                        // 恢复 FLAGS
+    
+    // 设置 EAX 寄存器
+    .byte   0x66, 0xb8          // movl imm32, %eax 的操作码（0x66 是 32 位操作数前缀）
+LOCAL(bios_register_eax):
+    .long   0                   // EAX 值（在保护模式下已设置）
+    
+    // 步骤 5: 执行 BIOS 中断调用（在实模式下，关键！）
+    .byte   0xcd                // INT 指令的操作码
+intno:                          // 中断号位置（在保护模式下第 31 行已设置）
+    .byte   0                   // 中断号（如 0x13，会被 movb %al, intno 修改）
+    // ⚠️ 注意：这里执行的是实际的 BIOS 中断调用
+    // CPU 会查找 IVT[intno]，跳转到 BIOS 处理程序，执行 BIOS 服务，然后返回
+    
+    // 步骤 6: 保存 BIOS 返回的寄存器值（在实模式下）
+    movl    %eax, %cs:LOCAL(bios_register_eax)  // 保存 BIOS 返回的 EAX
+    movw    %ds, %ax
+    movw    %ax, %cs:LOCAL(bios_register_ds)    // 保存 BIOS 返回的 DS
+    pop     %ax
+    mov     %ax, %ds
+    pushf
+    pop     %ax
+    movw    %ax, LOCAL(bios_register_flags)     // 保存 BIOS 返回的 FLAGS
+    mov     %es, %ax
+    movw    %ax, LOCAL(bios_register_es)        // 保存 BIOS 返回的 ES
+    
+    popf
+    
+    // 步骤 7: 切换回保护模式（调用 real_to_prot）
+    REAL_TO_PROT                // 宏展开为：calll real_to_prot
+    .code32                     // 现在在保护模式下（32 位代码）
+    
+    // 步骤 8: 恢复寄存器并返回（在保护模式下）
+    popl    %eax                // 恢复参数结构指针
+    
+    // 将 BIOS 返回的寄存器值写回参数结构
+    movl    %ebx, 12(%eax)      // 保存 EBX
+    movl    %ecx, 16(%eax)      // 保存 ECX
+    movl    %edi, 20(%eax)      // 保存 EDI
+    movl    %esi, 24(%eax)      // 保存 ESI
+    movl    %edx, 28(%eax)      // 保存 EDX
+    
+    movl    %eax, %edx          // %edx 指向参数结构
+    
+    // 从局部变量读取 BIOS 返回的值
+    movl    LOCAL(bios_register_eax), %eax
+    movl    %eax, (%edx)        // 保存 EAX 返回值
+    movw    LOCAL(bios_register_es), %ax
+    movw    %ax, 4(%edx)       // 保存 ES 返回值
+    movw    LOCAL(bios_register_ds), %ax
+    movw    %ax, 6(%edx)       // 保存 DS 返回值
+    movw    LOCAL(bios_register_flags), %ax
+    movw    %ax, 8(%edx)       // 保存 FLAGS 返回值
+    
+    // 恢复所有寄存器
+    popl    %edi
+    popl    %esi
+    popl    %ebx
+    popl    %eax
+    popl    %ecx
+    popl    %ebp
+    ret                         // 返回到调用者（1MB 以上的保护模式代码）
+```
+
+**BIOS 调用的关键代码（第 85-88 行）：**
+
+```asm
+// 执行 BIOS 中断调用
+.byte   0xcd                // INT 指令的操作码（x86 指令：INT imm8）
+intno:                      // 中断号标签（地址位置）
+    .byte   0               // 中断号（如 0x13，在保护模式下第 31 行已设置）
+```
+
+**执行流程：**
+
+1. **第 31 行**：`movb %al, intno` - 将中断号（从 `%al` 寄存器）写入 `intno` 位置（第 87 行）
+2. **第 85-88 行**：执行 `INT` 指令
+   - `0xcd` 是 `INT imm8` 指令的操作码
+   - `intno` 位置存储中断号（如 0x13）
+   - CPU 执行 `INT 0x13` 时：
+     - 查找 IVT[0x13]（实模式中断向量表）
+     - 跳转到 BIOS 的 INT 13h 处理程序
+     - BIOS 执行磁盘服务（如读取扇区）
+     - BIOS 返回，CPU 继续执行第 90 行
+
+**为什么使用 `.byte` 而不是 `int $0x13`？**
+
+- 中断号是**动态的**（从 `%al` 寄存器传入）
+- 使用 `.byte` 可以在运行时修改中断号
+- `int $0x13` 是静态的，只能调用固定的中断号
+
+**`imm8` 的含义：**
+
+- **`imm8`** = **immediate 8-bit**（8 位立即数）
+  - `imm` = immediate（立即数，直接编码在指令中的常量值）
+  - `8` = 8 位（1 字节，范围 0-255）
+- **`INT imm8`** 指令格式：
+  - 操作码：`0xCD`（1 字节）
+  - 中断号：`imm8`（1 字节，0-255）
+  - 总长度：2 字节
+- **为什么是 8 位？**
+  - x86 中断向量表（IVT）有 256 个条目（0x00-0xFF）
+  - 8 位可以表示 0-255，正好对应 256 个中断向量
+  - 因此 `INT` 指令使用 8 位立即数作为中断号
+
+**其他立即数格式：**
+- **`imm16`**：16 位立即数（2 字节，范围 0-65535）
+- **`imm32`**：32 位立即数（4 字节，范围 0-4294967295）
+
+**示例：**
+```asm
+int $0x13        // INT imm8：中断号 0x13（静态，编译时确定）
+.byte 0xcd       // INT 指令操作码
+.byte 0x13       // imm8：中断号 0x13（等同于 int $0x13）
+
+// 动态中断号（GRUB 使用的方式）
+.byte 0xcd       // INT 指令操作码
+intno:
+.byte 0          // imm8：中断号（运行时修改，如 movb %al, intno）
+```
+
+**关键点说明：**
+
+1. **返回地址的保存时机**：
+   - `prot_to_real`：在切换到实模式**之前**保存返回地址（第 229-230 行）
+   - `real_to_prot`：在切换到保护模式**之后**恢复返回地址（第 185-186 行）
+
+2. **内存位置的重要性**：
+   - `GRUB_MEMORY_MACHINE_REAL_STACK = 0x1FF0`（1MB 以下）
+   - 实模式和保护模式都可以访问此地址
+   - 作为临时存储位置，确保返回地址在模式切换过程中不丢失
+
+3. **栈的使用**：
+   - `prot_to_real`：将栈指针设置为 `GRUB_MEMORY_MACHINE_REAL_STACK`，返回地址就存储在这个位置
+   - `real_to_prot`：从 `GRUB_MEMORY_MACHINE_REAL_STACK` 读取返回地址，放到保护模式栈顶
+
+4. **完整的地址流程**：
+   ```
+   保护模式代码（1MB 以上，如 0x100123）
+       ↓
+   调用 grub_bios_interrupt()
+       ↓
+   调用 prot_to_real
+       ├─ 返回地址 0x100123 保存到 0x1FF0
+       └─ 切换到实模式
+       ↓
+   grub_bios_interrupt 实模式部分（1MB 以下，0x8200+）
+       ↓
+   执行 BIOS 调用（INT 13h 等）
+       ↓
+   调用 real_to_prot
+       ├─ 从 0x1FF0 读取返回地址 0x100123
+       ├─ 切换到保护模式
+       └─ 将返回地址放到保护模式栈顶
+       ↓
+   返回到保护模式代码（1MB 以上，0x100123）
+   ```
+
+**完整流程：**
+
+```
+保护模式代码（1MB 以上，0x100000+）
+    ↓
+调用 grub_bios_interrupt()
+    ↓
+调用 prot_to_real（位于 1MB 以下，0x8200+）
+    ├─ 保存返回地址到 GRUB_MEMORY_MACHINE_REAL_STACK（1MB 以下）
+    ├─ 切换到实模式
+    └─ 返回到 grub_bios_interrupt() 的实模式部分（位于 1MB 以下）
+        ↓
+执行 BIOS 调用（INT 13h 等，在实模式下）
+    ↓
+调用 real_to_prot（位于 1MB 以下，0x8200+）
+    ├─ 从 GRUB_MEMORY_MACHINE_REAL_STACK 恢复返回地址
+    ├─ 切换到保护模式
+    └─ 返回到 grub_bios_interrupt() 的保护模式部分（位于 1MB 以上）
+        ↓
+返回到保护模式代码（1MB 以上，0x100000+）
+```
+
+**关键点总结：**
+
+| 组件 | 内存位置 | 运行模式 | 说明 |
+|------|---------|---------|------|
+| **prot_to_real / real_to_prot** | `0x8200+`（1MB 以下） | 实模式/保护模式 | 模式切换函数本身位于 1MB 以下 |
+| **grub_bios_interrupt** | `0x100000+`（1MB 以上） | 保护模式 | 但包含实模式代码段（`.code16`） |
+| **返回地址保存位置** | `GRUB_MEMORY_MACHINE_REAL_STACK`（`0x2000 - 0x10`，1MB 以下） | - | 临时存储返回地址 |
+| **GRUB Core 解压后代码** | `0x100000+`（1MB 以上） | 保护模式 | 主代码运行位置 |
+
+**设计优势：**
+- **模式切换函数位于 1MB 以下**：可以在实模式下执行
+- **返回地址保存在 1MB 以下**：实模式可以访问
+- **代码分段组织**：`grub_bios_interrupt` 包含保护模式和实模式代码段，通过模式切换函数连接
+
+## 重要澄清：保护模式下不能直接使用 BIOS 的 IVT
+
+**关键点：**
+1. **保护模式下 CPU 使用 IDT，不使用 IVT**：
+   - 在保护模式下，CPU 只使用 IDT（中断描述符表），不会使用 IVT（中断向量表）
+   - IVT 只在实模式下有效（固定位置 0x0000:0000）
+   - 即使 IVT 仍然存在于内存中，保护模式下的 CPU 也不会访问它
+
+2. **GRUB 在保护模式下使用空 IDT**：
+   - GRUB 在保护模式下加载的是空 IDT（limit=0，base=0）
+   - 如果保护模式下发生中断，CPU 会尝试访问 IDT，但由于 IDT 为空，会导致异常
+   - 因此 GRUB 在保护模式下禁用中断（`cli`），避免触发中断
+
+3. **调用 BIOS 服务必须切换回实模式**：
+   - 当 GRUB 需要调用 BIOS 服务（如 INT 13h 读取磁盘）时，**必须切换回实模式**
+   - 切换回实模式后，CPU 才会使用 IVT，此时才能调用 BIOS 中断服务
+
+**GRUB 调用 BIOS 服务的完整流程（源代码位置：`grub/grub-core/kern/i386/int.S:19-134`）：**
+
+```asm
+// grub_bios_interrupt - 在保护模式下调用 BIOS 中断服务
+FUNCTION(grub_bios_interrupt)
+    // 步骤 1: 保存寄存器（在保护模式下）
+    pushf
+    cli
+    popf
+    pushl    %ebp
+    pushl    %ecx
+    pushl    %eax
+    // ... 保存其他寄存器
+    
+    // 步骤 2: 准备 BIOS 中断参数
+    movb     %al, intno        // 中断号（如 0x13）
+    movl     (%edx), %eax
+    movl     %eax, LOCAL(bios_register_eax)
+    // ... 准备其他寄存器值
+    
+    // 步骤 3: 切换到实模式
+    PROT_TO_REAL                // 调用 prot_to_real
+    .code16                      // 现在在实模式下
+    
+    // 步骤 4: 设置 BIOS 中断所需的寄存器
+    movw     LOCAL(bios_register_es), %ax
+    movw     %ax, %es
+    movw     LOCAL(bios_register_ds), %ax
+    movw     %ax, %ds
+    // ... 设置其他寄存器
+    
+    // 步骤 5: 调用 BIOS 中断服务（在实模式下）
+    .byte   0xcd                // INT 指令的操作码
+intno:
+    .byte   0                   // 中断号（如 0x13）
+    
+    // 步骤 6: 保存 BIOS 返回的寄存器值
+    movl    %eax, %cs:LOCAL(bios_register_eax)
+    movw    %ds, %ax
+    movw    %ax, %cs:LOCAL(bios_register_ds)
+    // ... 保存其他寄存器
+    
+    // 步骤 7: 切换回保护模式
+    REAL_TO_PROT                // 调用 real_to_prot
+    .code32                     // 现在在保护模式下
+    
+    // 步骤 8: 恢复寄存器并返回（在保护模式下）
+    popl    %eax
+    // ... 恢复其他寄存器
+    ret
+```
+
+**流程总结：**
+
+```
+保护模式（GRUB 主代码）
+    ↓
+需要调用 BIOS 服务（如 INT 13h）
+    ↓
+调用 grub_bios_interrupt()
+    ↓
+PROT_TO_REAL（prot_to_real）
+    ├─ 保存保护模式 IDT（空）
+    ├─ 恢复实模式 IDT（IVT）
+    ├─ 清除 CR0.PE 位（退出保护模式）
+    └─ 切换到实模式
+    ↓
+实模式（CPU 现在使用 IVT）
+    ↓
+执行 INT 指令（如 INT 13h）
+    ├─ CPU 使用 IVT[0x13] 查找处理程序
+    ├─ 跳转到 BIOS 处理程序
+    └─ BIOS 执行服务并返回
+    ↓
+REAL_TO_PROT（real_to_prot）
+    ├─ 保存实模式 IDT（IVT）
+    ├─ 加载保护模式 IDT（空）
+    ├─ 设置 CR0.PE 位（进入保护模式）
+    └─ 切换到保护模式
+    ↓
+保护模式（GRUB 主代码继续执行）
+```
+
+**关键结论：**
+
+| 模式 | CPU 使用的中断表 | GRUB 的 IDT/IVT 状态 | 能否调用 BIOS 服务 |
+|------|----------------|---------------------|-------------------|
+| **实模式** | IVT（固定 0x0000:0000） | 使用 BIOS 的 IVT | ✅ 可以直接调用（INT 指令） |
+| **保护模式** | IDT（由 IDTR 指定） | 使用空 IDT（limit=0） | ❌ **不能直接调用**，必须切换回实模式 |
+
+**关键点总结：**
+
+| 组件 | 运行模式 | 中断表类型 | 中断表位置 | 处理策略 |
+|------|---------|-----------|-----------|---------|
+| **BIOS** | 实模式 | IVT | 固定 0x0000:0000 | 提供中断服务 |
+| **GRUB（保护模式）** | 保护模式 | IDT（空） | 可配置（但设为空） | **禁用中断（cli）**，需要时切换回实模式 |
+| **GRUB（调用 BIOS）** | 实模式 | IVT | 固定 0x0000:0000 | 恢复 IVT，调用 BIOS 服务 |
+| **Linux 内核** | 保护模式/长模式 | IDT | 内核内存（可配置） | 建立完整的 IDT，接管所有中断 |
+
+> **注意**：关于 A20 地址线的详细技术说明，请参见 [A20 地址线技术详解](A20_ADDRESS_LINE.md)。
+
+> **相关文档**：关于 `grub_bios_interrupt` 的使用场景和调用时机，请参见 [GRUB 在保护模式下调用 BIOS 服务的使用场景](GRUB_BIOS_INTERRUPT_USAGE.md)。
+
+## GRUB 在保护模式下的中断处理策略
+
 **GRUB 在保护模式下处理 IDT 的策略：**
 
 1. **禁用中断（关键安全措施）**：
@@ -171,6 +664,14 @@ protidt:
    - **安全性**：避免在空 IDT 状态下处理中断导致系统崩溃
 
 **总结：GRUB 在保护模式下禁用中断，硬件中断请求会被挂起。当切换到实模式并重新启用中断时，挂起的中断会由 BIOS 处理。GRUB 本身不需要处理任何硬件中断。**
+
+## 键盘输入处理机制
+
+本章节集中介绍 GRUB 的键盘输入处理机制，包括硬件中断、软件中断、缓冲区管理、保护模式下的处理流程等所有相关内容。
+
+### 6.1 基础概念
+
+#### 6.1.1 键盘硬件中断 vs 软件中断的区别（SeaBIOS 实现）
 
 **📝 详细说明：GRUB 菜单显示和键盘输入的处理流程**
 
@@ -663,9 +1164,196 @@ REAL_TO_PROT（real_to_prot）
 保护模式（菜单循环继续，获得按键值）
 ```
 
-**📝 键盘硬件中断 vs 软件中断的区别（SeaBIOS 实现）**
+### 6.1.2 INT 16h 读取的是哪个缓冲区？
 
-**关键概念：键盘处理采用"生产者-消费者"模式**
+**⚠️ 重要澄清：INT 16h 读取的是哪个缓冲区？**
+
+**问题：SeaBIOS 的 INT 16h（0x16）服务读取的是 INT 09 的缓冲区，还是键盘控制器的缓冲区，还是都处理？**
+
+**答案：INT 16h 读取的是 BIOS 的键盘缓冲区（BDA），而不是键盘控制器的输出缓冲区。**
+
+**数据流程：**
+
+```
+层次 1：键盘控制器输出缓冲区（硬件）
+    ├─ 位置：8042 芯片内部
+    ├─ 大小：1 字节（一个扫描码）
+    ├─ 数据：原始扫描码（如 0x1E）
+    └─ 访问：I/O 端口 0x60
+    ↓
+INT 09 硬件中断处理（handle_09）：
+    ├─ inb(0x60)  ; 从键盘控制器的输出缓冲区读取扫描码
+    ├─ process_key(scancode)  ; 处理扫描码
+    │   └─ __process_key()  ; 转换为按键码
+    │       └─ enqueue_key(keycode)  ; 存入 BIOS 键盘缓冲区
+    └─ pic_eoi1()  ; 发送 EOI
+    ↓
+层次 2：BIOS 键盘缓冲区（软件，BDA）
+    ├─ 位置：BDA（BIOS Data Area）
+    ├─ 大小：32 字节（16 个按键码）
+    ├─ 数据：处理后的按键码（如 0x1E61，扫描码 + ASCII）
+    └─ 访问：通过 BDA 指针访问
+    ↓
+INT 16h 软件中断服务（handle_16）：
+    ├─ handle_1600()  ; 读取按键（阻塞）
+    │   └─ dequeue_key(regs, 1, 0)  ; 从 BIOS 键盘缓冲区读取
+    └─ handle_1601()  ; 检查状态（非阻塞）
+        └─ dequeue_key(regs, 0, 0)  ; 检查 BIOS 键盘缓冲区
+```
+
+**源代码证据：**
+
+**1. INT 16h 从 BIOS 键盘缓冲区读取（`seabios/src/kbd.c:54-105`）：**
+
+```c
+static void
+dequeue_key(struct bregs *regs, int incr, int extended)
+{
+    yield();
+    u16 buffer_head;
+    u16 buffer_tail;
+    
+    // ⚠️ 关键：从 BDA 获取缓冲区指针（BIOS 键盘缓冲区）
+    for (;;) {
+        buffer_head = GET_BDA(kbd_buf_head);  // 从 BDA 读取头指针
+        buffer_tail = GET_BDA(kbd_buf_tail);  // 从 BDA 读取尾指针
+
+        if (buffer_head != buffer_tail)
+            break;
+        if (!incr) {
+            regs->flags |= F_ZF;  // 缓冲区为空，设置 Zero Flag
+            return;
+        }
+        yield_toirq();  // 等待硬件中断产生新数据
+    }
+
+    // ⚠️ 关键：从 BDA 的键盘缓冲区读取按键码
+    u16 keycode = GET_FARVAR(SEG_BDA, *(u16*)(buffer_head+0));
+    
+    // 处理扩展键转换
+    // ...
+    
+    regs->ax = keycode;  // 返回按键码
+
+    if (!incr) {
+        regs->flags &= ~F_ZF;
+        return;
+    }
+    
+    // 更新缓冲区头指针（消耗按键）
+    buffer_head += 2;
+    if (buffer_head >= buffer_end)
+        buffer_head = buffer_start;
+    SET_BDA(kbd_buf_head, buffer_head);  // 更新 BDA 中的头指针
+}
+```
+
+**关键点：**
+- `GET_BDA(kbd_buf_head)` 和 `GET_BDA(kbd_buf_tail)`：从 BDA 获取缓冲区指针
+- `GET_FARVAR(SEG_BDA, *(u16*)(buffer_head+0))`：从 BDA 的键盘缓冲区读取按键码
+- **没有直接访问键盘控制器的输出缓冲区**（没有 `inb(0x60)` 调用）
+
+**2. INT 09 从键盘控制器读取并存入 BIOS 缓冲区（`seabios/src/hw/ps2port.c:389-417`）：**
+
+```c
+void VISIBLE16
+handle_09(void)
+{
+    // ⚠️ 关键：从键盘控制器的输出缓冲区读取扫描码
+    u8 v = inb(PORT_PS2_STATUS);  // 0x64: 状态端口
+    v = inb(PORT_PS2_DATA);       // 0x60: 数据端口（从键盘控制器读取）
+    
+    // 处理扫描码
+    process_key(v);
+}
+
+void
+process_key(u8 key)
+{
+    __process_key(key);  // 处理扫描码，转换为按键码
+}
+
+static void
+__process_key(u8 scancode)
+{
+    // 处理扫描码，转换为按键码
+    // ...
+    if (keycode)
+        enqueue_key(keycode);  // ⚠️ 关键：存入 BIOS 键盘缓冲区（BDA）
+}
+```
+
+**关键点：**
+- `inb(PORT_PS2_DATA)`：从键盘控制器的输出缓冲区读取扫描码
+- `enqueue_key(keycode)`：将按键码存入 BIOS 键盘缓冲区（BDA）
+
+**3. enqueue_key() 存入 BIOS 缓冲区（`seabios/src/kbd.c:32-52`）：**
+
+```c
+u8
+enqueue_key(u16 keycode)
+{
+    u16 buffer_start = GET_BDA(kbd_buf_start_offset);
+    u16 buffer_end   = GET_BDA(kbd_buf_end_offset);
+    u16 buffer_head = GET_BDA(kbd_buf_head);
+    u16 buffer_tail = GET_BDA(kbd_buf_tail);
+
+    u16 temp_tail = buffer_tail;
+    buffer_tail += 2;  // 每个按键码占 2 字节
+    if (buffer_tail >= buffer_end)
+        buffer_tail = buffer_start;  // 循环缓冲区
+
+    if (buffer_tail == buffer_head)
+        return 0;  // 缓冲区满
+
+    // ⚠️ 关键：存储按键码到 BDA 的键盘缓冲区
+    SET_FARVAR(SEG_BDA, *(u16*)(temp_tail+0), keycode);
+    SET_BDA(kbd_buf_tail, buffer_tail);
+    return 1;
+}
+```
+
+**关键点：**
+- `SET_FARVAR(SEG_BDA, ...)`：将按键码存入 BDA 的键盘缓冲区
+- **这是 BIOS 的软件缓冲区，不是键盘控制器的硬件缓冲区**
+
+**完整的数据流对比：**
+
+| 阶段 | 数据位置 | 数据类型 | 访问方式 | 处理程序 |
+|------|---------|---------|---------|---------|
+| **1. 按键发生** | 键盘控制器输出缓冲区 | 扫描码（1 字节） | I/O 端口 0x60 | 硬件自动保存 |
+| **2. 硬件中断** | 键盘控制器输出缓冲区 | 扫描码（1 字节） | `inb(0x60)` | INT 09（handle_09） |
+| **3. 数据转换** | 处理中 | 扫描码 → 按键码 | 内存处理 | INT 09（__process_key） |
+| **4. 软件存储** | BIOS 键盘缓冲区（BDA） | 按键码（2 字节） | BDA 指针 | INT 09（enqueue_key） |
+| **5. 软件读取** | BIOS 键盘缓冲区（BDA） | 按键码（2 字节） | BDA 指针 | INT 16h（dequeue_key） |
+
+**关键理解：**
+
+1. **INT 09 负责**：
+   - 从键盘控制器的输出缓冲区读取扫描码（硬件层面）
+   - 将扫描码转换为按键码（软件处理）
+   - 将按键码存入 BIOS 键盘缓冲区（软件层面）
+
+2. **INT 16h 负责**：
+   - 从 BIOS 键盘缓冲区读取按键码（软件层面）
+   - **不直接访问键盘控制器的输出缓冲区**
+
+3. **两个缓冲区的区别**：
+   - **键盘控制器的输出缓冲区**：硬件层面，1 字节，存储原始扫描码
+   - **BIOS 键盘缓冲区（BDA）**：软件层面，32 字节，存储处理后的按键码
+
+4. **数据流向**：
+   - 键盘控制器输出缓冲区 → INT 09 读取 → 处理转换 → BIOS 键盘缓冲区 → INT 16h 读取
+
+**总结：**
+- **INT 16h 读取的是 BIOS 的键盘缓冲区（BDA）**，而不是键盘控制器的输出缓冲区
+- **INT 09 负责从键盘控制器读取并存入 BIOS 缓冲区**
+- **INT 16h 负责从 BIOS 缓冲区读取并返回给程序**
+- **两者通过 BIOS 键盘缓冲区（BDA）进行数据交换**
+
+### 6.2 GRUB 的键盘输入实现
+
+#### 6.2.1 GRUB 菜单显示和键盘输入的处理流程
 
 | 特性 | 硬件中断（IRQ1，向量 0x09） | 软件中断（INT 16h，向量 0x16） |
 |------|---------------------------|------------------------------|
@@ -952,126 +1640,181 @@ enqueue_key(u16 keycode)
 - **INT 16h 负责从 BIOS 缓冲区读取并返回给程序**
 - **两者通过 BIOS 键盘缓冲区（BDA）进行数据交换**
 
-**3. 完整的数据流**
+### 6.3 保护模式下的键盘输入处理
+
+#### 6.3.1 保护模式下关闭中断时，切换到实模式后 INT 16h 如何读取键盘输入？
+
+**⚠️ 关键问题：保护模式下关闭中断时，切换到实模式后 INT 16h 如何读取键盘输入？**
+
+**问题：GRUB 运行在保护模式时关闭中断，INT 09 不工作。切换到实模式后，INT 16h 如何读取在保护模式下关闭中断时的键盘输入？**
+
+**答案：关键在于 `prot_to_real` 执行 `sti` 后，挂起的中断会被立即处理，INT 09 会执行并将扫描码存入 BIOS 缓冲区，然后 INT 16h 才能读取。**
+
+**完整的数据流程：**
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ 硬件中断（IRQ1，向量 0x09）- 生产者                       │
-└─────────────────────────────────────────────────────────┘
+阶段 1：保护模式下关闭中断时按键发生
+─────────────────────────────────────────
+保护模式（中断禁用，cli）：
+    ↓
 用户按下键盘
     ↓
-键盘控制器产生 IRQ1 硬件中断
+键盘控制器（8042）：
+    ├─ 将扫描码存入输出缓冲区（硬件自动保存）✅
+    ├─ 设置 OBF 位 = 1（表示有数据）
+    └─ 通过 IRQ1 向 PIC 发送中断请求
     ↓
-PIC 路由到向量 0x09
+PIC（8259A）：
+    ├─ 在 IRR[1] 中设置位（IRR[1] = 1，挂起状态）
+    └─ 由于 CPU 中断被禁用（IF = 0），不向 CPU 发送中断信号
     ↓
-CPU 查找 IVT[0x09] → entry_09 → handle_09()
+结果：
+    ├─ 扫描码保存在键盘控制器的输出缓冲区（硬件层面）✅
+    ├─ 中断请求保存在 PIC 的 IRR[1] 中（挂起状态）✅
+    └─ INT 09 不执行（因为中断被禁用）❌
+```
+
+```
+阶段 2：切换到实模式并重新启用中断
+─────────────────────────────────────────
+调用 grub_bios_interrupt (0x16, &regs)
     ↓
-handle_09():
-    ├─ inb(0x64)  ; 读取状态
-    ├─ inb(0x60)  ; 读取扫描码
+PROT_TO_REAL（prot_to_real）
+    ├─ 保存保护模式 IDT（空）
+    ├─ 恢复实模式 IDT（IVT）
+    ├─ 清除 CR0.PE 位（退出保护模式）
+    └─ 执行 sti（重新启用中断）⚠️ 关键步骤
+    ↓
+实模式（CPU 现在使用 IVT，中断已启用）
+    ↓
+PIC 检测到 IF = 1（中断已启用）：
+    ├─ 检查 IRR[1] = 1（有挂起的键盘中断）
+    └─ 立即向 CPU 发送中断信号
+    ↓
+CPU 响应中断：
+    ├─ 查找 IVT[0x09] → entry_09 → handle_09()
+    └─ BIOS 的键盘中断处理程序立即执行 ⚠️ 关键步骤
+    ↓
+handle_09() 执行：
+    ├─ inb(0x64)  ; 读取状态，检查 OBF 位
+    ├─ inb(0x60)  ; 从键盘控制器的输出缓冲区读取扫描码
     ├─ process_key(scancode)  ; 处理扫描码
     │   └─ __process_key()  ; 转换为按键码
-    │       └─ enqueue_key(keycode)  ; 存储到缓冲区
+    │       └─ enqueue_key(keycode)  ; 存入 BIOS 键盘缓冲区（BDA）
     └─ pic_eoi1()  ; 发送 EOI
     ↓
-按键码存储到 BIOS 键盘缓冲区（BDA）
+结果：
+    ├─ 扫描码从键盘控制器的输出缓冲区被读取 ✅
+    └─ 按键码存入 BIOS 的键盘缓冲区（BDA）✅
 ```
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ 软件中断（INT 16h，向量 0x16）- 消费者                   │
-└─────────────────────────────────────────────────────────┘
-用户程序需要读取键盘
+阶段 3：INT 16h 从 BIOS 缓冲区读取
+─────────────────────────────────────────
+执行 INT 16h AH=0x01 指令（检查键盘状态）
+    ├─ CPU 使用 IVT[0x16] 查找 BIOS 处理程序
+    ├─ 跳转到 BIOS 的 INT 16h 处理程序
+    ├─ BIOS 处理程序：
+    │   ├─ 检查键盘缓冲区（kbd_buf_head == kbd_buf_tail？）
+    │   ├─ 如果缓冲区为空：
+    │   │   └─ 设置 Zero Flag → 返回（非阻塞）
+    │   └─ 如果缓冲区有数据：
+    │       └─ 清除 Zero Flag → 返回（但不消耗按键）
+    └─ BIOS 返回，CPU 继续执行
     ↓
-程序执行 INT 0x16 指令
-    ↓
-CPU 查找 IVT[0x16] → entry_16 → handle_16()
-    ↓
-handle_16():
-    ├─ switch (ah)
-    ├─ case 0x00: handle_1600()  ; 读取按键（阻塞）
-    │   └─ dequeue_key(regs, 1, 0)  ; 从缓冲区读取
-    │       ├─ 如果缓冲区为空 → yield_toirq() 等待硬件中断
-    │       └─ 如果缓冲区有数据 → 读取按键码，返回
-    └─ case 0x01: handle_1601()  ; 检查状态（非阻塞）
-        └─ dequeue_key(regs, 0, 0)  ; 检查缓冲区（不消耗）
-            └─ 如果缓冲区为空 → 设置 Zero Flag
-    ↓
-返回按键码给用户程序（AX 寄存器）
+执行 INT 16h AH=0x00 指令（读取按键）
+    ├─ BIOS 处理程序：
+    │   ├─ 检查键盘缓冲区
+    │   ├─ 如果缓冲区为空（理论上不会发生，因为已经检查过）：
+    │   │   └─ yield_toirq() 等待硬件中断
+    │   └─ 如果缓冲区有数据：
+    │       ├─ 从缓冲区读取按键码
+    │       ├─ 更新 kbd_buf_head（消耗按键）
+    │       └─ 返回按键码
+    └─ BIOS 返回
 ```
 
-**4. 它们的关系**
+**关键时间点分析：**
 
-**生产者-消费者模式：**
-- **硬件中断（生产者）**：接收键盘数据，存储到缓冲区
-- **软件中断（消费者）**：从缓冲区读取数据，返回给程序
-- **缓冲区（桥梁）**：硬件中断写入，软件中断读取
+| 时间点 | CPU 模式 | 中断状态 | INT 09 | 键盘控制器 | BIOS 缓冲区 | INT 16h |
+|--------|---------|---------|--------|-----------|------------|---------|
+| **T1：保护模式下按键** | 保护模式 | 禁用（cli） | ❌ 不执行 | ✅ 保存扫描码 | ❌ 空 | - |
+| **T2：prot_to_real 执行 sti** | 实模式 | **启用（sti）** | ⚠️ **立即执行** | ✅ 读取扫描码 | ✅ **存入按键码** | - |
+| **T3：INT 16h 执行** | 实模式 | 启用 | - | - | ✅ **读取按键码** | ✅ 返回按键码 |
 
-**关键设计优势：**
-1. **解耦**：硬件中断和软件中断独立工作，互不干扰
-2. **缓冲**：缓冲区可以存储多个按键，程序可以按需读取
-3. **异步处理**：硬件中断立即处理按键，不等待程序
-4. **同步接口**：程序通过软件中断同步获取按键数据
+**关键理解：**
 
-**5. 实际使用示例**
+1. **保护模式下关闭中断时**：
+   - 扫描码保存在键盘控制器的输出缓冲区（硬件自动保存）
+   - 中断请求保存在 PIC 的 IRR[1] 中（挂起状态）
+   - INT 09 不执行，BIOS 缓冲区为空
 
-**硬件中断（自动执行，程序无需关心）：**
-```c
-// 用户按下键盘 → 硬件自动触发 → handle_09() 自动执行
-// 程序不需要做任何事情，按键数据自动存储到缓冲区
-```
+2. **切换到实模式并执行 `sti` 后**：
+   - **挂起的中断会被立即处理**：PIC 检测到 IF = 1，立即发送中断信号
+   - **INT 09 立即执行**：从键盘控制器的输出缓冲区读取扫描码
+   - **数据转换和存储**：将扫描码转换为按键码，存入 BIOS 键盘缓冲区
+   - **这个过程在 INT 16h 执行之前完成**
 
-**软件中断（程序主动调用）：**
+3. **INT 16h 执行时**：
+   - BIOS 缓冲区已经有数据（由 INT 09 在 `sti` 后立即存入）
+   - INT 16h 直接从 BIOS 缓冲区读取按键码
+   - **不需要直接访问键盘控制器的输出缓冲区**
+
+**源代码证据：**
+
+**`prot_to_real` 执行 `sti`（`grub-core/kern/i386/realmode.S:273-276`）：**
+
 ```asm
-; 读取按键（阻塞，等待按键）
-mov ah, 0x00
-int 0x16
-; 返回：AX = 按键码
-
-; 检查按键状态（非阻塞）
-mov ah, 0x01
-int 0x16
-; 返回：如果 Zero Flag 被设置，说明没有按键
+realcseg:
+    // ... 设置段寄存器 ...
+    
+#ifdef GRUB_MACHINE_PCBIOS
+    /* restore interrupts */
+    sti  // ⚠️ 关键：重新启用中断
+#endif
+    
+    /* return on new stack! */
+    retl
 ```
 
 **关键点：**
+- `sti` 指令在 `prot_to_real` 的最后执行
+- 执行 `sti` 后，CPU 的 IF 标志被设置为 1
+- PIC 检测到 IF = 1，立即检查 IRR，如果有挂起的中断，立即发送给 CPU
+- CPU 响应中断，INT 09 立即执行
 
-1. **菜单循环在保护模式下运行**：菜单显示、超时处理、选择逻辑等都在保护模式下执行
+**`dequeue_key` 从 BIOS 缓冲区读取（`seabios/src/kbd.c:54-105`）：**
 
-2. **键盘输入通过 BIOS 服务获取**：
-   - 每次读取键盘时，都会切换到实模式
-   - 在实模式下调用 BIOS 的 INT 16h 服务（软件中断）
-   - BIOS 的 INT 16h 服务从缓冲区读取数据（由硬件中断存储）
-   - 返回按键值后，切换回保护模式
+```c
+static void
+dequeue_key(struct bregs *regs, int incr, int extended)
+{
+    // ⚠️ 关键：从 BDA 的键盘缓冲区读取（不是从键盘控制器）
+    buffer_head = GET_BDA(kbd_buf_head);
+    buffer_tail = GET_BDA(kbd_buf_tail);
+    
+    if (buffer_head != buffer_tail) {
+        // 从 BIOS 缓冲区读取按键码
+        u16 keycode = GET_FARVAR(SEG_BDA, *(u16*)(buffer_head+0));
+        regs->ax = keycode;
+        // ...
+    } else {
+        // 缓冲区为空，等待硬件中断
+        if (incr)
+            yield_toirq();  // 等待 INT 09 处理并存入数据
+    }
+}
+```
 
-3. **不需要 GRUB 处理硬件中断**：
-   - GRUB 不需要实现键盘中断处理程序
-   - BIOS 的 INT 16h 服务已经处理了所有键盘硬件中断
-   - GRUB 只需要调用 BIOS 服务，然后获取结果
+**关键点：**
+- `dequeue_key` 从 BIOS 缓冲区（BDA）读取，不是从键盘控制器读取
+- 如果缓冲区为空，`yield_toirq()` 会等待硬件中断（INT 09）处理并存入数据
 
-4. **中断处理的时机和按键存储机制**：
-   - **保护模式下按键发生时**：
-     - 键盘硬件产生中断请求（IRQ 1）
-     - 由于保护模式下中断被禁用（`cli`），中断请求被 PIC 挂起（pending）
-     - **⚠️ 重要澄清：键盘数据保存在哪里？**
-       - **硬件层面**：扫描码保存在**键盘控制器的输出缓冲区**（8042 芯片内部，硬件寄存器）
-       - **软件层面**：按键码保存在**BIOS 的键盘缓冲区**（BDA，软件缓冲区）
-       - **关键区别**：键盘控制器的输出缓冲区 ≠ BIOS 的键盘缓冲区
-       - **保护模式下**：扫描码保存在键盘控制器的输出缓冲区（硬件自动保存，不需要软件中断）
-       - **切换到实模式后**：硬件中断被处理，BIOS 的 `handle_09()` 从键盘控制器读取扫描码，转换为按键码，存入 BIOS 的键盘缓冲区（软件缓冲区）
-   - **切换到实模式后**：
-     - `prot_to_real` 执行 `sti`，重新启用中断
-     - **挂起的中断会被立即处理**：BIOS 的键盘中断处理程序（INT 09h）会执行
-     - BIOS 处理程序从键盘控制器读取扫描码，转换为按键码，存入 BIOS 的键盘缓冲区（BDA）
-   - **调用 INT 16h 读取按键**：
-     - 如果缓冲区为空，INT 16h 会等待键盘中断（此时挂起的中断会被处理）
-     - 如果缓冲区有数据，直接从缓冲区读取并返回
-   - **关键理解**：
-     - **不是 CPU 保存按键状态**，而是 **BIOS 的键盘缓冲区**保存按键数据
-     - **按键数据在切换到实模式后才被处理**：挂起的中断在实模式下被处理，数据存入缓冲区
-     - **GRUB 通过主动调用 BIOS 服务来读取**：程序循环调用 `grub_getkey()`，切换到实模式，调用 INT 16h，从缓冲区读取按键
+#### 6.3.2 挂起的中断保存在哪里？
 
 **📝 详细说明：挂起的中断保存在哪里？**
+
+**答案：挂起的中断保存在 PIC（8259A 可编程中断控制器）的内部寄存器中。**
 
 **答案：挂起的中断保存在 PIC（8259A 可编程中断控制器）的内部寄存器中。**
 
@@ -1163,6 +1906,8 @@ BIOS 处理程序读取扫描码，存入键盘缓冲区
 - **IRR 是 PIC 芯片内部的硬件寄存器**，每个 IRQ 对应一个位
 - **即使 CPU 中断被禁用（`cli`），IRR 中的位仍然会被设置**
 - **当重新启用中断（`sti`）时，PIC 会检查 IRR，如果有挂起的中断，会立即发送给 CPU**
+
+#### 6.3.3 中断挂起时，具体的按键值保存在哪里？
 
 **📝 详细说明：中断挂起时，具体的按键值保存在哪里？**
 
@@ -1310,6 +2055,10 @@ handle_09(void)
 - **状态寄存器（0x64）的 OBF 位指示是否有数据可读**
 - **键盘控制器的输出缓冲区通常只能保存 1 个扫描码**
 - **连续按键时，后续扫描码会等待或可能丢失**
+
+### 6.4 INT 09 的价值和限制
+
+#### 6.4.1 既然键盘控制器自己就能保存按键，那 INT 09 的价值是什么？
 
 **⚠️ 重要问题：既然键盘控制器自己就能保存按键，那 INT 09 的价值是什么？**
 
@@ -1558,6 +2307,8 @@ handle_09(void)
 - **INT 09 提供完整的键盘处理服务**（软件层面，数据转换、缓冲存储、状态管理）
 - **两者配合工作**：键盘控制器负责硬件层面的数据保存，INT 09 负责软件层面的数据处理
 
+#### 6.4.2 保护模式下 INT 09 不工作，为什么键盘数据仍然可以保存？
+
 **⚠️ 重要澄清：保护模式下 INT 09 不工作，为什么键盘数据仍然可以保存？**
 
 **问题：在保护模式下，INT 09（硬件中断）不工作（中断被禁用，IDT 为空），为什么键盘数据仍然可以保存到缓冲区？**
@@ -1661,6 +2412,8 @@ handle_09() 执行：
 - 但是键盘数据仍然可以保存，因为**键盘控制器（硬件）会自动保存扫描码**
 - 这不需要软件中断处理程序，是硬件层面的操作
 - 只有当切换到实模式并重新启用中断后，BIOS 的 `handle_09()` 才会执行，将扫描码从键盘控制器的输出缓冲区转移到 BIOS 的键盘缓冲区
+
+#### 6.4.3 连续按键的保存能力
 
 **⚠️ 重要限制：连续按键的保存能力**
 
@@ -1807,497 +2560,6 @@ enqueue_key() 返回 0 → 按键丢失
    - **原因**：GRUB 是引导加载程序，代码简单且执行时间短；Linux 内核是操作系统，需要完整的异常处理机制
 
 **总结：GRUB 在保护模式下使用空 IDT 是一个高风险的设计选择，必须通过代码正确性和简单性来降低风险。任何代码错误（如除零、无效内存访问等）都可能导致系统立即崩溃。**
-
-## 从保护模式到实模式的切换
-
-**prot_to_real 函数（源代码位置：`grub/grub-core/kern/i386/realmode.S:217-279`）：**
-
-```asm
-prot_to_real:
-    // 步骤 1: 设置 GDT
-    lgdt    gdtdesc
-    
-    // 步骤 2: 保存保护模式 IDT，恢复实模式 IDT（IVT）
-    sidt    protidt         // 保存保护模式 IDT（空）
-    lidt    LOCAL(realidt)  // 恢复实模式 IDT（IVT）
-    
-    // 步骤 3: 保存保护模式栈
-    movl    %esp, %eax
-    movl    %eax, protstack
-    
-    // 步骤 4: 保存返回地址（关键！）
-    movl    (%esp), %eax
-    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 1MB 以下的内存
-    
-    // 步骤 5-6: 切换到实模式（清除 CR0.PE 位等）
-    // ...
-    
-    // 步骤 7: 恢复中断
-    sti
-    
-    retl    // 返回，现在在实模式下
-```
-
-**⚠️ 关键问题：prot_to_real 执行后，GRUB 程序运行在 1MB 以上，如何解决？**
-
-**问题描述：**
-- GRUB 的解压后代码位于 `0x100000+`（1MB 以上）
-- 当从保护模式的代码（在 1MB 以上）调用 `prot_to_real` 时，返回地址指向 1MB 以上的代码
-- 切换到实模式后，实模式只能访问 1MB 以下的内存（`0x00000 - 0xFFFFF`）
-- **问题**：如何返回到 1MB 以上的代码？
-
-**解决方案：**
-
-1. **`prot_to_real` 和 `real_to_prot` 本身位于 1MB 以下**：
-   - 这两个函数被包含在 `startup_raw.S` 中（`startup_raw.S:119`：`#include "../../../kern/i386/realmode.S"`）
-   - `startup_raw.S` 被加载到内存地址 `0x8200`（1MB 以下）
-   - 因此，`prot_to_real` 和 `real_to_prot` 的代码本身位于 1MB 以下，可以在实模式下执行
-
-2. **返回地址的保存和恢复机制**：
-   - **`prot_to_real`**：保存返回地址到 `GRUB_MEMORY_MACHINE_REAL_STACK`（位于 1MB 以下，`0x2000 - 0x10`）
-   - **切换到实模式**：执行 BIOS 调用（在实模式下）
-   - **`real_to_prot`**：从 `GRUB_MEMORY_MACHINE_REAL_STACK` 恢复返回地址
-   - **切换回保护模式**：返回到保护模式的代码（此时已经在保护模式下，可以访问 1MB 以上的代码）
-
-**返回地址保存和恢复的源代码详解：**
-
-**1. GRUB_MEMORY_MACHINE_REAL_STACK 定义（源代码位置：`grub/include/grub/i386/memory_raw.h:29`）：**
-
-```c
-#define GRUB_MEMORY_MACHINE_REAL_STACK	(0x2000 - 0x10)
-```
-
-- **地址**：`0x1FF0`（1MB 以下，实模式可访问）
-- **用途**：临时存储返回地址，用于模式切换
-
-**2. prot_to_real 保存返回地址（源代码位置：`grub/grub-core/kern/i386/realmode.S:228-235`）：**
-
-```asm
-prot_to_real:
-    // ... (设置 GDT、IDT 等)
-    
-    // 步骤 1: 保存保护模式栈
-    movl    %esp, %eax
-    movl    %eax, protstack
-    
-    // 步骤 2: 保存返回地址到 1MB 以下的内存（关键！）
-    movl    (%esp), %eax                    // 从栈顶读取返回地址（指向 1MB 以上的代码）
-    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 0x1FF0（1MB 以下）
-    
-    // 步骤 3: 设置新的栈（使用 GRUB_MEMORY_MACHINE_REAL_STACK 作为栈）
-    movl    $GRUB_MEMORY_MACHINE_REAL_STACK, %eax
-    movl    %eax, %esp                      // 栈指针指向 0x1FF0
-    movl    %eax, %ebp
-    
-    // ... (切换到实模式)
-    
-    retl    // 返回到实模式代码（grub_bios_interrupt 的实模式部分）
-```
-
-**3. real_to_prot 恢复返回地址（源代码位置：`grub/grub-core/kern/i386/realmode.S:175-186`）：**
-
-```asm
-real_to_prot:
-    .code16
-    cli
-    
-    // ... (加载 GDT、设置 CR0.PE 位、跳转到保护模式)
-    
-    .code32
-protcseg:
-    // ... (重新加载段寄存器)
-    
-    // 步骤 1: 保存返回地址到 1MB 以下的内存（从实模式栈读取）
-    movl    (%esp), %eax                    // 从栈顶读取返回地址（实模式代码的返回地址）
-    movl    %eax, GRUB_MEMORY_MACHINE_REAL_STACK  // 保存到 0x1FF0
-    
-    // 步骤 2: 切换到保护模式栈
-    movl    protstack, %eax                  // 恢复保护模式栈指针
-    movl    %eax, %esp
-    movl    %eax, %ebp
-    
-    // 步骤 3: 恢复返回地址到保护模式栈（关键！）
-    movl    GRUB_MEMORY_MACHINE_REAL_STACK, %eax  // 从 0x1FF0 读取返回地址
-    movl    %eax, (%esp)                    // 将返回地址放到保护模式栈顶
-    
-    // ... (加载空 IDT)
-    
-    ret     // 返回到保护模式代码（1MB 以上，此时已在保护模式下，可以访问）
-```
-
-**4. grub_bios_interrupt 完整实现（源代码位置：`grub/grub-core/kern/i386/int.S:19-134`）：**
-
-```asm
-FUNCTION(grub_bios_interrupt)
-    // 步骤 1: 保存寄存器（在保护模式下）
-    pushf
-    cli
-    popf
-    pushl    %ebp
-    pushl    %ecx
-    pushl    %eax
-    pushl    %ebx
-    pushl    %esi
-    pushl    %edi
-    pushl    %edx
-    
-    // 步骤 2: 准备 BIOS 中断参数（在保护模式下）
-    movb     %al, intno                    // 保存中断号到 intno 位置（第 87 行）
-    movl     (%edx), %eax                  // 从参数结构读取 EAX 值
-    movl     %eax, LOCAL(bios_register_eax)  // 保存到局部变量
-    movw     4(%edx), %ax                  // 读取 ES 值
-    movw     %ax, LOCAL(bios_register_es)
-    movw     6(%edx), %ax                  // 读取 DS 值
-    movw     %ax, LOCAL(bios_register_ds)
-    movw     8(%edx), %ax                  // 读取 FLAGS 值
-    movw     %ax, LOCAL(bios_register_flags)
-    
-    movl     12(%edx), %ebx                // 读取 EBX 值
-    movl     16(%edx), %ecx                // 读取 ECX 值
-    movl     20(%edx), %edi                // 读取 EDI 值
-    movl     24(%edx), %esi                // 读取 ESI 值
-    movl     28(%edx), %edx                // 读取 EDX 值
-    
-    // 步骤 3: 切换到实模式（调用 prot_to_real）
-    PROT_TO_REAL                // 宏展开为：call prot_to_real
-    .code16                      // 现在在实模式下（16 位代码）
-    
-    // 步骤 4: 设置 BIOS 中断所需的寄存器（在实模式下）
-    pushf
-    cli
-    mov     %ds, %ax
-    push    %ax
-    
-    // 设置 ES 寄存器
-    .byte   0xb8                // movw imm16, %ax 的操作码
-LOCAL(bios_register_es):
-    .short  0                   // ES 值（在保护模式下已设置）
-    movw    %ax, %es
-    
-    // 设置 DS 寄存器
-    .byte   0xb8                // movw imm16, %ax 的操作码
-LOCAL(bios_register_ds):
-    .short  0                   // DS 值（在保护模式下已设置）
-    movw    %ax, %ds
-    
-    // 设置 FLAGS 寄存器
-    .byte   0xb8                // movw imm16, %ax 的操作码
-LOCAL(bios_register_flags):
-    .short  0                   // FLAGS 值（在保护模式下已设置）
-    push    %ax
-    popf                        // 恢复 FLAGS
-    
-    // 设置 EAX 寄存器
-    .byte   0x66, 0xb8          // movl imm32, %eax 的操作码（0x66 是 32 位操作数前缀）
-LOCAL(bios_register_eax):
-    .long   0                   // EAX 值（在保护模式下已设置）
-    
-    // 步骤 5: 执行 BIOS 中断调用（在实模式下，关键！）
-    .byte   0xcd                // INT 指令的操作码
-intno:                          // 中断号位置（在保护模式下第 31 行已设置）
-    .byte   0                   // 中断号（如 0x13，会被 movb %al, intno 修改）
-    // ⚠️ 注意：这里执行的是实际的 BIOS 中断调用
-    // CPU 会查找 IVT[intno]，跳转到 BIOS 处理程序，执行 BIOS 服务，然后返回
-    
-    // 步骤 6: 保存 BIOS 返回的寄存器值（在实模式下）
-    movl    %eax, %cs:LOCAL(bios_register_eax)  // 保存 BIOS 返回的 EAX
-    movw    %ds, %ax
-    movw    %ax, %cs:LOCAL(bios_register_ds)    // 保存 BIOS 返回的 DS
-    pop     %ax
-    mov     %ax, %ds
-    pushf
-    pop     %ax
-    movw    %ax, LOCAL(bios_register_flags)     // 保存 BIOS 返回的 FLAGS
-    mov     %es, %ax
-    movw    %ax, LOCAL(bios_register_es)        // 保存 BIOS 返回的 ES
-    
-    popf
-    
-    // 步骤 7: 切换回保护模式（调用 real_to_prot）
-    REAL_TO_PROT                // 宏展开为：calll real_to_prot
-    .code32                     // 现在在保护模式下（32 位代码）
-    
-    // 步骤 8: 恢复寄存器并返回（在保护模式下）
-    popl    %eax                // 恢复参数结构指针
-    
-    // 将 BIOS 返回的寄存器值写回参数结构
-    movl    %ebx, 12(%eax)      // 保存 EBX
-    movl    %ecx, 16(%eax)      // 保存 ECX
-    movl    %edi, 20(%eax)      // 保存 EDI
-    movl    %esi, 24(%eax)      // 保存 ESI
-    movl    %edx, 28(%eax)      // 保存 EDX
-    
-    movl    %eax, %edx          // %edx 指向参数结构
-    
-    // 从局部变量读取 BIOS 返回的值
-    movl    LOCAL(bios_register_eax), %eax
-    movl    %eax, (%edx)        // 保存 EAX 返回值
-    movw    LOCAL(bios_register_es), %ax
-    movw    %ax, 4(%edx)       // 保存 ES 返回值
-    movw    LOCAL(bios_register_ds), %ax
-    movw    %ax, 6(%edx)       // 保存 DS 返回值
-    movw    LOCAL(bios_register_flags), %ax
-    movw    %ax, 8(%edx)       // 保存 FLAGS 返回值
-    
-    // 恢复所有寄存器
-    popl    %edi
-    popl    %esi
-    popl    %ebx
-    popl    %eax
-    popl    %ecx
-    popl    %ebp
-    ret                         // 返回到调用者（1MB 以上的保护模式代码）
-```
-
-**BIOS 调用的关键代码（第 85-88 行）：**
-
-```asm
-// 执行 BIOS 中断调用
-.byte   0xcd                // INT 指令的操作码（x86 指令：INT imm8）
-intno:                      // 中断号标签（地址位置）
-    .byte   0               // 中断号（如 0x13，在保护模式下第 31 行已设置）
-```
-
-**执行流程：**
-
-1. **第 31 行**：`movb %al, intno` - 将中断号（从 `%al` 寄存器）写入 `intno` 位置（第 87 行）
-2. **第 85-88 行**：执行 `INT` 指令
-   - `0xcd` 是 `INT imm8` 指令的操作码
-   - `intno` 位置存储中断号（如 0x13）
-   - CPU 执行 `INT 0x13` 时：
-     - 查找 IVT[0x13]（实模式中断向量表）
-     - 跳转到 BIOS 的 INT 13h 处理程序
-     - BIOS 执行磁盘服务（如读取扇区）
-     - BIOS 返回，CPU 继续执行第 90 行
-
-**为什么使用 `.byte` 而不是 `int $0x13`？**
-
-- 中断号是**动态的**（从 `%al` 寄存器传入）
-- 使用 `.byte` 可以在运行时修改中断号
-- `int $0x13` 是静态的，只能调用固定的中断号
-
-**`imm8` 的含义：**
-
-- **`imm8`** = **immediate 8-bit**（8 位立即数）
-  - `imm` = immediate（立即数，直接编码在指令中的常量值）
-  - `8` = 8 位（1 字节，范围 0-255）
-- **`INT imm8`** 指令格式：
-  - 操作码：`0xCD`（1 字节）
-  - 中断号：`imm8`（1 字节，0-255）
-  - 总长度：2 字节
-- **为什么是 8 位？**
-  - x86 中断向量表（IVT）有 256 个条目（0x00-0xFF）
-  - 8 位可以表示 0-255，正好对应 256 个中断向量
-  - 因此 `INT` 指令使用 8 位立即数作为中断号
-
-**其他立即数格式：**
-- **`imm16`**：16 位立即数（2 字节，范围 0-65535）
-- **`imm32`**：32 位立即数（4 字节，范围 0-4294967295）
-
-**示例：**
-```asm
-int $0x13        // INT imm8：中断号 0x13（静态，编译时确定）
-.byte 0xcd       // INT 指令操作码
-.byte 0x13       // imm8：中断号 0x13（等同于 int $0x13）
-
-// 动态中断号（GRUB 使用的方式）
-.byte 0xcd       // INT 指令操作码
-intno:
-.byte 0          // imm8：中断号（运行时修改，如 movb %al, intno）
-```
-
-**关键点说明：**
-
-1. **返回地址的保存时机**：
-   - `prot_to_real`：在切换到实模式**之前**保存返回地址（第 229-230 行）
-   - `real_to_prot`：在切换到保护模式**之后**恢复返回地址（第 185-186 行）
-
-2. **内存位置的重要性**：
-   - `GRUB_MEMORY_MACHINE_REAL_STACK = 0x1FF0`（1MB 以下）
-   - 实模式和保护模式都可以访问此地址
-   - 作为临时存储位置，确保返回地址在模式切换过程中不丢失
-
-3. **栈的使用**：
-   - `prot_to_real`：将栈指针设置为 `GRUB_MEMORY_MACHINE_REAL_STACK`，返回地址就存储在这个位置
-   - `real_to_prot`：从 `GRUB_MEMORY_MACHINE_REAL_STACK` 读取返回地址，放到保护模式栈顶
-
-4. **完整的地址流程**：
-   ```
-   保护模式代码（1MB 以上，如 0x100123）
-       ↓
-   调用 grub_bios_interrupt()
-       ↓
-   调用 prot_to_real
-       ├─ 返回地址 0x100123 保存到 0x1FF0
-       └─ 切换到实模式
-       ↓
-   grub_bios_interrupt 实模式部分（1MB 以下，0x8200+）
-       ↓
-   执行 BIOS 调用（INT 13h 等）
-       ↓
-   调用 real_to_prot
-       ├─ 从 0x1FF0 读取返回地址 0x100123
-       ├─ 切换到保护模式
-       └─ 将返回地址放到保护模式栈顶
-       ↓
-   返回到保护模式代码（1MB 以上，0x100123）
-   ```
-
-**完整流程：**
-
-```
-保护模式代码（1MB 以上，0x100000+）
-    ↓
-调用 grub_bios_interrupt()
-    ↓
-调用 prot_to_real（位于 1MB 以下，0x8200+）
-    ├─ 保存返回地址到 GRUB_MEMORY_MACHINE_REAL_STACK（1MB 以下）
-    ├─ 切换到实模式
-    └─ 返回到 grub_bios_interrupt() 的实模式部分（位于 1MB 以下）
-        ↓
-执行 BIOS 调用（INT 13h 等，在实模式下）
-    ↓
-调用 real_to_prot（位于 1MB 以下，0x8200+）
-    ├─ 从 GRUB_MEMORY_MACHINE_REAL_STACK 恢复返回地址
-    ├─ 切换到保护模式
-    └─ 返回到 grub_bios_interrupt() 的保护模式部分（位于 1MB 以上）
-        ↓
-返回到保护模式代码（1MB 以上，0x100000+）
-```
-
-**关键点总结：**
-
-| 组件 | 内存位置 | 运行模式 | 说明 |
-|------|---------|---------|------|
-| **prot_to_real / real_to_prot** | `0x8200+`（1MB 以下） | 实模式/保护模式 | 模式切换函数本身位于 1MB 以下 |
-| **grub_bios_interrupt** | `0x100000+`（1MB 以上） | 保护模式 | 但包含实模式代码段（`.code16`） |
-| **返回地址保存位置** | `GRUB_MEMORY_MACHINE_REAL_STACK`（`0x2000 - 0x10`，1MB 以下） | - | 临时存储返回地址 |
-| **GRUB Core 解压后代码** | `0x100000+`（1MB 以上） | 保护模式 | 主代码运行位置 |
-
-**设计优势：**
-- **模式切换函数位于 1MB 以下**：可以在实模式下执行
-- **返回地址保存在 1MB 以下**：实模式可以访问
-- **代码分段组织**：`grub_bios_interrupt` 包含保护模式和实模式代码段，通过模式切换函数连接
-
-## 重要澄清：保护模式下不能直接使用 BIOS 的 IVT
-
-**关键点：**
-1. **保护模式下 CPU 使用 IDT，不使用 IVT**：
-   - 在保护模式下，CPU 只使用 IDT（中断描述符表），不会使用 IVT（中断向量表）
-   - IVT 只在实模式下有效（固定位置 0x0000:0000）
-   - 即使 IVT 仍然存在于内存中，保护模式下的 CPU 也不会访问它
-
-2. **GRUB 在保护模式下使用空 IDT**：
-   - GRUB 在保护模式下加载的是空 IDT（limit=0，base=0）
-   - 如果保护模式下发生中断，CPU 会尝试访问 IDT，但由于 IDT 为空，会导致异常
-   - 因此 GRUB 在保护模式下禁用中断（`cli`），避免触发中断
-
-3. **调用 BIOS 服务必须切换回实模式**：
-   - 当 GRUB 需要调用 BIOS 服务（如 INT 13h 读取磁盘）时，**必须切换回实模式**
-   - 切换回实模式后，CPU 才会使用 IVT，此时才能调用 BIOS 中断服务
-
-**GRUB 调用 BIOS 服务的完整流程（源代码位置：`grub/grub-core/kern/i386/int.S:19-134`）：**
-
-```asm
-// grub_bios_interrupt - 在保护模式下调用 BIOS 中断服务
-FUNCTION(grub_bios_interrupt)
-    // 步骤 1: 保存寄存器（在保护模式下）
-    pushf
-    cli
-    popf
-    pushl    %ebp
-    pushl    %ecx
-    pushl    %eax
-    // ... 保存其他寄存器
-    
-    // 步骤 2: 准备 BIOS 中断参数
-    movb     %al, intno        // 中断号（如 0x13）
-    movl     (%edx), %eax
-    movl     %eax, LOCAL(bios_register_eax)
-    // ... 准备其他寄存器值
-    
-    // 步骤 3: 切换到实模式
-    PROT_TO_REAL                // 调用 prot_to_real
-    .code16                      // 现在在实模式下
-    
-    // 步骤 4: 设置 BIOS 中断所需的寄存器
-    movw     LOCAL(bios_register_es), %ax
-    movw     %ax, %es
-    movw     LOCAL(bios_register_ds), %ax
-    movw     %ax, %ds
-    // ... 设置其他寄存器
-    
-    // 步骤 5: 调用 BIOS 中断服务（在实模式下）
-    .byte   0xcd                // INT 指令的操作码
-intno:
-    .byte   0                   // 中断号（如 0x13）
-    
-    // 步骤 6: 保存 BIOS 返回的寄存器值
-    movl    %eax, %cs:LOCAL(bios_register_eax)
-    movw    %ds, %ax
-    movw    %ax, %cs:LOCAL(bios_register_ds)
-    // ... 保存其他寄存器
-    
-    // 步骤 7: 切换回保护模式
-    REAL_TO_PROT                // 调用 real_to_prot
-    .code32                     // 现在在保护模式下
-    
-    // 步骤 8: 恢复寄存器并返回（在保护模式下）
-    popl    %eax
-    // ... 恢复其他寄存器
-    ret
-```
-
-**流程总结：**
-
-```
-保护模式（GRUB 主代码）
-    ↓
-需要调用 BIOS 服务（如 INT 13h）
-    ↓
-调用 grub_bios_interrupt()
-    ↓
-PROT_TO_REAL（prot_to_real）
-    ├─ 保存保护模式 IDT（空）
-    ├─ 恢复实模式 IDT（IVT）
-    ├─ 清除 CR0.PE 位（退出保护模式）
-    └─ 切换到实模式
-    ↓
-实模式（CPU 现在使用 IVT）
-    ↓
-执行 INT 指令（如 INT 13h）
-    ├─ CPU 使用 IVT[0x13] 查找处理程序
-    ├─ 跳转到 BIOS 处理程序
-    └─ BIOS 执行服务并返回
-    ↓
-REAL_TO_PROT（real_to_prot）
-    ├─ 保存实模式 IDT（IVT）
-    ├─ 加载保护模式 IDT（空）
-    ├─ 设置 CR0.PE 位（进入保护模式）
-    └─ 切换到保护模式
-    ↓
-保护模式（GRUB 主代码继续执行）
-```
-
-**关键结论：**
-
-| 模式 | CPU 使用的中断表 | GRUB 的 IDT/IVT 状态 | 能否调用 BIOS 服务 |
-|------|----------------|---------------------|-------------------|
-| **实模式** | IVT（固定 0x0000:0000） | 使用 BIOS 的 IVT | ✅ 可以直接调用（INT 指令） |
-| **保护模式** | IDT（由 IDTR 指定） | 使用空 IDT（limit=0） | ❌ **不能直接调用**，必须切换回实模式 |
-
-**关键点总结：**
-
-| 组件 | 运行模式 | 中断表类型 | 中断表位置 | 处理策略 |
-|------|---------|-----------|-----------|---------|
-| **BIOS** | 实模式 | IVT | 固定 0x0000:0000 | 提供中断服务 |
-| **GRUB（保护模式）** | 保护模式 | IDT（空） | 可配置（但设为空） | **禁用中断（cli）**，需要时切换回实模式 |
-| **GRUB（调用 BIOS）** | 实模式 | IVT | 固定 0x0000:0000 | 恢复 IVT，调用 BIOS 服务 |
-| **Linux 内核** | 保护模式/长模式 | IDT | 内核内存（可配置） | 建立完整的 IDT，接管所有中断 |
-
-> **注意**：关于 A20 地址线的详细技术说明，请参见 [A20 地址线技术详解](A20_ADDRESS_LINE.md)。
-
-> **相关文档**：关于 `grub_bios_interrupt` 的使用场景和调用时机，请参见 [GRUB 在保护模式下调用 BIOS 服务的使用场景](GRUB_BIOS_INTERRUPT_USAGE.md)。
 
 ---
 
