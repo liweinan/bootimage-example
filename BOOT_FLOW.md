@@ -2804,60 +2804,22 @@ startup_64（64 位内核入口点）
 
 ### GRUB 加载内核的详细流程
 
-**源代码位置：** `grub/grub-core/loader/i386/linux.c`
+**源代码位置：**
+- `grub/grub-core/kern/main.c` - `grub_main()` 函数
+- `grub/grub-core/loader/i386/linux.c` - 内核加载相关函数
 
 GRUB 加载 Linux 内核的过程包括以下步骤：
 
-1. **grub_main()** 解析 `grub.cfg` 配置文件，执行 `linux` 命令
-2. **grub_cmd_linux()** 打开内核文件（如 `/boot/vmlinuz-5.x.x`），解析内核头部，加载内核镜像到内存
-3. **grub_linux_boot()** 设置启动参数，通过 `grub_relocator32_boot()` 跳转到内核入口点
-
-**内核镜像结构概述：**
-
-Linux 内核镜像（bzImage/vmlinuz）包含两部分：
-
-1. **Setup 代码**（实模式代码）：
-   - 大小：通常 4-64 个扇区（由 `setup_sects` 字段指定）
-   - 功能：切换到保护模式/长模式，解压内核
-   - 源代码：`linux/arch/x86/boot/header.S`
-
-2. **压缩的内核代码**：
-   - 位置：setup 代码之后
-   - 格式：gzip 压缩的 vmlinux
-   - 加载地址：`0x100000`（1MB）或内核指定的地址
+1. **grub_main()**（`grub/grub-core/kern/main.c:304`）解析 `grub.cfg` 配置文件，执行 `linux` 命令
+2. **grub_cmd_linux()**（`grub/grub-core/loader/i386/linux.c:680`）打开内核文件（如 `/boot/vmlinuz-5.x.x`），解析内核头部，加载内核镜像到内存
+3. **grub_linux_boot()**（`grub/grub-core/loader/i386/linux.c:761`）设置启动参数，通过 `grub_relocator32_boot()` 跳转到内核入口点
 
 **关键点：**
 - **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
 - **用户交互触发**：跳转由用户在菜单中选择启动项时触发
 - **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点（`code32_start`）
 
-**内存布局（加载后）：**
-
-```
-内存地址范围              内容
-─────────────────────────────────────────
-0x100000 (1MB) - ...     vmlinuz 镜像
-├─ 0x100000 - 0x1001FF   内核头部（boot_params，512 字节）
-├─ 0x100200 - ...        Setup 代码（setup_sects * 512 字节）
-└─ Setup 之后           压缩的内核代码（gzip 压缩）
-    ↓（解压后）
-0x100000+               解压后的内核代码
-├─ startup_32           32 位保护模式入口点
-└─ startup_64           64 位长模式入口点
-```
-
-**内核启动参数传递：**
-
-GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数：
-
-- **`code32_start`**：内核入口点地址（传递给内核，内核从这里开始执行）
-- **`cmd_line_ptr`**：内核命令行参数地址（如 `root=/dev/sda1`）
-- **`ramdisk_image`**：initramfs 地址
-- **`ramdisk_size`**：initramfs 大小
-- **`e820_map`**：系统内存映射表
-- **`esi` 寄存器**：包含 `boot_params` 的地址（内核通过 `%esi` 访问）
-
-> **详细说明**：关于 GRUB 加载内核的详细代码流程、地址来源和加载过程、GRUB 菜单选择与启动函数的关系等，请参见 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md)。  
+> **详细说明**：关于 GRUB 加载内核的详细代码流程、内核镜像结构、内存布局、启动参数传递等，请参见 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md)。  
 > 关于 vmlinuz 文件结构的完整分析，请参见 [vmlinuz 文件详细结构分析](VMLINUZ_STRUCTURE.md)。
 
 ### 内核早期启动（64 位）
