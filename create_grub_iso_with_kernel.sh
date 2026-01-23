@@ -171,7 +171,14 @@ search --no-floppy --set=root --file /boot/grub/grub.cfg
 menuentry "Linux - Boot to Shell" {
     # 重新探测设备（确保在菜单项中也能访问）
     search --no-floppy --set=root --file /boot/grub/grub.cfg
-    linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200 quiet
+    linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200n8 console=tty0 alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.19/main modules=loop,squashfs,sd-mod,usb-storage
+    initrd /boot/initrd.img
+}
+
+menuentry "Linux - Boot to Shell (Verbose)" {
+    # 重新探测设备（确保在菜单项中也能访问）
+    search --no-floppy --set=root --file /boot/grub/grub.cfg
+    linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200n8 console=tty0 alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.19/main modules=loop,squashfs,sd-mod,usb-storage
     initrd /boot/initrd.img
 }
 
@@ -234,13 +241,18 @@ echo ""
 echo -e "${GREEN}=== 完成 ===${NC}"
 echo ""
 echo "使用以下命令在 QEMU 中启动:"
-echo -e "${YELLOW}qemu-system-x86_64 -cdrom ${ISO_NAME} -boot d -m 512 -serial stdio${NC}"
+echo -e "${YELLOW}qemu-system-x86_64 -cdrom ${ISO_NAME} -boot d -m 1024 -serial stdio${NC}"
 echo ""
 echo "参数说明:"
 echo "  -cdrom ${ISO_NAME}  : 指定 ISO 文件"
 echo "  -boot d            : 从 CD-ROM 启动"
-echo "  -m 512             : 分配 512MB 内存"
+echo "  -m 1024            : 分配 1024MB 内存（Alpine 建议至少 512MB，推荐 1GB）"
 echo "  -serial stdio      : 将串口输出到终端（可以看到内核启动日志）"
+echo ""
+echo "重要提示:"
+echo "  - 必须使用 -serial stdio 才能看到内核启动日志和 shell 输出"
+echo "  - 如果黑屏，检查是否使用了 -serial stdio 参数"
+echo "  - 内核输出会显示在终端，而不是 QEMU 窗口"
 echo ""
 echo "可选参数:"
 echo "  -netdev user,id=net0 -device e1000,netdev=net0  : 启用网络支持"
