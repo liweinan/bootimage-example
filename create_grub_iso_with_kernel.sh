@@ -162,23 +162,22 @@ set default=0
 insmod iso9660
 insmod part_msdos
 insmod part_gpt
+insmod loopback
 
-# 设置根设备为 CD-ROM（ISO）
-# 在 ISO 启动时，设备通常是 (cd0)
-set root='cd0'
+# 自动探测并设置根设备（通过查找 grub.cfg 文件）
+# 这会自动找到包含 /boot/grub/grub.cfg 的设备
+search --no-floppy --set=root --file /boot/grub/grub.cfg
 
 menuentry "Linux - Boot to Shell" {
-    set root='cd0'
+    # 重新探测设备（确保在菜单项中也能访问）
+    search --no-floppy --set=root --file /boot/grub/grub.cfg
     linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200 quiet
     initrd /boot/initrd.img
 }
 
 menuentry "Debug: List Files" {
+    search --no-floppy --set=root --file /boot/grub/grub.cfg
     echo "Current root: $root"
-    echo ""
-    echo "Trying to set root to cd0..."
-    set root='cd0'
-    echo "Root after setting: $root"
     echo ""
     echo "Listing devices:"
     ls
@@ -188,6 +187,13 @@ menuentry "Debug: List Files" {
     echo ""
     echo "Trying to list /boot directory:"
     ls /boot/
+    echo ""
+    echo "Trying to list /boot/grub directory:"
+    ls /boot/grub/
+    echo ""
+    echo "Testing file access:"
+    ls -l /boot/vmlinuz
+    ls -l /boot/initrd.img
     echo ""
     echo "Press any key to return to menu..."
     read
