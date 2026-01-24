@@ -499,10 +499,154 @@ qemu-system-x86_64 -display sdl -cdrom grub-linux.iso -boot d -m 1024 -serial st
 - 内核启动后，Alpine Linux 会显示 shell 提示符，可以直接使用
 
 **启动流程：**
+
+```
 1. GRUB 菜单显示（5 秒超时）
-2. 选择 "Linux - Boot to Shell" 菜单项
-3. 内核开始加载（输出显示在终端）
-4. 进入 Alpine Linux shell 环境
+   ↓
+2. 用户选择 "Linux - Boot to Shell" 菜单项
+   ↓
+3. GRUB 执行 linux 命令
+   ├─ 加载 vmlinuz（Linux 内核）到内存（0x100000）
+   ├─ 设置内核启动参数（boot_params）
+   └─ 注册启动函数
+   ↓
+4. GRUB 执行 initrd 命令
+   ├─ 加载 initrd.img（Alpine 的 initramfs）到内存
+   └─ 在 boot_params 中设置 ramdisk_image 和 ramdisk_size
+   ↓
+5. GRUB 跳转到内核入口点（code32_start）
+   ↓
+6. Linux 内核开始执行
+   ├─ Setup 代码（实模式）
+   ├─ 解压内核代码
+   ├─ 切换到保护模式/长模式
+   └─ 执行 startup_64（内核入口点）
+   ↓
+7. 内核初始化
+   ├─ 初始化基本系统
+   ├─ 从 boot_params 读取 initrd 位置
+   └─ 挂载 initramfs 作为根文件系统（/）
+   ↓
+8. 内核执行 initramfs 中的 /init 脚本
+   ├─ Alpine 的 initramfs 包含完整的 Alpine Linux 系统
+   ├─ /init 脚本初始化系统（加载驱动、设置网络等）
+   └─ /init 脚本最后启动 shell（通常是 /bin/sh 或 /bin/ash）
+   ↓
+9. 进入 Alpine Linux shell 环境
+   └─ **shell 运行在 initramfs 的虚拟文件系统中（RAM 文件系统）**
+   └─ 用户可以直接使用 shell 命令
+```
+
+**关键点说明：**
+
+1. **`linux` 命令的作用**：
+   - `linux` 是 GRUB 的命令，用于加载 Linux 内核到内存
+   - 它只是将内核文件从磁盘复制到内存，并设置启动参数
+   - **`linux` 命令本身不启动 shell**
+
+2. **`vmlinuz`（内核）的作用**：
+   - `vmlinuz` 是 Linux 内核本身
+   - 内核启动后负责初始化系统、挂载文件系统
+   - **内核本身也不直接启动 shell**
+
+3. **shell 的启动过程**：
+   - 内核挂载 initramfs 后，会查找并执行 `/init` 脚本（或 `/linuxrc`）
+   - **Alpine 的 initramfs 中的 `/init` 脚本负责启动 shell**
+   - `/init` 脚本会：
+     - 初始化系统环境
+     - 加载必要的驱动模块
+     - 设置网络（如果需要）
+     - **最后执行 `/bin/sh` 或 `/bin/ash` 启动 shell**
+
+**为什么启动后会进入 shell？**
+
+Alpine Linux 的 netboot initramfs（initrd.img）包含：
+- 完整的 Alpine Linux 根文件系统
+- 基本的系统工具和命令（ls, cat, mount 等）
+- `/init` 启动脚本，该脚本会：
+  1. 初始化系统
+  2. 挂载必要的文件系统
+  3. **最后执行 shell（`/bin/sh` 或 `/bin/ash`）**
+
+这与 Debian 安装器的 initrd 不同：
+- **Debian 安装器 initrd**：`/init` 脚本启动安装程序界面
+- **Alpine netboot initrd**：`/init` 脚本启动 shell 环境
+
+**总结：**
+- **不是** `linux` 命令启动 shell（它只是加载内核）
+- **不是** `vmlinuz` 直接调用 shell（内核只负责系统初始化）
+- **而是** initramfs 中的 `/init` 脚本启动 shell（这是用户空间的第一个进程）
+
+**文件系统环境说明：**
+
+**当前配置（`root=/dev/ram0`）：**
+
+```bash
+linux /boot/vmlinuz root=/dev/ram0 rw ...
+```
+
+- **`root=/dev/ram0`**：指定使用 RAM 作为根文件系统
+- **initramfs 挂载为根文件系统**：内核将 initramfs 挂载到 `/`（根目录）
+- **shell 运行在 initramfs 中**：启动后的 shell 使用的是 initramfs 的虚拟文件系统（RAM 文件系统）
+- **没有真正的硬盘**：QEMU 没有配置虚拟硬盘，所以不会切换到硬盘环境
+- **所有文件都在内存中**：initramfs 中的文件都在 RAM 中，重启后数据会丢失
+
+**文件系统结构：**
+
+```
+启动后的文件系统（都在 RAM 中）：
+/
+├─ /bin/          # Alpine 的基本命令（sh, ls, cat 等）
+├─ /sbin/         # 系统管理命令
+├─ /usr/          # 用户程序
+├─ /etc/          # 配置文件
+├─ /proc/         # 内核虚拟文件系统（进程信息）
+├─ /sys/          # 内核虚拟文件系统（系统信息）
+├─ /dev/          # 设备文件
+└─ /init          # 启动脚本（已执行）
+```
+
+**与真实系统的区别：**
+
+| 特性 | 当前配置（initramfs） | 真实系统（硬盘） |
+|------|---------------------|----------------|
+| **根文件系统** | `/dev/ram0`（RAM） | `/dev/sda1`（硬盘） |
+| **文件位置** | 内存中 | 硬盘上 |
+| **持久化** | 重启后丢失 | 持久保存 |
+| **文件系统类型** | tmpfs/initramfs | ext4/xfs/btrfs 等 |
+| **切换机制** | 不切换（直接使用） | 需要 pivot_root 切换 |
+
+**如果要使用虚拟硬盘：**
+
+1. **创建虚拟硬盘**：
+   ```bash
+   qemu-img create -f qcow2 disk.img 10G
+   ```
+
+2. **修改内核参数**：
+   ```bash
+   linux /boot/vmlinuz root=/dev/sda1 rw ...
+   ```
+
+3. **启动 QEMU 时添加硬盘**：
+   ```bash
+   qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 1024 \
+       -drive file=disk.img,format=qcow2 -serial stdio
+   ```
+
+4. **initramfs 会切换到硬盘**：
+   - initramfs 的 `/init` 脚本会检测到 `/dev/sda1`
+   - 挂载 `/dev/sda1` 到临时目录
+   - 使用 `pivot_root` 切换到硬盘文件系统
+   - 卸载 initramfs
+
+**当前配置的特点：**
+- ✅ 快速启动（不需要访问硬盘）
+- ✅ 适合测试和学习
+- ✅ 所有操作都在内存中，速度快
+- ❌ 数据不持久（重启后丢失）
+- ❌ 不能安装软件到硬盘
+- ❌ 不能保存文件
 
 **带网络支持：**
 

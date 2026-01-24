@@ -171,13 +171,31 @@ search --no-floppy --set=root --file /boot/grub/grub.cfg
 menuentry "Linux - Boot to Shell" {
     # 重新探测设备（确保在菜单项中也能访问）
     search --no-floppy --set=root --file /boot/grub/grub.cfg
+    # GRUB 的 linux 命令：加载 Linux 内核到内存并设置启动参数
+    # - 将 vmlinuz 从磁盘加载到内存（0x100000）
+    # - 设置 boot_params 结构（包含内核参数）
+    # - 注意：linux 命令本身不启动 shell，只是加载内核
+    # root=/dev/ram0: 使用 RAM 作为根文件系统（initrd 会挂载为根文件系统）
+    # console=ttyS0,115200n8: 串口控制台（输出到终端，必须配合 QEMU -serial stdio 使用）
+    # console=tty0: VGA 控制台（可选，用于图形显示）
+    # alpine_repo: Alpine 软件源（如果需要安装软件）
+    # modules: 预加载的内核模块
     linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200n8 console=tty0 alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.19/main modules=loop,squashfs,sd-mod,usb-storage
+    # GRUB 的 initrd 命令：加载 initramfs 到内存
+    # - 将 initrd.img 加载到内存
+    # - 在 boot_params 中设置 ramdisk_image 和 ramdisk_size
+    # - 内核启动后会挂载 initramfs 作为根文件系统
+    # - Alpine netboot 的 initramfs 包含完整的 Alpine Linux 系统
+    # - initramfs 中的 /init 脚本会初始化系统，最后启动 shell（/bin/sh）
+    # 注意：shell 是由 initramfs 中的 /init 脚本启动的，不是内核直接启动的
     initrd /boot/initrd.img
 }
 
 menuentry "Linux - Boot to Shell (Verbose)" {
     # 重新探测设备（确保在菜单项中也能访问）
     search --no-floppy --set=root --file /boot/grub/grub.cfg
+    # 详细模式启动（显示更多内核和系统初始化日志）
+    # 启动后同样会进入 Alpine Linux shell 环境
     linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200n8 console=tty0 alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.19/main modules=loop,squashfs,sd-mod,usb-storage
     initrd /boot/initrd.img
 }
