@@ -558,95 +558,309 @@ qemu-system-x86_64 -display sdl -cdrom grub-linux.iso -boot d -m 1024 -serial st
      - 设置网络（如果需要）
      - **最后执行 `/bin/sh` 或 `/bin/ash` 启动 shell**
 
-**为什么启动后会进入 shell？**
+**init 脚本的类型和执行机制：**
 
-Alpine Linux 的 netboot initramfs（initrd.img）包含：
-- 完整的 Alpine Linux 根文件系统
-- 基本的系统工具和命令（ls, cat, mount 等）
-- `/init` 启动脚本，该脚本会：
-  1. 初始化系统
-  2. 挂载必要的文件系统
-  3. **最后执行 shell（`/bin/sh` 或 `/bin/ash`）**
+**1. init 脚本的类型：**
 
-这与 Debian 安装器的 initrd 不同：
-- **Debian 安装器 initrd**：`/init` 脚本启动安装程序界面
-- **Alpine netboot initrd**：`/init` 脚本启动 shell 环境
+**在 initramfs 中：**
+- **`/init`**：通常是 shell 脚本（文本文件，以 `#!/bin/sh` 或 `#!/bin/ash` 开头）
+- **示例**（Alpine netboot）：
+  ```bash
+  #!/bin/sh
+  # Alpine Linux init script
+  mount -t proc proc /proc
+  mount -t sysfs sysfs /sys
+  # ... 初始化系统 ...
+  exec /bin/sh  # 启动 shell
+  ```
+- **执行方式**：
+  1. 内核查找 `/sbin/init`、`/etc/init`、`/bin/init`、`/bin/sh`（按顺序）
+  2. 如果这些都不存在，但存在 `/init`，内核会执行 `/init`
+  3. 如果 `/init` 是 shell 脚本，内核执行 `/bin/sh`，然后 sh 解释执行脚本内容
 
-**总结：**
-- **不是** `linux` 命令启动 shell（它只是加载内核）
-- **不是** `vmlinuz` 直接调用 shell（内核只负责系统初始化）
-- **而是** initramfs 中的 `/init` 脚本启动 shell（这是用户空间的第一个进程）
+**在真正的根文件系统中：**
+- **`/sbin/init`**：通常是二进制可执行文件（C 程序），如 systemd、sysvinit、openrc 等
+- **执行方式**：内核直接执行二进制文件
 
-**文件系统环境说明：**
+**Alpine netboot 的 initramfs：**
+- 包含 `/init` 脚本（shell 脚本）
+- 由于使用 `root=/dev/ram0`，不会切换到真正的根文件系统
+- `/init` 脚本执行完后启动 shell
+- 如果切换到真正的根文件系统，`/sbin/init`（二进制程序）会接管
 
-**当前配置（`root=/dev/ram0`）：**
+**2. 内核如何执行 init 过程：**
 
+**内核执行 init 的流程：**
+
+```
+内核初始化完成
+   ↓
+内核挂载 initramfs 到 /（根目录）
+   ↓
+内核按顺序查找并尝试执行 init 程序：
+   1. /sbin/init
+   2. /etc/init
+   3. /bin/init
+   4. /bin/sh
+   （找到第一个存在的就执行，不再继续查找）
+   ↓
+内核调用 kernel_execve() 系统调用
+   ├─ 这是内核空间到用户空间的过渡点
+   ├─ 内核创建第一个用户空间进程（PID 1）
+   └─ 执行找到的 init 程序
+   ↓
+init 程序开始执行
+   ├─ 如果是 shell 脚本：内核执行 /bin/sh，sh 解释执行脚本
+   └─ 如果是二进制：内核直接执行二进制文件
+   ↓
+init 成为 PID 1 进程（用户空间的第一个进程）
+   └─ 所有后续进程都是 init 的子进程
+```
+
+**关键代码位置（Linux 内核）：**
+
+```c
+// linux/init/main.c:kernel_init()
+static int __ref kernel_init(void *unused)
+{
+    // ... 内核初始化 ...
+    
+    // 如果指定了 rdinit= 参数，优先执行（用于 initramfs）
+    if (ramdisk_execute_command) {
+        ret = run_init_process(ramdisk_execute_command);
+        if (!ret)
+            return 0;
+    }
+    
+    // 按顺序尝试执行 init 程序
+    // 注意：根据实际源代码，内核只尝试这些路径，不包含 /init
+    if (!try_to_run_init_process("/sbin/init") ||
+        !try_to_run_init_process("/etc/init") ||
+        !try_to_run_init_process("/bin/init") ||
+        !try_to_run_init_process("/bin/sh"))
+        return 0;
+    
+    // 如果都不存在，内核会 panic
+    panic("No working init found.  Try passing init= option to kernel.");
+}
+
+// linux/init/main.c:try_to_run_init_process()
+static int try_to_run_init_process(const char *init_filename)
+{
+    int ret;
+    
+    // 使用 kernel_execve() 执行 init 程序
+    ret = kernel_execve(init_filename, argv_init, envp_init);
+    
+    return ret;
+}
+```
+
+**关于 `/init` 的执行代码：**
+
+**问题 1：内核会尝试执行 `/init` 的具体代码在哪里？**
+
+**答案**：根据你提供的实际源代码，内核**不会直接尝试执行 `/init`**。
+
+内核代码只按顺序尝试：
+1. `/sbin/init`
+2. `/etc/init`
+3. `/bin/init`
+4. `/bin/sh`
+
+**那么 `/init` 是如何被执行的？可能的机制：**
+
+1. **通过 `rdinit=` 参数**（最明确的方式）：
+   ```c
+   // 如果指定了 rdinit= 参数，优先执行
+   if (ramdisk_execute_command) {
+       ret = run_init_process(ramdisk_execute_command);
+       if (!ret)
+           return 0;
+   }
+   ```
+   - 内核命令行参数：`rdinit=/init`
+   - 内核会优先执行 `rdinit=` 指定的程序
+   - 这是执行 `/init` 的明确方式
+
+2. **通过符号链接（BusyBox 的情况）**：
+   - 如果 `/sbin/init` 是符号链接指向 `/bin/busybox`，内核执行 `/sbin/init` 时实际上会执行 `/bin/busybox`
+   - BusyBox 根据 `argv[0]`（程序名）决定执行哪个功能
+   - 如果 `/sbin/init` 指向 `/bin/busybox`，busybox 会执行 `init` 功能
+   - **但是，如果 initramfs 中有 `/init` 脚本，busybox 的 init 功能可能会执行 `/init` 脚本**
+
+3. **通过 `/bin/sh` 执行脚本**：
+   - 如果 `/bin/sh` 存在，内核执行 `/bin/sh`
+   - 然后 `/bin/sh` 可能会执行 `/init` 脚本（如果 `/init` 存在且 `/bin/sh` 知道要执行它）
+
+**实际运行系统的发现：**
+
+根据你的观察，实际运行系统中 `/sbin/init` 指向 `/bin/busybox`。
+
+**BusyBox 的工作原理：**
+
+BusyBox 是一个"多合一"的二进制文件，包含多个 Unix 工具的功能（如 `sh`、`init`、`mount`、`ls` 等）。
+
+**BusyBox 如何决定执行哪个功能：**
+
+1. **通过符号链接**：
+   ```bash
+   /sbin/init -> /bin/busybox
+   /bin/sh -> /bin/busybox
+   /bin/ls -> /bin/busybox
+   ```
+   - 当内核执行 `/sbin/init` 时：
+     - 内核解析符号链接，找到实际文件 `/bin/busybox`
+     - 内核加载并执行 `/bin/busybox`
+     - **关键**：内核设置 `argv[0]` 为 `/sbin/init`（符号链接的路径），而不是 `/bin/busybox`
+   - BusyBox 检查 `argv[0]`（程序名），发现是 `/sbin/init`
+   - BusyBox 从 `argv[0]` 中提取 basename（文件名部分），得到 `init`
+   - BusyBox 根据 `init` 执行 init 功能
+
+**内核如何设置 `argv[0]`：**
+
+根据 Linux 内核的行为：
+- 当内核调用 `kernel_execve()` 执行程序时，`argv[0]` 被设置为**调用时使用的路径**
+- 如果通过符号链接执行，`argv[0]` 是符号链接的路径，而不是实际文件的路径
+- 例如：
+  ```c
+  // 内核代码（简化）
+  kernel_execve("/sbin/init", argv_init, envp_init);
+  // 即使 /sbin/init 是符号链接指向 /bin/busybox
+  // argv[0] 仍然是 "/sbin/init"
+  ```
+
+**实际执行流程：**
+
+```
+内核执行 /sbin/init
+   ↓
+内核解析符号链接：/sbin/init -> /bin/busybox
+   ↓
+内核加载 /bin/busybox 到内存
+   ↓
+内核设置进程的 argv：
+   argv[0] = "/sbin/init"  （符号链接的路径）
+   argv[1] = NULL
+   ↓
+内核跳转到用户空间，执行 /bin/busybox
+   ↓
+BusyBox 程序开始执行
+   ↓
+BusyBox 检查 argv[0] = "/sbin/init"
+   ↓
+BusyBox 提取 basename：init
+   ↓
+BusyBox 执行 init 功能
+```
+
+2. **通过硬链接**：
+   ```bash
+   # 创建多个硬链接指向同一个 busybox 文件
+   ln /bin/busybox /sbin/init
+   ln /bin/busybox /bin/sh
+   ```
+   - 当执行 `/sbin/init` 时，内核加载 `/bin/busybox`
+   - 内核设置 `argv[0]` 为 `/sbin/init`（调用时使用的路径）
+   - BusyBox 检查 `argv[0]`，提取 basename `init`，执行 init 功能
+
+3. **通过直接调用**：
+   ```bash
+   busybox init
+   busybox sh
+   ```
+   - 当执行 `busybox init` 时，`argv[0]` 是 `busybox`，`argv[1]` 是 `init`
+   - BusyBox 检查 `argv[1]`（第一个参数），执行相应的功能
+
+**总结：内核设置 `argv[0]` 的规则：**
+
+1. **内核调用 `kernel_execve(path, argv, envp)` 时**：
+   - `argv[0]` 由调用者传入（通常是路径）
+   - 如果通过符号链接执行，`argv[0]` 是符号链接的路径，不是实际文件的路径
+
+2. **内核代码示例（简化）**：
+   ```c
+   // linux/init/main.c:try_to_run_init_process()
+   static int try_to_run_init_process(const char *init_filename)
+   {
+       // init_filename = "/sbin/init"
+       // argv_init[0] = "/sbin/init"  （即使 /sbin/init 是符号链接）
+       return kernel_execve(init_filename, argv_init, envp_init);
+   }
+   ```
+
+3. **BusyBox 的行为**：
+   - BusyBox 检查 `argv[0]`，提取 basename（文件名部分）
+   - 如果 `argv[0]` 是 `/sbin/init`，提取得到 `init`，执行 init 功能
+   - 如果 `argv[0]` 是 `/bin/sh`，提取得到 `sh`，执行 sh 功能
+
+**`/init` 在 initramfs 中的执行机制：**
+
+**情况 1：`/init` 是 shell 脚本**
 ```bash
-linux /boot/vmlinuz root=/dev/ram0 rw ...
+#!/bin/busybox sh
+# 或者
+#!/bin/sh
+```
+- 内核执行 `/sbin/init`（指向 `/bin/busybox`）
+- BusyBox 的 init 功能启动
+- BusyBox init 可能会查找并执行 `/init` 脚本（如果存在）
+- 或者内核直接执行 `/bin/sh`（如果 `/bin/sh` 存在），然后 sh 执行 `/init` 脚本
+
+**情况 2：`/init` 是符号链接指向 `/bin/busybox`**
+```bash
+/init -> /bin/busybox
+```
+- 如果内核尝试执行 `/init`（通过 `rdinit=/init` 或其他方式），会执行 `/bin/busybox`
+- BusyBox 检查 `argv[0]`，发现是 `init`，执行 init 功能
+
+**情况 3：`/init` 是二进制可执行文件**
+- 内核直接执行 `/init`（如果是可执行的二进制文件）
+
+**实际运行系统的执行流程（推测）：**
+
+```
+内核挂载 initramfs
+   ↓
+内核查找并执行 init 程序
+   ├─ 尝试 /sbin/init
+   │  └─ /sbin/init -> /bin/busybox
+   │     └─ BusyBox 执行 init 功能
+   │        └─ BusyBox init 可能会查找并执行 /init 脚本（如果存在）
+   │
+   └─ 或者尝试 /bin/sh
+      └─ /bin/sh -> /bin/busybox
+         └─ BusyBox 执行 sh 功能
+            └─ sh 可能会执行 /init 脚本（如果存在）
 ```
 
-- **`root=/dev/ram0`**：指定使用 RAM 作为根文件系统
-- **initramfs 挂载为根文件系统**：内核将 initramfs 挂载到 `/`（根目录）
-- **shell 运行在 initramfs 中**：启动后的 shell 使用的是 initramfs 的虚拟文件系统（RAM 文件系统）
-- **没有真正的硬盘**：QEMU 没有配置虚拟硬盘，所以不会切换到硬盘环境
-- **所有文件都在内存中**：initramfs 中的文件都在 RAM 中，重启后数据会丢失
+**验证方法：**
 
-**文件系统结构：**
+在运行中的系统检查：
+```bash
+# 检查 /sbin/init 的指向
+ls -l /sbin/init
+readlink /sbin/init
 
+# 检查 /init 的类型和内容
+file /init
+ls -l /init
+head -n 5 /init  # 查看前几行，看是否是脚本
+
+# 检查 /bin/busybox
+file /bin/busybox
+ls -l /bin/busybox
+
+# 检查当前运行的 PID 1 进程
+ps aux | grep -E "^.*1.*"
+ls -l /proc/1/exe  # 查看 PID 1 的实际可执行文件
+cat /proc/1/cmdline  # 查看 PID 1 的命令行参数
+
+# 检查 busybox 支持的功能
+/bin/busybox --list  # 列出 busybox 支持的所有功能
 ```
-启动后的文件系统（都在 RAM 中）：
-/
-├─ /bin/          # Alpine 的基本命令（sh, ls, cat 等）
-├─ /sbin/         # 系统管理命令
-├─ /usr/          # 用户程序
-├─ /etc/          # 配置文件
-├─ /proc/         # 内核虚拟文件系统（进程信息）
-├─ /sys/          # 内核虚拟文件系统（系统信息）
-├─ /dev/          # 设备文件
-└─ /init          # 启动脚本（已执行）
-```
 
-**与真实系统的区别：**
-
-| 特性 | 当前配置（initramfs） | 真实系统（硬盘） |
-|------|---------------------|----------------|
-| **根文件系统** | `/dev/ram0`（RAM） | `/dev/sda1`（硬盘） |
-| **文件位置** | 内存中 | 硬盘上 |
-| **持久化** | 重启后丢失 | 持久保存 |
-| **文件系统类型** | tmpfs/initramfs | ext4/xfs/btrfs 等 |
-| **切换机制** | 不切换（直接使用） | 需要 pivot_root 切换 |
-
-**如果要使用虚拟硬盘：**
-
-1. **创建虚拟硬盘**：
-   ```bash
-   qemu-img create -f qcow2 disk.img 10G
-   ```
-
-2. **修改内核参数**：
-   ```bash
-   linux /boot/vmlinuz root=/dev/sda1 rw ...
-   ```
-
-3. **启动 QEMU 时添加硬盘**：
-   ```bash
-   qemu-system-x86_64 -cdrom grub-linux.iso -boot d -m 1024 \
-       -drive file=disk.img,format=qcow2 -serial stdio
-   ```
-
-4. **initramfs 会切换到硬盘**：
-   - initramfs 的 `/init` 脚本会检测到 `/dev/sda1`
-   - 挂载 `/dev/sda1` 到临时目录
-   - 使用 `pivot_root` 切换到硬盘文件系统
-   - 卸载 initramfs
-
-**当前配置的特点：**
-- ✅ 快速启动（不需要访问硬盘）
-- ✅ 适合测试和学习
-- ✅ 所有操作都在内存中，速度快
-- ❌ 数据不持久（重启后丢失）
-- ❌ 不能安装软件到硬盘
-- ❌ 不能保存文件
+> **详细说明**：关于 initramfs 内容分析和 BusyBox 启动设置的完整文档，请参见 [INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md)。
 
 **带网络支持：**
 

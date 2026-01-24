@@ -17,3 +17,7 @@ __pycache__/
 
 # GRUB ISO 缓存目录
 .grub_iso_cache/
+
+# 下载的 initrd 文件
+initrd-alpine-*.img
+*.img

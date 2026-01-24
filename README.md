@@ -173,8 +173,13 @@ DISPLAY=:1 make run-gui
 ### Linux 内核相关文档
 
 - **[VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md)** - vmlinuz（bzImage）文件详细结构分析（boot_params、setup code、压缩内核等）
+- **[VMLINUZ_INITRD_RELATIONSHIP.md](VMLINUZ_INITRD_RELATIONSHIP.md)** - vmlinuz 和 initrd 的关系详解（定义、作用机制、使用场景、必要性分析）
 - **[LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)** - Linux 内核早期启动详细流程（64 位）（Setup 代码、模式切换、startup_32、startup_64 源代码分析）
 - **[LINUX_KERNEL_INTERRUPT_TAKEOVER.md](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)** - Linux 内核中断系统接管详细流程（早期 IDT 设置、8259A PIC 重新编程、APIC 和中断门设置、INT 0x80 系统调用实现）
+- **[INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md)** - Initramfs 内容分析与 BusyBox 启动设置（initramfs 分析工具、BusyBox 工作原理、/init 和 /sbin/init 的关系）
+- **[INITRAMFS_ANALYSIS_RESULT.md](INITRAMFS_ANALYSIS_RESULT.md)** - Alpine Linux Initramfs 实际分析结果（基于 initrd-alpine-v3.19.img 的实际分析）
+- **[ALPINE_INIT_PROCESS_ANALYSIS.md](ALPINE_INIT_PROCESS_ANALYSIS.md)** - Alpine Linux Initramfs Init 启动过程详细分析（基于 mkinitfs 源代码的完整流程分析）
+- **[BUSYBOX_SH_EXEC_INIT_DETAILS.md](BUSYBOX_SH_EXEC_INIT_DETAILS.md)** - BusyBox sh 执行 /init 脚本的实现细节（Linux 内核 shebang 处理机制、binfmt_script 模块工作原理）
 
 ### 中断相关文档
 
@@ -258,3 +263,24 @@ DISPLAY=:1 make run-gui
     - 熵值计算和压缩评分系统
   - 反汇编分析 core.img（查找 grub_stub_init 入口点）
   - 使用方法：`python3 verify_grub_boot_sector.py [iso_file]`
+
+#### Initramfs 分析工具
+
+- **[analyze_initramfs.sh](analyze_initramfs.sh)** - Initramfs 内容分析脚本
+  - **功能**：解压并分析 initramfs（initrd.img）内容，查找 BusyBox 启动配置
+  - **支持**：自动查找本地 initrd.img 文件，或从 ISO 文件中提取
+  - **查找顺序**：
+    1. 当前目录的 `*.img` 文件（如 `initrd-alpine-v3.19.img`）
+    2. `.grub_iso_cache/` 目录中的 `initrd.img`
+    3. `iso/boot/` 目录中的 `initrd.img`
+    4. 从 ISO 文件中提取（如果存在）
+  - **分析内容**：
+    - `/init` 脚本的类型和内容
+    - BusyBox 文件和符号链接
+    - `/sbin/init` 和 `/bin/sh` 的配置
+    - 启动配置文件（`/etc/inittab`、`/etc/init.d/rcS` 等）
+    - 文件系统结构
+  - **使用方法**：
+    - `./analyze_initramfs.sh` - 自动查找 initrd.img（优先使用当前目录的 `*.img` 文件）
+    - `./analyze_initramfs.sh /path/to/initrd.img` - 指定文件路径
+  - **详细说明**：参见 [INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md)
