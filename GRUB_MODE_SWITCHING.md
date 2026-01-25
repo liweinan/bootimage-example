@@ -1041,6 +1041,61 @@ realcseg:
 - PIC 检测到 IF = 1，立即检查 IRR，如果有挂起的中断，立即发送给 CPU
 - CPU 响应中断，INT 09 立即执行
 
+**⚠️ `grub_bios_interrupt` 中 sti 和 cli 之间的窗口（`grub-core/kern/i386/int.S:54-57`）：**
+
+```asm
+	PROT_TO_REAL         ; 调用 prot_to_real，最后执行 sti
+	.code16
+	pushf                ; ← prot_to_real 返回后的第一条指令
+	cli                  ; ← 立即再次禁用中断
+	
+	mov	%ds, %ax
+	push	%ax
+	; ... 设置参数 ...
+	
+	.byte   0xcd         ; INT 指令的操作码
+intno:	
+	.byte   0            ; 中断号（如 0x16）
+```
+
+**关键分析：**
+
+1. **sti 和 cli 之间的窗口期**：
+   - `prot_to_real` 返回时执行 `sti`（realmode.S:275）
+   - 返回后紧接着执行 `pushf`（int.S:56）
+   - 然后执行 `cli`（int.S:57）再次禁用中断
+   - **窗口期只有 `pushf` 一条指令**（约 1-2 个时钟周期）
+
+2. **为什么这个短窗口足够处理挂起的中断？**
+   - CPU 在 `sti` 执行后，会在**下一条指令执行前**检查挂起的中断
+   - 如果 PIC 有挂起的中断请求（IRR 中有位被设置），CPU 会**立即响应**
+   - 硬件中断的优先级高于软件执行，INT 09 会**在 pushf 之前**完成
+   - INT 09 完成后，CPU 才继续执行 `pushf`
+
+3. **执行顺序（有挂起中断时）**：
+   ```
+   prot_to_real 执行 sti
+       ↓
+   CPU 检查挂起中断 → 发现 IRR[1]=1（键盘中断）
+       ↓
+   CPU 响应 INT 09 → BIOS 键盘中断处理程序执行
+       ↓
+   INT 09 完成 → 扫描码已存入 BIOS 缓冲区
+       ↓
+   pushf 执行
+       ↓
+   cli 执行 → 中断再次禁用
+       ↓
+   ... 设置参数 ...
+       ↓
+   INT 16h 执行 → 从 BIOS 缓冲区读取（数据已就绪）
+   ```
+
+4. **这就是为什么 GRUB 能稳定获取键盘输入**：
+   - 虽然 GRUB 在保护模式下禁用中断，但每次调用 `grub_bios_interrupt` 时
+   - `prot_to_real` 都会执行 `sti`，给挂起的硬件中断一个执行机会
+   - 硬件中断在软件中断之前被处理，保证数据已就绪
+
 **`dequeue_key` 从 BIOS 缓冲区读取（`seabios/src/kbd.c:54-105`）：**
 
 ```c
@@ -1085,15 +1140,41 @@ PROT_TO_REAL（prot_to_real）
     ├─ 清除 CR0.PE 位（退出保护模式）
     └─ 执行 sti（重新启用中断）⚠️ 关键步骤
     ↓
+┌─────────────────────────────────────────────────────────────┐
+│ ⚠️ 关键：sti 和 cli 之间的中断处理窗口                       │
+│                                                              │
+│ 根据 GRUB 源代码（grub-core/kern/i386/int.S:54-57）：        │
+│                                                              │
+│     PROT_TO_REAL           ; 调用 prot_to_real               │
+│     .code16                                                  │
+│     pushf                  ; ← sti 后的第一条指令            │
+│     cli                    ; ← 立即再次禁用中断              │
+│                                                              │
+│ prot_to_real 最后执行 sti（realmode.S:275），返回后：        │
+│   - sti 执行瞬间：IF = 1，中断启用                           │
+│   - CPU 检查挂起的中断（PIC 的 IRR）                         │
+│   - 如果有挂起的中断，立即响应并执行 ISR                     │
+│   - pushf 执行                                               │
+│   - cli 执行：IF = 0，中断再次禁用                           │
+│                                                              │
+│ 虽然窗口极短（只有 pushf 一条指令，约 1-2 个时钟周期），     │
+│ 但足够让挂起的硬件中断被处理：                               │
+│   - CPU 在 sti 后会立即检查 PIC 的挂起中断                   │
+│   - 硬件中断优先级高，会在下一条指令前被响应                 │
+│   - INT 09 完成后才会执行 pushf                              │
+└─────────────────────────────────────────────────────────────┘
+    ↓
 实模式（CPU 现在使用 IVT，中断已启用）
     ↓
-⚠️ 挂起的中断被立即处理：
+⚠️ 挂起的中断被立即处理（在 sti 和 cli 之间的窗口期）：
     ├─ PIC 检测到 IF = 1，检查 IRR[1] = 1
     ├─ 立即发送中断信号给 CPU
     ├─ CPU 响应中断，INT 09 立即执行
     ├─ handle_09() 从键盘控制器读取扫描码
     ├─ process_key() 转换为按键码
     └─ enqueue_key() 存入 BIOS 键盘缓冲区 ✅
+    ↓
+cli 执行后，中断再次禁用
     ↓
 执行 INT 16h AH=0x01 指令
     ├─ CPU 使用 IVT[0x16] 查找 BIOS 处理程序
@@ -1782,6 +1863,22 @@ realcseg:
 - 执行 `sti` 后，CPU 的 IF 标志被设置为 1
 - PIC 检测到 IF = 1，立即检查 IRR，如果有挂起的中断，立即发送给 CPU
 - CPU 响应中断，INT 09 立即执行
+
+**⚠️ `grub_bios_interrupt` 中 sti 和 cli 之间的窗口（`grub-core/kern/i386/int.S:54-57`）：**
+
+```asm
+	PROT_TO_REAL         ; 调用 prot_to_real，最后执行 sti
+	.code16
+	pushf                ; ← prot_to_real 返回后的第一条指令
+	cli                  ; ← 立即再次禁用中断
+```
+
+**关键分析：**
+- `prot_to_real` 返回时执行 `sti`，返回后紧接着执行 `pushf`，然后 `cli` 再次禁用中断
+- **窗口期只有 `pushf` 一条指令**（约 1-2 个时钟周期）
+- CPU 在 `sti` 执行后会在**下一条指令执行前**检查挂起的中断
+- 如果有挂起的中断，INT 09 会**在 pushf 之前**完成，保证 BIOS 缓冲区数据已就绪
+- 这就是 GRUB 能稳定获取键盘输入的核心机制
 
 **`dequeue_key` 从 BIOS 缓冲区读取（`seabios/src/kbd.c:54-105`）：**
 
