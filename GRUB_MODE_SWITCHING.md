@@ -226,9 +226,9 @@ protcseg:
 ```asm
 FUNCTION(grub_bios_interrupt)
     // 步骤 1: 保存寄存器（在保护模式下）
-    pushf
-    cli
-    popf
+    pushf                            // 保存当前标志
+    cli                              // 禁用中断
+    popf                             // ⚠️ 立即恢复原来的标志（见下方分析）
     pushl    %ebp
     pushl    %ecx
     pushl    %eax
@@ -344,6 +344,30 @@ intno:                          // 中断号位置（在保护模式下第 31 �
     popl    %ebp
     ret                         // 返回到调用者（1MB 以上的保护模式代码）
 ```
+
+**⚠️ 函数开头的 `pushf; cli; popf` 分析（第 20-22 行）：**
+
+```asm
+    pushf                        // 保存当前标志到栈
+    cli                          // 禁用中断
+    popf                         // 立即恢复原来的标志（撤销了 cli 的效果）
+```
+
+这个序列实际上是一个**空操作（no-op）**：
+- `pushf` 保存当前标志（包括 IF 位）
+- `cli` 禁用中断（IF = 0）
+- `popf` **立即恢复原来的标志**（IF 恢复到原值，撤销了 `cli` 的效果）
+
+**这是防御性编程，可能的用途：**
+
+1. **占位符/代码结构一致性**：保持与其他函数的代码风格统一
+2. **CPU 流水线同步**：某些旧 CPU（如 Via C3）可能需要这种同步屏障
+3. **遗留代码**：最初可能有其他用途，后来被简化但保留了结构
+4. **调试/追踪**：方便在此处设置断点或插入调试代码
+
+**为什么这里不需要真正禁用中断？**
+- GRUB 在保护模式下运行时，中断**默认已经是禁用的**
+- 真正需要控制中断的地方在第 56-57 行（`PROT_TO_REAL` 返回后）
 
 **BIOS 调用的关键代码（第 85-88 行）：**
 
@@ -2105,20 +2129,121 @@ BIOS 处理程序：
 
 **源代码证据：**
 
-**BIOS 键盘中断处理程序（`seabios/src/kbd.c:1558-1589`）：**
+**BIOS 键盘硬件中断处理程序（`seabios/src/hw/ps2port.c:389-417`）：**
+
 ```c
+// INT09h : Keyboard Hardware Service Entry Point
 void VISIBLE16
 handle_09(void)
 {
-    // 读取键盘控制器状态（检查 OBF 位）
+    if (! CONFIG_PS2PORT)
+        return;
+
+    debug_isr(DEBUG_ISR_09);
+
+    // 步骤 1: 读取键盘控制器状态寄存器（I/O 端口 0x64）
     u8 v = inb(PORT_PS2_STATUS);  // PORT_PS2_STATUS = 0x64
     
-    // 从键盘控制器读取扫描码（从输出缓冲区读取）
-    v = inb(PORT_PS2_DATA);  // PORT_PS2_DATA = 0x60
+    // 检查是否是鼠标数据（AUX 设备）
+    if (v & I8042_STR_AUXDATA) {
+        dprintf(1, "ps2 keyboard irq but found mouse data?!\n");
+        goto done;
+    }
     
-    // 处理扫描码
+    // 步骤 2: 从键盘控制器输出缓冲区读取扫描码（I/O 端口 0x60）
+    v = inb(PORT_PS2_DATA);  // PORT_PS2_DATA = 0x60
+    // ⚠️ 关键：这里从硬件缓冲区读取扫描码，释放缓冲区空间
+
+    // 检查键盘中断是否启用
+    if (!(GET_LOW(Ps2ctr) & I8042_CTR_KBDINT))
+        // Interrupts not enabled.
+        goto done;
+
+    // 步骤 3: 处理扫描码（转换为按键码，存入 BIOS 缓冲区）
     process_key(v);
+    // ⚠️ 关键：process_key 调用 __process_key，最终调用 enqueue_key 存入 BIOS 缓冲区
+
+    // Some old programs expect ISR to turn keyboard back on.
+    i8042_command(I8042_CMD_KBD_ENABLE, NULL);
+
+done:
+    pic_eoi1();  // 向 PIC 发送 EOI（End of Interrupt）信号
 }
+```
+
+**`process_key` 函数（`seabios/src/kbd.c:581-599`）：**
+
+```c
+void
+process_key(u8 key)
+{
+    if (!CONFIG_KEYBOARD)
+        return;
+
+    if (CONFIG_KBD_CALL_INT15_4F) {
+        // allow for keyboard intercept (INT 15h AH=4Fh)
+        struct bregs br;
+        memset(&br, 0, sizeof(br));
+        br.eax = (0x4f << 8) | key;
+        br.flags = F_IF|F_CF;
+        call16_int(0x15, &br);
+        if (!(br.flags & F_CF))
+            return;
+        key = br.eax;
+    }
+    __process_key(key);  // 调用实际的扫描码处理函数
+}
+```
+
+**`enqueue_key` 函数（`seabios/src/kbd.c:32-52`）：**
+
+```c
+u8
+enqueue_key(u16 keycode)
+{
+    // 获取 BIOS 键盘缓冲区的起始和结束偏移
+    u16 buffer_start = GET_BDA(kbd_buf_start_offset);
+    u16 buffer_end   = GET_BDA(kbd_buf_end_offset);
+    
+    // 获取当前缓冲区的头尾指针
+    u16 buffer_head = GET_BDA(kbd_buf_head);
+    u16 buffer_tail = GET_BDA(kbd_buf_tail);
+
+    u16 temp_tail = buffer_tail;
+    buffer_tail += 2;  // 每个按键码占 2 字节
+    if (buffer_tail >= buffer_end)
+        buffer_tail = buffer_start;  // 环形缓冲区
+
+    if (buffer_tail == buffer_head)
+        return 0;  // 缓冲区满，返回失败
+
+    // ⚠️ 关键：将按键码存入 BIOS 缓冲区（BDA）
+    SET_FARVAR(SEG_BDA, *(u16*)(temp_tail+0), keycode);
+    SET_BDA(kbd_buf_tail, buffer_tail);
+    return 1;  // 成功
+}
+```
+
+**INT 09 完整调用链：**
+
+```
+硬件中断 IRQ1
+    ↓
+CPU 响应中断，跳转到 IVT[0x09]
+    ↓
+handle_09()                          [seabios/src/hw/ps2port.c:391]
+    ├─ inb(0x64)                     // 读取状态寄存器
+    ├─ inb(0x60)                     // 从输出缓冲区读取扫描码
+    └─ process_key(v)                [seabios/src/kbd.c:582]
+        └─ __process_key(key)        [seabios/src/kbd.c:456]
+            ├─ 处理多字节序列（E0、E1）
+            ├─ 处理特殊键（Caps Lock 等）
+            ├─ 处理修饰键（Shift、Ctrl、Alt）
+            ├─ 扫描码 → 按键码转换
+            └─ enqueue_key(keycode)  [seabios/src/kbd.c:33]
+                └─ 存入 BIOS 缓冲区（BDA）
+    ↓
+pic_eoi1()                           // 发送 EOI 信号给 PIC
 ```
 
 **关键理解：**
