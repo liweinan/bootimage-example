@@ -188,8 +188,9 @@ grub_main (void)
     // 步骤 12: 注册核心命令
     grub_register_core_commands ();
     // 功能：
-    //   - 注册 GRUB 的核心命令（如 linux, initrd, set, insmod 等）
-    //   - 这些命令可以在 grub.cfg 或命令行中使用
+    //   - 注册 GRUB 内核中的核心命令（仅 4 个基础命令）
+    //   - 这些命令内置在 GRUB 内核中，无需加载模块即可使用
+    //   - 详细说明见下方 "grub_register_core_commands() 函数详解"
 
     grub_boot_time ("Before execution of embedded config.");
 
@@ -247,8 +248,173 @@ grub_main (void)
 **功能：**
 - 遍历 `core.img` 中的所有模块（文件系统驱动、磁盘驱动、命令模块等）
 - 使用 `grub_dl_load_core()` 加载每个模块
+- **注意**：`linux` 和 `initrd` 命令由 `linux.mod` 模块提供，在此步骤加载
 
-**4. `grub_parser_execute()` - 执行配置文件**
+**4. `grub_register_core_commands()` - 注册核心命令**
+
+**源代码位置：** `grub/grub-core/kern/corecmd.c:177-192`
+
+**功能：**
+- 注册 GRUB 内核中的 4 个核心命令
+- 这些命令内置在 GRUB 内核中，无需加载模块即可使用
+
+**完整源代码：**
+
+```c
+// grub/grub-core/kern/corecmd.c:177-192
+void
+grub_register_core_commands (void)
+{
+    grub_command_t cmd;
+    
+    // 1. set 命令：设置环境变量
+    cmd = grub_register_command ("set", grub_core_cmd_set,
+                                 N_("[ENVVAR=VALUE]"),
+                                 N_("Set an environment variable."));
+    if (cmd)
+        cmd->flags |= GRUB_COMMAND_FLAG_EXTRACTOR;
+    
+    // 2. unset 命令：删除环境变量
+    grub_register_command ("unset", grub_core_cmd_unset,
+                           N_("ENVVAR"),
+                           N_("Remove an environment variable."));
+    
+    // 3. ls 命令：列出设备或文件
+    grub_register_command ("ls", grub_core_cmd_ls,
+                           N_("[ARG]"), N_("List devices or files."));
+    
+    // 4. insmod 命令：加载模块
+    grub_register_command ("insmod", grub_core_cmd_insmod,
+                           N_("MODULE"), N_("Insert a module."));
+}
+```
+
+**核心命令详解：**
+
+| 命令 | 功能 | 使用示例 |
+|------|------|----------|
+| `set` | 设置/显示环境变量 | `set root=(hd0,1)` 或 `set`（显示所有） |
+| `unset` | 删除环境变量 | `unset timeout` |
+| `ls` | 列出设备或目录内容 | `ls` 或 `ls (hd0,1)/boot/` |
+| `insmod` | 加载 GRUB 模块 | `insmod linux` 或 `insmod /boot/grub/i386-pc/ext2.mod` |
+
+**各命令实现分析：**
+
+**`set` 命令（`grub_core_cmd_set`）：**
+
+```c
+// grub/grub-core/kern/corecmd.c:32-60
+static grub_err_t
+grub_core_cmd_set (struct grub_command *cmd, int argc, char *argv[])
+{
+    // 无参数时：显示所有环境变量
+    if (argc < 1)
+    {
+        struct grub_env_var *env;
+        FOR_SORTED_ENV (env)
+        {
+            val = (char *) grub_env_get (env->name);
+            grub_printf ("%s='%s'\n", env->name, val == NULL ? "" : val);
+        }
+        return 0;
+    }
+
+    // 有参数时：解析 ENVVAR=VALUE 并设置
+    var = argv[0];
+    val = grub_strchr (var, '=');
+    if (! val)
+        return grub_error (GRUB_ERR_BAD_ARGUMENT, "not an assignment");
+
+    val[0] = 0;                    // 临时截断字符串
+    grub_env_set (var, val + 1);   // 设置环境变量
+    val[0] = '=';                  // 恢复字符串
+    return 0;
+}
+```
+
+**`ls` 命令（`grub_core_cmd_ls`）：**
+
+```c
+// grub/grub-core/kern/corecmd.c:114-174
+static grub_err_t
+grub_core_cmd_ls (struct grub_command *cmd, int argc, char *argv[])
+{
+    // 无参数时：列出所有设备
+    if (argc < 1)
+    {
+        grub_device_iterate (grub_mini_print_devices, NULL);
+        // 输出示例：(hd0) (hd0,msdos1) (hd0,msdos2) (cd0)
+        return 0;
+    }
+    
+    // 有参数时：列出指定路径
+    device_name = grub_file_get_device_name (argv[0]);
+    dev = grub_device_open (device_name);
+    fs = grub_fs_probe (dev);      // 探测文件系统类型
+    
+    // 只指定设备时：显示文件系统类型
+    // 示例：ls (hd0,1) → "(hd0,msdos1): Filesystem is ext2."
+    if (! *path)
+    {
+        grub_printf ("(%s): Filesystem is %s.\n", device_name, fs->name);
+    }
+    // 指定路径时：列出目录内容
+    // 示例：ls (hd0,1)/boot/ → "vmlinuz initrd.img grub/"
+    else if (fs)
+    {
+        (fs->fs_dir) (dev, path, grub_mini_print_files, NULL);
+    }
+}
+```
+
+**`insmod` 命令（`grub_core_cmd_insmod`）：**
+
+```c
+// grub/grub-core/kern/corecmd.c:75-93
+static grub_err_t
+grub_core_cmd_insmod (struct grub_command *cmd, int argc, char *argv[])
+{
+    grub_dl_t mod;
+
+    // 判断是路径还是模块名
+    if (argv[0][0] == '/' || argv[0][0] == '(' || argv[0][0] == '+')
+        // 路径格式：insmod /boot/grub/i386-pc/ext2.mod
+        mod = grub_dl_load_file (argv[0]);
+    else
+        // 模块名格式：insmod linux（自动查找 $prefix/i386-pc/linux.mod）
+        mod = grub_dl_load (argv[0]);
+
+    if (mod)
+        grub_dl_ref (mod);  // 增加引用计数，防止模块被卸载
+
+    return 0;
+}
+```
+
+**核心命令 vs 模块命令：**
+
+| 类型 | 注册位置 | 示例 | 特点 |
+|------|----------|------|------|
+| 核心命令 | `grub_register_core_commands()` | `set`, `ls`, `insmod`, `unset` | 内置于 GRUB 内核，始终可用 |
+| 模块命令 | 各模块的 `GRUB_MOD_INIT()` | `linux`, `initrd`, `boot`, `search` | 需要加载模块后才能使用 |
+
+**命令注册机制（`grub_register_command`）：**
+
+```c
+// grub/include/grub/command.h:96-103
+static inline grub_command_t
+grub_register_command (const char *name,
+                       grub_command_func_t func,
+                       const char *summary,
+                       const char *description)
+{
+    return grub_register_command_prio (name, func, summary, description, 0);
+}
+```
+
+注册的命令被添加到全局链表 `grub_command_list`，执行命令时通过 `grub_command_find()` 查找并调用对应的处理函数。
+
+**5. `grub_parser_execute()` - 执行配置文件**
 
 **功能：**
 - 解析并执行 `grub.cfg` 配置文件
