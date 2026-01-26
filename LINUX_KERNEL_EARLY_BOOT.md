@@ -2,6 +2,10 @@
 
 本文档详细说明 Linux 内核从 GRUB 跳转后的早期启动过程，包括 Setup 代码执行、模式切换（实模式 → 保护模式 → 64 位长模式）、内核解压和 `startup_64` 入口点的源代码分析。
 
+> **相关文档**：
+> - **后续阶段**：关于 `start_kernel()` 之后的内核初始化（子系统初始化、PID 0/1/2、syscall 设置），请参见 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md)
+> - 关于启动流程概述，请参见 [boot_flow.md](boot_flow.md)
+
 ## 内核早期启动（64 位）
 
 **说明**：内核从 GRUB 跳转后，首先执行的是内核镜像中的 setup 代码（实模式），然后切换到保护模式，最终到达 `startup_64`。GRUB 跳转的地址是 `code32_start`，这是 setup 代码的入口点。

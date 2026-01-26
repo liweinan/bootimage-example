@@ -602,18 +602,18 @@ grub_register_command (const char *name,
 # /boot/grub/grub.cfg
 menuentry "Linux 5.x.x" {
     linux /boot/vmlinuz-5.x.x root=/dev/sda1 ro quiet
-    # ↑ 执行 linux 命令时，调用 grub_cmd_linux()
-    #   此时加载内核到内存，注册 grub_linux_boot()
-    #   但不会立即跳转，用户可以继续选择或修改
-    
     initrd /boot/initrd.img-5.x.x
-    # ↑ 加载 initramfs（可选）
 }
 
-# 用户按 Enter 选择 "Linux 5.x.x" 时：
-# → GRUB 调用 grub_linux_boot()
-# → grub_linux_boot() 调用 grub_relocator32_boot()
-# → 跳转到内核入口点（code32_start）
+# 用户按 Enter 选择 "Linux 5.x.x" 后，GRUB 执行 menuentry 中的命令：
+# 1. 执行 linux 命令 → 调用 grub_cmd_linux()
+#    - 加载内核到高地址（0x100000 = 1MB，不会覆盖 GRUB）
+#    - 注册 grub_linux_boot() 作为启动函数
+# 2. 执行 initrd 命令 → 调用 grub_cmd_initrd()
+#    - 加载 initramfs 到高地址
+# 3. menuentry 执行完毕后，GRUB 隐式调用 boot 命令
+#    - 调用 grub_linux_boot() → grub_relocator32_boot()
+#    - 跳转到内核入口点（code32_start）
 ```
 
 **示例 2：从 ISO 启动（测试环境，如 create_grub_iso_with_kernel.sh 生成的配置）**
@@ -625,15 +625,12 @@ set root='cd0'  # 设置根设备为 CD-ROM
 menuentry "Linux Kernel (Debian Installer)" {
     set root='cd0'
     linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200
-    # ↑ 从 ISO 启动，使用 RAM 作为根文件系统
-    #   console=ttyS0,115200 用于串口输出（QEMU 中可用 -serial stdio 查看）
-    #   注意：脚本下载的文件名为 "linux"，但保存为 "vmlinuz"（Linux 内核标准命名）
-    
     initrd /boot/initrd.img
-    # ↑ 加载初始 RAM 磁盘
-    #   注意：脚本下载的文件名为 "initrd.gz"（压缩格式），但保存为 "initrd.img"
-    #   GRUB 可以自动处理压缩的 initrd 文件（gzip 格式）
 }
+# 说明：
+# - console=ttyS0,115200 用于串口输出（QEMU 中可用 -serial stdio 查看）
+# - 脚本下载的 "linux" 保存为 "vmlinuz"，"initrd.gz" 保存为 "initrd.img"
+# - GRUB 可以自动处理压缩的 initrd 文件（gzip 格式）
 ```
 
 > **相关文档**：
@@ -658,17 +655,265 @@ menuentry "Linux Kernel (Debian Installer)" {
 
 > **详细说明**：关于 `grub_main()` 中其他初始化函数的详细实现，请参见 [GRUB 架构设计与初始化详解](GRUB_ARCHITECTURE_AND_INIT.md)。
 
+### grub_parser_execute() 函数
+
+**源代码位置：** `grub/grub-core/kern/parser.c:330-344`
+
+**功能：** 逐行解析并执行配置文件（如 `grub.cfg`）中的命令。
+
+**源代码分析：**
+
+```c
+// grub/grub-core/kern/parser.c
+grub_err_t
+grub_parser_execute (char *source)
+{
+    while (source)
+    {
+        char *line;
+        
+        // 获取下一行（遇到 \n 分割）
+        grub_parser_execute_getline (&line, 0, &source);
+        
+        // 解析并执行该行命令
+        grub_rescue_parse_line (line, grub_parser_execute_getline, &source);
+        
+        grub_free (line);
+        grub_print_error ();
+    }
+    return grub_errno;
+}
+```
+
+**`grub_rescue_parse_line()` 实现（`grub-core/kern/rescue_parser.c:28-90`）：**
+
+```c
+grub_err_t
+grub_rescue_parse_line (char *line, grub_reader_getline_t getline, void *data)
+{
+    char *name;
+    int n;
+    grub_command_t cmd;
+    char **args;
+    
+    // 步骤 1: 分割命令行为参数数组（处理引号、变量展开等）
+    grub_parser_split_cmdline (line, getline, data, &n, &args);
+    
+    // 步骤 2: 处理赋值语句（如 set root='hd0,1'）
+    if (n == 1) {
+        char *val = grub_strchr (args[0], '=');
+        if (val) {
+            val[0] = 0;
+            grub_env_set (args[0], val + 1);  // 设置环境变量
+            return;
+        }
+    }
+    
+    // 步骤 3: 查找并执行命令
+    name = args[0];  // 命令名（如 "linux", "menuentry", "set"）
+    cmd = grub_command_find (name);  // 从命令表中查找
+    
+    if (cmd) {
+        // ⚠️ 关键：调用命令的处理函数
+        // 例如：linux 命令 → grub_cmd_linux()
+        //       menuentry 命令 → grub_cmd_menuentry()（只注册，不执行内部命令）
+        (cmd->func) (cmd, n - 1, &args[1]);
+    } else {
+        grub_printf ("Unknown command `%s'.\n", name);
+    }
+    
+    grub_free (args);
+    return grub_errno;
+}
+```
+
+**执行流程图：**
+
+```
+grub_parser_execute("grub.cfg 内容")
+    │
+    ├─ 逐行读取配置文件
+    │   ├─ "set root='hd0,1'"
+    │   │   └─ grub_env_set("root", "hd0,1")  // 设置环境变量
+    │   │
+    │   ├─ "menuentry 'Linux' { linux /vmlinuz; initrd /initrd.img }"
+    │   │   └─ grub_cmd_menuentry()  // ⚠️ 只注册 menuentry，不执行内部命令
+    │   │       └─ 将 menuentry 添加到菜单列表
+    │   │
+    │   └─ ... 其他命令 ...
+    │
+    └─ 返回（配置解析完成，显示菜单）
+
+用户按 Enter 选择 menuentry 后：
+    │
+    └─ GRUB 执行该 menuentry 的命令
+        ├─ "linux /vmlinuz" → grub_cmd_linux()
+        ├─ "initrd /initrd.img" → grub_cmd_initrd()
+        └─ 隐式 boot → grub_linux_boot()
+```
+
 **关键点：**
 
-1. **配置文件执行时机**：
+1. **配置文件解析时机**：
    - `grub_parser_execute()` 在 `grub_main()` 中执行
-   - 执行 `grub.cfg` 时，遇到 `linux` 命令会调用 `grub_cmd_linux()`
-   - **此时只是加载内核到内存，注册启动函数，不立即跳转**
+   - 解析 `grub.cfg` 时，**只是注册 menuentry**，不执行其中的命令
+   - 用户在菜单界面选择并按 Enter 后，才执行所选 menuentry 中的命令
 
-2. **延迟执行机制**：
-   - `grub_cmd_linux()` 只负责准备（加载内核、注册函数）
-   - 跳转由用户在菜单中选择启动项时触发
-   - 用户可以继续浏览菜单、修改参数或选择其他启动项
+2. **menuentry 执行流程**：
+   - 用户按 Enter 后，执行 `linux` 命令 → `grub_cmd_linux()` 加载内核到 0x100000（1MB）
+   - 执行 `initrd` 命令 → `grub_cmd_initrd()` 加载 initramfs
+   - menuentry 执行完毕后，GRUB 隐式调用 boot 命令
+   - boot 命令调用 `grub_linux_boot()` → `grub_relocator32_boot()` 跳转到内核
+
+3. **内存布局与 Relocator 机制**：
+   - GRUB 解压后也在 0x100000（1MB），与内核目标地址相同
+   - 内核**先被加载到 relocator 管理的临时缓冲区**（通常在 0x1000000 = 16MB 以上）
+   - `boot` 命令执行时，relocator 代码被复制到**低内存**（0x1000-0x9a000）
+   - 执行 relocator：将内核从临时位置复制到 0x100000，然后跳转
+   - 此时 GRUB 代码被覆盖，但已不需要
+
+**Relocator 数据结构（`grub-core/lib/relocator.c:56-65`）：**
+
+```c
+struct grub_relocator_chunk {
+    grub_phys_addr_t src;     // 当前物理地址（临时位置）
+    void *srcv;               // 当前虚拟地址（GRUB 访问用）
+    grub_phys_addr_t target;  // 目标物理地址（最终位置）
+    grub_size_t size;         // 大小
+    // ...
+};
+```
+
+**Relocator 分配逻辑（`grub-core/loader/i386/linux.c:172-202`）：**
+
+```c
+if (relocatable)
+{
+    // 第一次尝试：在 preferred_address (0x100000) 分配
+    // min_addr = max_addr = 0x100000，表示只接受这个精确地址
+    err = grub_relocator_alloc_chunk_align(relocator, &ch,
+                                            preferred_address,  // min_addr = 0x100000
+                                            preferred_address,  // max_addr = 0x100000
+                                            prot_size, 1,
+                                            GRUB_RELOCATOR_PREFERENCE_LOW, 1);
+    
+    // 如果失败，循环尝试在 16MB 以上分配（逐步降低对齐要求）
+    for (; err && *align + 1 > min_align; (*align)--)
+    {
+        grub_errno = GRUB_ERR_NONE;
+        err = grub_relocator_alloc_chunk_align(relocator, &ch,
+                                                0x1000000,           // min_addr = 16MB
+                                                UP_TO_TOP32(prot_size), // max_addr = 4GB - size
+                                                prot_size, 1 << *align,
+                                                GRUB_RELOCATOR_PREFERENCE_LOW, 1);
+    }
+}
+
+prot_mode_mem = get_virtual_current_address(ch);    // 临时位置（src）
+prot_mode_target = get_physical_target_address(ch); // 最终位置（target = 0x100000）
+```
+
+**`grub_relocator_alloc_chunk_align()` 内部逻辑（`grub-core/lib/relocator.c:1375-1508`）：**
+
+```c
+grub_relocator_alloc_chunk_align(rel, out, min_addr, max_addr, size, align, ...)
+{
+    // 步骤 1: 尝试在 [min_addr, max_addr] 范围内直接分配
+    // 调用 malloc_in_range() 扫描 GRUB 内存管理器的空闲块
+    if (malloc_in_range(rel, min_addr, max_addr, align, size, chunk, ...))
+    {
+        // 成功：src = target = 分配到的地址
+        chunk->target = chunk->src;
+        return GRUB_ERR_NONE;
+    }
+    
+    // 步骤 2: 如果直接分配失败，调整范围避开已分配的 chunk
+    adjust_limits(rel, &min_addr2, &max_addr2, min_addr, max_addr);
+    
+    // 步骤 3: 在调整后的范围内分配临时位置（src）
+    malloc_in_range(rel, min_addr2, max_addr2, align, size, chunk, ...);
+    
+    // 步骤 4: 通过 mmap 迭代器查找合适的目标位置（target）
+    // target 可能与 src 不同
+    grub_mmap_iterate(grub_relocator_alloc_chunk_align_iter, &ctx);
+    
+    // 步骤 5: 如果 src != target，记录需要的 relocator 代码大小
+    if (chunk->src < chunk->target)
+        rel->relocators_size += grub_relocator_backward_size;
+    if (chunk->src > chunk->target)
+        rel->relocators_size += grub_relocator_forward_size;
+}
+```
+
+**为什么在 0x100000 分配会失败？**
+
+关键在于 GRUB 内存初始化时**根本不会将 0x100000 区域添加到空闲内存池**。
+
+**GRUB 内存布局（`grub-core/kern/i386/pc/init.c`）：**
+
+```
+0x100000 ─────────────────────────────────┐
+│ GRUB 代码（_start 到 _edata）            │ ← GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR
+├─ grub_modbase ─────────────────────────┤ ← 0x100000 + (_edata - _start)
+│ GRUB 内置模块数据                        │
+├─ modend ───────────────────────────────┤ ← grub_modbase + modinfo->size
+│ 空闲内存（由 grub_mm_init_region 管理）  │ ← 只有这部分被添加到内存池！
+└─────────────────────────────────────────┘
+```
+
+**内存池初始化代码（`grub-core/kern/i386/pc/init.c:259-268`）：**
+
+```c
+// grub_machine_init() 中的关键代码
+modend = grub_modules_get_end ();  // 获取 GRUB 模块的结束地址
+
+for (i = 0; i < num_regions; i++)
+{
+    grub_addr_t beg = mem_regions[i].addr;
+    grub_addr_t fin = mem_regions[i].addr + mem_regions[i].size;
+    
+    // ⚠️ 关键：将起始地址调整到 modend 之后
+    if (modend && beg < modend)
+        beg = modend;
+    
+    if (beg >= fin)
+        continue;
+    
+    // 只初始化 modend 之后的区域为空闲内存
+    grub_mm_init_region ((void *) beg, fin - beg);
+}
+```
+
+**`grub_modules_get_end()` 实现（`grub-core/kern/main.c:44-54`）：**
+
+```c
+grub_addr_t
+grub_modules_get_end (void)
+{
+    modinfo = (struct grub_module_info *) grub_modbase;
+    if ((modinfo == 0) || modinfo->magic != GRUB_MODULE_MAGIC)
+        return grub_modbase;
+    return grub_modbase + modinfo->size;  // GRUB 模块结束地址
+}
+```
+
+**`grub_modbase` 初始化（`grub-core/kern/i386/pc/init.c:229`）：**
+
+```c
+grub_modbase = GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR + (_edata - _start);
+// = 0x100000 + GRUB 代码大小
+```
+
+**总结**：0x100000 到 `modend` 之间的区域**从未被 `grub_mm_init_region()` 添加到空闲内存池**，
+所以 `malloc_in_range()` 在扫描空闲块列表时找不到这个区域，分配自然失败。
+
+**Relocator 内存布局总结：**
+
+| 项目 | 位置 | 说明 |
+|------|------|------|
+| **临时缓冲区** | 通常 0x1000000 (16MB) 以上 | 因为 GRUB 占用 0x100000 |
+| **最终目标** | 0x100000 (1MB) | `GRUB_LINUX_BZIMAGE_ADDR` |
+| **大小** | `prot_size`（内核压缩大小） | 由内核头部 `init_size` 字段决定 |
 
 ### grub_cmd_linux() 函数
 
@@ -677,9 +922,9 @@ menuentry "Linux Kernel (Debian Installer)" {
 **功能：**
 - 打开内核文件（如 `/boot/vmlinuz-5.x.x`）
 - 解析内核头部，验证内核签名
-- 加载内核镜像到内存（`0x100000`）
+- 通过 relocator 分配临时缓冲区（通常在 16MB 以上），加载内核到临时位置
 - 设置内核启动参数（`boot_params`）
-- 注册启动函数 `grub_linux_boot()`
+- 注册启动函数 `grub_linux_boot()`（boot 时将内核从临时位置复制到 0x100000）
 
 **内核镜像结构概述：**
 
@@ -738,11 +983,18 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
     if (lh.pref_address && relocatable)
         preferred_address = grub_le_to_cpu64 (lh.pref_address);
     
-    // 步骤 8: 分配内存并加载内核
-    prot_mode_target = allocate_pages (prot_size, &align, min_align, 
-                                       relocatable, preferred_address);
+    // 步骤 8: 通过 relocator 分配内存
+    // ⚠️ 关键：内核不是直接加载到 0x100000，而是加载到临时缓冲区
+    // 因为 GRUB 代码也在 0x100000，需要避免覆盖
+    allocate_pages (prot_size, &align, min_align, relocatable, preferred_address);
+    // allocate_pages 内部调用 grub_relocator_alloc_chunk_align()：
+    //   1. 首先尝试在 preferred_address (0x100000) 分配
+    //   2. 如果失败（GRUB 代码占用），则在 0x1000000 (16MB) 以上分配
+    // 返回两个地址：
+    //   - prot_mode_mem：临时缓冲区地址（GRUB 用于写入数据）
+    //   - prot_mode_target：最终目标地址（0x100000，boot 时 relocator 复制到此）
     
-    // 步骤 9: 复制 Setup 代码和压缩内核到目标地址
+    // 步骤 9: 复制内核到临时缓冲区（不是最终位置！）
     // 注意：这里只是复制文件内容到内存，不解压
     // Setup 代码是未压缩的，可以直接执行
     // 压缩的内核代码需要由 Setup 代码解压
@@ -903,18 +1155,14 @@ grub_relocator32_boot()            // 跳转到内核入口点
 # /boot/grub/grub.cfg
 menuentry "Linux 5.x.x" {
     linux /boot/vmlinuz-5.x.x root=/dev/sda1 ro
-    # ↑ 执行 linux 命令时，调用 grub_cmd_linux()
-    #   此时加载内核到内存，注册 grub_linux_boot()
-    #   但不会立即跳转，用户可以继续选择或修改
-    
     initrd /boot/initrd.img-5.x.x
-    # ↑ 加载 initramfs（可选）
 }
 
-# 用户按 Enter 选择 "Linux 5.x.x" 时：
-# → GRUB 调用 grub_linux_boot()
-# → grub_linux_boot() 调用 grub_relocator32_boot()
-# → 跳转到内核入口点（code32_start）
+# 用户按 Enter 选择后，执行顺序：
+# 1. linux 命令 → grub_cmd_linux() 加载内核到 0x100000
+# 2. initrd 命令 → grub_cmd_initrd() 加载 initramfs
+# 3. menuentry 结束后隐式 boot → grub_linux_boot() → grub_relocator32_boot()
+# 4. 跳转到内核入口点（code32_start）
 ```
 
 ### grub_cmd_initrd() 函数

@@ -2305,6 +2305,32 @@ start_kernel() → rest_init() → kernel_init() → 执行用户空间 init
 > 关于 GRUB 加载内核的详细代码流程、内核镜像结构、内存布局、启动参数传递等，请参见 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md)。  
 > 关于 vmlinuz 文件结构的完整分析，请参见 [vmlinuz 文件详细结构分析](VMLINUZ_STRUCTURE.md)。
 
+**内核启动文档覆盖范围：**
+
+```
+LINUX_KERNEL_EARLY_BOOT.md          LINUX_KERNEL_INIT.md
+─────────────────────────────       ───────────────────────
+GRUB 跳转                            
+    ↓                               
+Setup 代码（实模式）                  
+    ↓                               
+模式切换（保护模式 → 长模式）          
+    ↓                               
+startup_64                          
+    ↓                               
+x86_64_start_kernel                 
+    ↓                               
+start_kernel() ─────────────────→   start_kernel()
+                                        ↓
+                                    子系统初始化
+                                        ↓
+                                    rest_init()
+                                        ↓
+                                    PID 0/1/2 创建
+                                        ↓
+                                    syscall 初始化
+```
+
 ### 内核早期启动（64 位）
 
 **说明**：内核从 GRUB 跳转后，首先执行的是内核镜像中的 setup 代码（实模式），然后切换到保护模式，最终到达 `startup_64`。GRUB 跳转的地址是 `code32_start`，这是 setup 代码的入口点。

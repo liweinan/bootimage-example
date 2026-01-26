@@ -3,6 +3,7 @@
 本文档详细说明 Linux 内核从 `start_kernel()` 开始的初始化过程，包括进程创建、系统调用设置等核心功能的实现。
 
 > **相关文档**：
+> - **前置阶段**：关于 GRUB 跳转后的早期启动（Setup 代码、模式切换、startup_64），请参见 [Linux 内核早期启动详细流程](LINUX_KERNEL_EARLY_BOOT.md)
 > - 关于启动流程概述，请参见 [boot_flow.md](boot_flow.md)
 > - 关于 GRUB 加载内核，请参见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)
 
