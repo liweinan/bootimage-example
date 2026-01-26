@@ -497,6 +497,81 @@ grub_mod_init(mod)              [linux.c:1171-1178]
 - **约定的函数名**：GRUB 通过查找固定的函数名 `grub_mod_init` 和 `grub_mod_fini` 来识别初始化/清理函数
 - **自动调用**：模块加载完成后，自动调用初始化函数，初始化函数内部调用 `grub_register_command()` 注册命令
 
+**`GRUB_MOD_INIT(name)` 的 `name` 参数说明：**
+
+```c
+// grub/include/grub/dl.h:43-46
+// 动态加载模块时（insmod）：
+#define GRUB_MOD_INIT(name)  \
+static void grub_mod_init (grub_dl_t mod ...) ...
+                ↑
+        参数 name 被忽略！生成的函数名始终是 grub_mod_init
+```
+
+不同模块展开后都生成同名函数：
+
+```c
+// linux.mod 中：
+GRUB_MOD_INIT(linux) { ... }
+// 展开后 → static void grub_mod_init(grub_dl_t mod) { ... }
+
+// ext2.mod 中：
+GRUB_MOD_INIT(ext2) { ... }
+// 展开后 → static void grub_mod_init(grub_dl_t mod) { ... }
+```
+
+每个 `.mod` 文件是独立编译的 ELF 文件，都有自己的 `grub_mod_init` 符号，互不冲突。
+
+**`name` 参数的用途（仅静态链接时）：**
+
+```c
+// 当模块静态链接到 GRUB 内核时（#elif defined GRUB_KERNEL）：
+#define GRUB_MOD_INIT(name)  \
+void grub_##name##_init (void) { grub_mod_init (0); } \
+static void grub_mod_init (...)
+
+// 此时 GRUB_MOD_INIT(linux) 展开为：
+void grub_linux_init (void) { grub_mod_init(0); }  // ← 用于内核显式调用
+static void grub_mod_init (...) { ... }
+```
+
+**没有 `GRUB_MOD_INIT` 的库模块：**
+
+某些模块（如 `extcmd.mod`）只提供函数供其他模块调用，不需要注册命令：
+
+```c
+// grub/include/grub/dl.h:224-231
+static inline void
+grub_dl_init (grub_dl_t mod)
+{
+    if (mod->init)          // ← 检查是否有初始化函数
+        (mod->init) (mod);  // 有才调用，没有则跳过
+    
+    mod->next = grub_dl_head;   // 无论有没有 init，都添加到模块链表
+    grub_dl_head = mod;
+}
+```
+
+| 模块类型 | `mod->init` | 加载时行为 | 功能提供方式 |
+|----------|-------------|------------|--------------|
+| 有 `GRUB_MOD_INIT` | 函数地址 | 调用 init 注册命令/FS | 主动注册 |
+| 无 `GRUB_MOD_INIT` | NULL | 跳过 init 调用 | 导出函数供其他模块调用 |
+
+**库模块示例（extcmd.mod）：**
+
+```c
+// extcmd.mod 没有 GRUB_MOD_INIT，但导出了这些函数：
+grub_extcmd_t grub_register_extcmd (...);
+void grub_unregister_extcmd (...);
+
+// 其他模块（如 search.mod）加载后可以调用：
+GRUB_MOD_INIT(search)
+{
+    // 调用 extcmd.mod 导出的函数
+    cmd = grub_register_extcmd ("search", grub_cmd_search, ...);
+}
+```
+
 **命令注册机制（`grub_register_command`）：**
 
 ```c
