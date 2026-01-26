@@ -173,6 +173,7 @@ DISPLAY=:1 make run-gui
 
 ### Linux 内核相关文档
 
+- **[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)** - Linux 内核初始化详解（start_kernel、PID 0/1/2 进程、系统调用初始化）
 - **[VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md)** - vmlinuz（bzImage）文件详细结构分析（boot_params、setup code、压缩内核等）
 - **[VMLINUZ_INITRD_RELATIONSHIP.md](VMLINUZ_INITRD_RELATIONSHIP.md)** - vmlinuz 和 initrd 的关系详解（定义、作用机制、使用场景、必要性分析）
 - **[LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)** - Linux 内核早期启动详细流程（64 位）（Setup 代码、模式切换、startup_32、startup_64 源代码分析）

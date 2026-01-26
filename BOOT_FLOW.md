@@ -2296,9 +2296,13 @@ startup_64（64 位内核入口点）
     ├─ 设置内核高地址映射
     └─ 启动内核预留区域初始化（x86_64_start_reservations）
         └─ 最终调用 start_kernel()
+            ↓
+start_kernel() → rest_init() → kernel_init() → 执行用户空间 init
 ```
 
-> **详细说明**：关于 GRUB 加载内核的详细代码流程、内核镜像结构、内存布局、启动参数传递等，请参见 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md)。  
+> **详细说明**：关于 `start_kernel()`、PID 0/1/2 进程、系统调用初始化等内核初始化的详细分析，请参见 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md)。
+>
+> 关于 GRUB 加载内核的详细代码流程、内核镜像结构、内存布局、启动参数传递等，请参见 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md)。  
 > 关于 vmlinuz 文件结构的完整分析，请参见 [vmlinuz 文件详细结构分析](VMLINUZ_STRUCTURE.md)。
 
 ### 内核早期启动（64 位）
