@@ -85,6 +85,14 @@ grub-mkrescue -o grub.iso iso
 - 自动生成 ISO 文件
 - 提供详细的进度输出和使用说明
 
+**文件命名说明：**
+
+脚本下载的文件和最终保存的文件名：
+- **内核文件**：下载 `linux` → 保存为 `iso/boot/vmlinuz`（Linux 内核的标准命名）
+- **initrd 文件**：下载 `initrd.gz`（gzip 压缩）→ 保存为 `iso/boot/initrd.img`
+  - GRUB 的 `initrd` 命令可以自动识别并解压 gzip 压缩的 initrd 文件
+  - 文件扩展名 `.img` 是约定俗成的命名，实际内容可能是压缩的
+
 生成的 ISO 文件：`grub-linux.iso`
 
 #### 方式 B：手动步骤

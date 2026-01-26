@@ -2,7 +2,7 @@
 
 本文档详细说明 GRUB 如何加载 Linux 内核镜像并跳转到内核入口点的完整过程，包括源代码分析和实现细节。
 
-## GRUB 加载内核的完整流程概述
+## 流程概述
 
 从 `_start` 调用 `grub_main()` 后，GRUB 开始加载 Linux 内核的完整流程：
 
@@ -87,7 +87,9 @@ startup_64（64 位内核入口点）
 - **用户交互触发**：跳转由用户在菜单中选择启动项时触发
 - **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点（`code32_start`）
 
-## grub_main() 函数详细讲解
+## 核心函数详解
+
+### grub_main() 函数
 
 **源代码位置：** `grub/grub-core/kern/main.c:304-370`
 
@@ -398,6 +400,103 @@ grub_core_cmd_insmod (struct grub_command *cmd, int argc, char *argv[])
 | 核心命令 | `grub_register_core_commands()` | `set`, `ls`, `insmod`, `unset` | 内置于 GRUB 内核，始终可用 |
 | 模块命令 | 各模块的 `GRUB_MOD_INIT()` | `linux`, `initrd`, `boot`, `search` | 需要加载模块后才能使用 |
 
+**模块加载与命令注册机制：**
+
+当执行 `insmod linux` 时，GRUB 如何知道该模块提供了哪些命令？
+
+**1. 模块初始化宏（`GRUB_MOD_INIT`）：**
+
+```c
+// grub/include/grub/dl.h:43-46
+#define GRUB_MOD_INIT(name)  \
+static void grub_mod_init (grub_dl_t mod __attribute__ ((unused))) __attribute__ ((used)); \
+static void \
+grub_mod_init (grub_dl_t mod __attribute__ ((unused)))
+
+// 展开后，linux.mod 中的代码：
+static void grub_mod_init (grub_dl_t mod)
+{
+    cmd_linux = grub_register_command ("linux", grub_cmd_linux, ...);
+    cmd_initrd = grub_register_command ("initrd", grub_cmd_initrd, ...);
+}
+```
+
+**2. 模块加载流程（`grub_dl_load_core`）：**
+
+```c
+// grub/grub-core/kern/dl.c:805-821
+grub_dl_t
+grub_dl_load_core (void *addr, grub_size_t size)
+{
+    // 步骤 1: 解析 ELF 文件，但不初始化
+    mod = grub_dl_load_core_noinit (addr, size);
+    
+    // 步骤 2: 调用模块初始化函数
+    grub_dl_init (mod);  // ⚠️ 关键：这里调用 mod->init
+    
+    return mod;
+}
+```
+
+**3. 符号解析（`grub_dl_resolve_symbols`）：**
+
+```c
+// grub/grub-core/kern/dl.c:437-440
+// 在解析 ELF 符号表时，查找特殊函数名
+if (grub_strcmp (name, "grub_mod_init") == 0)
+    mod->init = (void (*) (grub_dl_t)) sym->st_value;  // 保存初始化函数地址
+else if (grub_strcmp (name, "grub_mod_fini") == 0)
+    mod->fini = (void (*) (void)) sym->st_value;       // 保存清理函数地址
+```
+
+**4. 模块初始化（`grub_dl_init`）：**
+
+```c
+// grub/include/grub/dl.h:224-231
+static inline void
+grub_dl_init (grub_dl_t mod)
+{
+    if (mod->init)
+        (mod->init) (mod);  // ⚠️ 调用 grub_mod_init()，注册命令
+    
+    mod->next = grub_dl_head;  // 添加到已加载模块链表
+    grub_dl_head = mod;
+}
+```
+
+**完整调用链：**
+
+```
+insmod linux
+    ↓
+grub_core_cmd_insmod("linux")
+    ↓
+grub_dl_load("linux")           [kern/dl.c:874]
+    ↓
+grub_dl_load_file("/boot/grub/i386-pc/linux.mod")
+    ↓
+grub_dl_load_core(addr, size)   [kern/dl.c:805]
+    ├─ grub_dl_load_core_noinit()
+    │   ├─ 解析 ELF 头部
+    │   ├─ grub_dl_resolve_symbols()
+    │   │   └─ 找到 "grub_mod_init" 符号 → mod->init = 函数地址
+    │   └─ 重定位符号
+    │
+    └─ grub_dl_init(mod)        [dl.h:224]
+        └─ (mod->init)(mod)     // 调用 grub_mod_init()
+            ↓
+grub_mod_init(mod)              [linux.c:1171-1178]
+    ├─ grub_register_command("linux", grub_cmd_linux, ...)
+    └─ grub_register_command("initrd", grub_cmd_initrd, ...)
+            ↓
+命令 "linux" 和 "initrd" 被添加到 grub_command_list
+```
+
+**关键点：**
+- **ELF 符号表**：模块是 ELF 格式文件，包含符号表
+- **约定的函数名**：GRUB 通过查找固定的函数名 `grub_mod_init` 和 `grub_mod_fini` 来识别初始化/清理函数
+- **自动调用**：模块加载完成后，自动调用初始化函数，初始化函数内部调用 `grub_register_command()` 注册命令
+
 **命令注册机制（`grub_register_command`）：**
 
 ```c
@@ -462,21 +561,9 @@ menuentry "Linux Kernel (Debian Installer)" {
 }
 ```
 
-**文件命名说明（create_grub_iso_with_kernel.sh）：**
-
-脚本下载的文件和最终保存的文件名：
-- **内核文件**：下载 `linux` → 保存为 `iso/boot/vmlinuz`（Linux 内核的标准命名）
-- **initrd 文件**：下载 `initrd.gz`（gzip 压缩）→ 保存为 `iso/boot/initrd.img`
-  - GRUB 的 `initrd` 命令可以自动识别并解压 gzip 压缩的 initrd 文件
-  - 文件扩展名 `.img` 是约定俗成的命名，实际内容可能是压缩的
-
-**vmlinuz 和 initrd 的关系：**
-
-- **vmlinuz**：压缩的 Linux 内核镜像文件，包含内核的核心代码
-- **initrd**：初始 RAM 磁盘，包含启动早期阶段所需的驱动程序和工具
-- **配合工作**：内核先加载，然后从 initrd 加载驱动，最后访问真正的根文件系统
-
-> **详细说明**：关于 vmlinuz 和 initrd 的详细关系、使用场景、是否需要 initrd 的判断方法、现代系统的 initramfs 等，请参见 [vmlinuz 和 initrd 的关系详解](VMLINUZ_INITRD_RELATIONSHIP.md)。
+> **相关文档**：
+> - 关于 `create_grub_iso_with_kernel.sh` 脚本的使用和文件命名说明，请参见 [CREATE_GRUB_ISO.md](CREATE_GRUB_ISO.md)
+> - 关于 vmlinuz 和 initrd 的详细关系，请参见 [vmlinuz 和 initrd 的关系详解](VMLINUZ_INITRD_RELATIONSHIP.md)
 
 **配置说明：**
 
@@ -508,11 +595,7 @@ menuentry "Linux Kernel (Debian Installer)" {
    - 跳转由用户在菜单中选择启动项时触发
    - 用户可以继续浏览菜单、修改参数或选择其他启动项
 
-## GRUB 加载内核的详细流程
-
-本章节详细说明 GRUB 加载内核的各个步骤，包括源代码分析和实现细节。
-
-### grub_cmd_linux() 函数详细讲解
+### grub_cmd_linux() 函数
 
 **源代码位置：** `grub/grub-core/loader/i386/linux.c:680-725`
 
@@ -759,7 +842,7 @@ menuentry "Linux 5.x.x" {
 # → 跳转到内核入口点（code32_start）
 ```
 
-### grub_cmd_initrd() 函数详细讲解
+### grub_cmd_initrd() 函数
 
 **源代码位置：** `grub/grub-core/loader/i386/linux.c:1065-1166`
 
@@ -905,7 +988,7 @@ fail:
                          ↑ ramdisk_image 指向这里
 ```
 
-### grub_linux_boot() 函数详细讲解
+### grub_linux_boot() 函数
 
 **源代码位置：** `grub/grub-core/loader/i386/linux.c:446-667`
 
@@ -934,7 +1017,7 @@ grub_linux_boot (void)
 }
 ```
 
-### grub_relocator32_boot() 函数详细讲解
+### grub_relocator32_boot() 函数
 
 **源代码位置：** `grub/grub-core/lib/i386/relocator.c:75-117`
 
