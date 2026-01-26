@@ -854,11 +854,17 @@ grub_relocator_alloc_chunk_align(rel, out, min_addr, max_addr, size, align, ...)
 ```
 0x100000 ─────────────────────────────────┐
 │ GRUB 代码（_start 到 _edata）            │ ← GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR
+│ （解压后约 20-50 KB）                    │
 ├─ grub_modbase ─────────────────────────┤ ← 0x100000 + (_edata - _start)
-│ GRUB 内置模块数据                        │
+│ GRUB 内置模块数据                        │   例如：0x100000 + 0x8000 = 0x108000
+│ （大小取决于加载的模块数量）              │
 ├─ modend ───────────────────────────────┤ ← grub_modbase + modinfo->size
+│                                         │   例如：0x108000 + 0x10000 = 0x118000（约 1.1MB）
 │ 空闲内存（由 grub_mm_init_region 管理）  │ ← 只有这部分被添加到内存池！
 └─────────────────────────────────────────┘
+
+注意：modend 通常在 0x100000 + 几百 KB 范围内（约 1.1-1.5 MB），
+      而不是 16MB。16MB 是 relocator 分配临时缓冲区时的最小地址。
 ```
 
 **内存池初始化代码（`grub-core/kern/i386/pc/init.c:259-268`）：**
