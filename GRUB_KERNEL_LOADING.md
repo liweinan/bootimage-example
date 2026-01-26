@@ -12,13 +12,22 @@ grub_main()（grub/grub-core/kern/main.c）
     ├─ 解析 grub.cfg 配置文件
     ├─ 显示启动菜单（如果配置）
     ├─ 用户选择启动 Linux 内核
-    └─ 执行 linux 命令 → grub_cmd_linux()
+    └─ 执行 menuentry 中的命令：
         ↓
-grub_cmd_linux()（grub/grub-core/loader/i386/linux.c）
-    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
+grub_cmd_linux()（执行 linux 命令）
+    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c:680-1062
     ├─ 加载内核镜像到内存（0x100000）
     ├─ 设置内核启动参数（boot_params）
     └─ 注册启动函数 grub_linux_boot()
+        ↓
+grub_cmd_initrd()（执行 initrd 命令，可选）
+    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c:1065-1166
+    ├─ 读取 initrd 文件（支持多个文件和压缩格式）
+    ├─ 分配内存（尽量放在高地址，4KB 对齐）
+    ├─ 加载 initrd 到内存
+    └─ 设置 boot_params.ramdisk_image 和 ramdisk_size
+        ↓
+用户按 Enter 选择启动项
         ↓
 grub_linux_boot() → grub_relocator32_boot()
     ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
@@ -303,14 +312,6 @@ menuentry "Linux Kernel (Debian Installer)" {
 
 > **详细说明**：关于 vmlinuz 和 initrd 的详细关系、使用场景、是否需要 initrd 的判断方法、现代系统的 initramfs 等，请参见 [vmlinuz 和 initrd 的关系详解](VMLINUZ_INITRD_RELATIONSHIP.md)。
 
-**文件命名说明（create_grub_iso_with_kernel.sh）：**
-
-脚本下载的文件和最终保存的文件名：
-- **内核文件**：下载 `linux` → 保存为 `iso/boot/vmlinuz`（Linux 内核的标准命名）
-- **initrd 文件**：下载 `initrd.gz`（gzip 压缩）→ 保存为 `iso/boot/initrd.img`
-  - GRUB 的 `initrd` 命令可以自动识别并解压 gzip 压缩的 initrd 文件
-  - 文件扩展名 `.img` 是约定俗成的命名，实际内容可能是压缩的
-
 **配置说明：**
 
 - **硬盘启动**：`root=/dev/sda1` 表示从第一个 SATA 硬盘的第一个分区启动
@@ -439,6 +440,119 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
 }
 ```
 
+**`grub_loader_set` 函数详解：**
+
+`grub_loader_set` 是 GRUB 的 loader 注册机制，用于设置启动和卸载函数，供后续 `boot` 命令调用。
+
+**函数声明（`grub/include/grub/loader.h:39-41`）：**
+
+```c
+void EXPORT_FUNC (grub_loader_set) (grub_err_t (*boot) (void),
+                                    grub_err_t (*unload) (void),
+                                    int flags);
+```
+
+**参数说明：**
+- `boot`：启动函数指针，执行实际的内核跳转（如 `grub_linux_boot`）
+- `unload`：卸载函数指针，用于清理已加载的内核资源（如 `grub_linux_unload`）
+- `flags`：标志位，控制启动行为：
+  - `GRUB_LOADER_FLAG_NORETURN = 1`：启动函数不返回
+  - `GRUB_LOADER_FLAG_PXE_NOT_UNLOAD = 2`：不卸载 PXE 资源
+  - `GRUB_LOADER_FLAG_EFI_KEEP_ALLOCATED_MEMORY = 4`：保持 EFI 分配的内存
+
+**函数实现（`grub/grub-core/commands/boot.c:163-174`）：**
+
+```c
+void
+grub_loader_set (grub_err_t (*boot) (void),
+                 grub_err_t (*unload) (void),
+                 int flags)
+{
+    // 调用扩展版本，包装简单的 boot/unload 函数
+    grub_loader_set_ex (grub_simple_boot_hook,
+                        grub_simple_unload_hook,
+                        &simple_loader_hooks,
+                        flags);
+
+    // 保存 boot 和 unload 函数到静态结构体
+    simple_loader_hooks.boot = boot;      // 保存 grub_linux_boot
+    simple_loader_hooks.unload = unload;  // 保存 grub_linux_unload
+}
+```
+
+**全局状态变量（`grub/grub-core/commands/boot.c:30-33`）：**
+
+```c
+static grub_err_t (*grub_loader_boot_func) (void *context);   // 启动函数指针
+static grub_err_t (*grub_loader_unload_func) (void *context); // 卸载函数指针
+static void *grub_loader_context;                              // 上下文数据
+static int grub_loader_flags;                                  // 标志位
+static int grub_loader_loaded;                                 // 是否已加载 loader
+```
+
+**`boot` 命令的执行流程（`grub/grub-core/commands/boot.c:190-220`）：**
+
+```c
+grub_err_t
+grub_loader_boot (void)
+{
+    grub_err_t err = GRUB_ERR_NONE;
+    struct grub_preboot *cur;
+
+    // 检查是否已加载内核
+    if (! grub_loader_loaded)
+        return grub_error (GRUB_ERR_NO_KERNEL,
+                           N_("you need to load the kernel first"));
+
+    // ⚠️ 关键：清理 GRUB 使用的硬件资源
+    // 包括：关闭中断、停止定时器、卸载模块等
+    grub_machine_fini (grub_loader_flags);
+
+    // 执行 preboot hooks（如果有注册的话）
+    for (cur = preboots_head; cur; cur = cur->next)
+    {
+        err = cur->preboot_func (grub_loader_flags);
+        if (err)
+        {
+            // 出错时恢复
+            for (cur = cur->prev; cur; cur = cur->prev)
+                cur->preboot_rest_func ();
+            return err;
+        }
+    }
+
+    // ⚠️ 核心：调用注册的启动函数（如 grub_linux_boot）
+    err = (grub_loader_boot_func) (grub_loader_context);
+
+    // 执行 preboot 恢复函数（通常不会执行到这里，因为已跳转到内核）
+    for (cur = preboots_tail; cur; cur = cur->prev)
+        if (! err)
+            err = cur->preboot_rest_func ();
+        else
+            cur->preboot_rest_func ();
+
+    return err;
+}
+```
+
+**完整调用链：**
+
+```
+用户选择菜单项（按 Enter）
+    ↓
+grub_cmd_boot()                    [grub-core/commands/boot.c:224]
+    ↓
+grub_loader_boot()                 [grub-core/commands/boot.c:190]
+    ├─ grub_machine_fini()         // 清理硬件资源
+    └─ grub_loader_boot_func()     // 调用注册的启动函数
+        ↓
+grub_linux_boot()                  [grub-core/loader/i386/linux.c]
+    ↓
+grub_relocator32_boot()            // 跳转到内核入口点
+    ↓
+内核 code32_start
+```
+
 **关键点：**
 - **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
 - **用户交互触发**：跳转由用户在菜单中选择启动项时触发
@@ -477,6 +591,152 @@ menuentry "Linux 5.x.x" {
 # → GRUB 调用 grub_linux_boot()
 # → grub_linux_boot() 调用 grub_relocator32_boot()
 # → 跳转到内核入口点（code32_start）
+```
+
+### grub_cmd_initrd() 函数详细讲解
+
+**源代码位置：** `grub/grub-core/loader/i386/linux.c:1065-1166`
+
+**功能：**
+- 读取 initrd/initramfs 文件（支持多个文件，GRUB 会合并）
+- 分配内存（尽量放在高地址区域，4KB 对齐）
+- 加载 initrd 到内存
+- 设置 `boot_params` 中的 `ramdisk_image` 和 `ramdisk_size`
+
+**前置条件：**
+- 必须先执行 `linux` 命令加载内核（`grub_cmd_linux()`）
+- 如果未加载内核，会返回错误：`"you need to load the kernel first"`
+
+**完整源代码分析：**
+
+```c
+// grub/grub-core/loader/i386/linux.c:1065-1166
+static grub_err_t
+grub_cmd_initrd (grub_command_t cmd, int argc, char *argv[])
+{
+    grub_size_t size = 0, aligned_size = 0;
+    grub_addr_t addr_min, addr_max;
+    grub_addr_t addr;
+    struct grub_linux_initrd_context initrd_ctx = { 0, 0, 0 };
+
+    // 步骤 1: 检查参数
+    if (argc == 0)
+    {
+        grub_error (GRUB_ERR_BAD_ARGUMENT, N_("filename expected"));
+        goto fail;
+    }
+
+    // 步骤 2: 检查内核是否已加载
+    if (! loaded)
+    {
+        grub_error (GRUB_ERR_BAD_ARGUMENT, 
+                    N_("you need to load the kernel first"));
+        goto fail;
+    }
+
+    // 步骤 3: 初始化 initrd 上下文（支持多个文件）
+    // grub_initrd_init 会打开所有指定的 initrd 文件
+    // 支持多个文件（GRUB 会将它们合并成一个 initramfs）
+    if (grub_initrd_init (argc, argv, &initrd_ctx))
+        goto fail;
+
+    // 步骤 4: 计算 initrd 总大小
+    size = grub_get_initrd_size (&initrd_ctx);
+    aligned_size = ALIGN_UP (size, 4096);  // 4KB 对齐
+
+    // 步骤 5: 确定 initrd 的最大地址
+    // 从内核头部读取 initrd_addr_max 字段
+    if (grub_le_to_cpu16 (linux_params.hdr.version) >= 0x0203)
+    {
+        addr_max = grub_cpu_to_le32 (linux_params.hdr.initrd_addr_max);
+        // Linux 的 initrd_addr_max 有时会设置为一个过大的值
+        // 需要限制在 0x3fffffff（约 1GB）以内
+        if (addr_max > GRUB_LINUX_INITRD_MAX_ADDRESS)
+            addr_max = GRUB_LINUX_INITRD_MAX_ADDRESS;
+    }
+    else
+        addr_max = GRUB_LINUX_INITRD_MAX_ADDRESS;
+
+    // 步骤 6: 考虑用户指定的内存限制
+    if (linux_mem_size != 0 && linux_mem_size < addr_max)
+        addr_max = linux_mem_size;
+
+    // 步骤 7: 避免 Linux 2.2/2.3 的内存范围检查 bug
+    addr_max -= 0x10000;  // 减去 64KB
+
+    // 步骤 8: 计算最小地址（内核加载位置之后）
+    addr_min = (grub_addr_t) prot_mode_target + prot_init_space;
+
+    // 步骤 9: 计算 initrd 加载地址（尽量放在高地址）
+    // Linux 期望 initrd 在高地址区域
+    addr = (addr_max - aligned_size) & ~0xFFF;  // 4KB 对齐
+
+    if (addr < addr_min)
+    {
+        grub_error (GRUB_ERR_OUT_OF_RANGE, "the initrd is too big");
+        goto fail;
+    }
+
+    // 步骤 10: 分配内存
+    {
+        grub_relocator_chunk_t ch;
+        err = grub_relocator_alloc_chunk_align (relocator, &ch,
+                                                addr_min, addr, aligned_size,
+                                                0x1000,  // 4KB 对齐
+                                                GRUB_RELOCATOR_PREFERENCE_HIGH,
+                                                1);
+        if (err)
+            goto fail;
+        initrd_mem = get_virtual_current_address (ch);
+        initrd_mem_target = get_physical_target_address (ch);
+    }
+
+    // 步骤 11: 加载 initrd 到内存
+    // grub_initrd_load 会读取所有 initrd 文件并合并
+    if (grub_initrd_load (&initrd_ctx, initrd_mem))
+        goto fail;
+
+    // 步骤 12: 设置 boot_params 中的 initrd 信息
+    // ⚠️ 关键：这些信息会传递给内核
+    linux_params.hdr.ramdisk_image = initrd_mem_target;  // initrd 物理地址
+    linux_params.hdr.ramdisk_size = size;                 // initrd 大小
+    linux_params.hdr.root_dev = 0x0100;                   // 根设备（RAM disk）
+
+fail:
+    grub_initrd_close (&initrd_ctx);
+    return grub_errno;
+}
+```
+
+**关键点：**
+
+1. **高地址优先**：initrd 尽量放在高地址区域（`GRUB_RELOCATOR_PREFERENCE_HIGH`）
+   - 这样可以避免与内核解压后的代码冲突
+   - Linux 期望 initrd 在高地址
+
+2. **地址限制**：
+   - 最大地址：`initrd_addr_max`（通常是 0x3fffffff，约 1GB）
+   - 最小地址：内核加载位置之后（`prot_mode_target + prot_init_space`）
+
+3. **多文件支持**：
+   - `grub_initrd_init` 支持多个 initrd 文件
+   - GRUB 会将它们合并成一个 initramfs
+   - 语法：`initrd /boot/initrd.img /boot/extra.img`
+
+4. **与内核的关系**：
+   - `ramdisk_image` 和 `ramdisk_size` 通过 `boot_params` 传递给内核
+   - 内核启动后从这些地址读取 initrd
+
+**initrd 内存布局示例：**
+
+```
+内存地址                  内容
+─────────────────────────────────────────
+0x100000 - 0x1FFFFF      内核镜像（vmlinuz）
+0x200000 - ...           内核解压区域
+...
+0x2F000000 - 0x2FFFFFFF  initrd（尽量在高地址）
+                         ↑ ramdisk_image 指向这里
 ```
 
 ### grub_linux_boot() 函数详细讲解
@@ -616,6 +876,86 @@ relocator32_start:
 └─ startup_64           64 位长模式入口点
 ```
 
+**⚠️ 关键问题：内核覆盖 GRUB 代码后如何完成跳转？**
+
+内核被加载到 0x100000+，这与 GRUB 解压后的代码区域重叠。GRUB 通过 **relocator 机制** 解决这个问题：
+
+**Relocator 机制（`grub/grub-core/lib/i386/relocator.c`）：**
+
+```c
+// grub_relocator32_boot() 在 0x1000-0x9a000 范围内分配安全区域
+// 这是 1MB 以下的常规内存，不会被内核覆盖
+err = grub_relocator_alloc_chunk_align_safe (rel, &ch,
+    0x1000,   // 最小地址
+    0x9a000,  // 最大地址（1MB 以下的安全区域）
+    RELOCATOR_SIZEOF (32),  // relocator 代码大小
+    16,       // 对齐
+    GRUB_RELOCATOR_PREFERENCE_LOW,
+    avoid_efi_bootservices);
+
+// 将跳转代码复制到安全区域
+grub_memmove (get_virtual_current_address (ch),
+              &grub_relocator32_start,
+              RELOCATOR_SIZEOF (32));
+```
+
+**Relocator 跳转代码（`grub/grub-core/lib/i386/relocator32.S`）：**
+
+```asm
+VARIABLE(grub_relocator32_start)
+    // ... 设置段寄存器、禁用分页 ...
+    
+    // 设置寄存器（从预设的变量中读取）
+    movl    grub_relocator32_esp, %esp
+    movl    grub_relocator32_esi, %esi  // boot_params 地址
+    // ... 其他寄存器 ...
+    
+    // ⚠️ 核心：远跳转到内核入口点
+    .byte   0xea                        // ljmp 指令
+VARIABLE(grub_relocator32_eip)
+    .long   0                           // 跳转目标（内核 code32_start）
+    .word   CODE_SEGMENT                // 代码段选择子
+VARIABLE(grub_relocator32_end)
+```
+
+**完整的跳转流程：**
+
+```
+grub_linux_boot()
+    ↓
+grub_relocator32_boot()
+    ├─ 1. 在 0x1000-0x9a000 分配安全区域（不会被内核覆盖）
+    ├─ 2. 将 relocator 代码复制到安全区域
+    ├─ 3. 设置 grub_relocator32_eip = code32_start（内核入口点）
+    └─ 4. 跳转到安全区域执行
+            ↓
+安全区域的 relocator 代码
+    ├─ 5. 设置寄存器（esp, esi, eax 等）
+    ├─ 6. 禁用分页，准备 32 位保护模式环境
+    └─ 7. 执行 ljmp 跳转到内核 code32_start
+            ↓
+内核入口点（code32_start @ 0x100000）
+```
+
+**内存布局关键点：**
+
+```
+0x0000 - 0x03FF      IVT（中断向量表）
+0x0400 - 0x04FF      BDA（BIOS 数据区）
+0x1000 - 0x9A000     ⚠️ 安全区域（relocator 代码在此执行）
+0x7C00 - 0x7DFF      引导扇区
+0x8000 - 0xFFFF      GRUB 实模式代码（startup_raw.S 等）
+0x100000+            GRUB 保护模式代码（会被内核覆盖）
+0x100000+            内核镜像（覆盖 GRUB 代码）
+```
+
+**为什么这个机制有效：**
+
+1. **安全区域选择**：0x1000-0x9a000 是 1MB 以下的常规内存，不会被加载到 0x100000+ 的内核覆盖
+2. **代码复制**：跳转代码被复制到安全区域，原始代码被覆盖不影响执行
+3. **单向跳转**：一旦跳转到内核，GRUB 代码不再需要，被覆盖无关紧要
+4. **自包含代码**：relocator 代码包含完整的 GDT 和跳转指令，不依赖外部代码
+
 **内核启动参数传递：**
 
 GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数：
@@ -627,26 +967,14 @@ GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数�
 - **`e820_map`**：系统内存映射表
 - **`esi` 寄存器**：包含 `boot_params` 的地址（内核通过 `%esi` 访问）
 
-**GRUB 加载 initrd/initramfs 的流程：**
+**initrd 加载流程总结：**
 
-1. **`grub_cmd_initrd()` 函数**（`grub/grub-core/loader/i386/linux.c`）：
-   - 当 `grub.cfg` 中执行 `initrd /boot/initrd.img` 命令时调用
-   - 读取 initrd 文件（支持 gzip 压缩，GRUB 会自动解压）
-   - 分配内存并加载 initrd 到内存（通常在高地址区域，如 0x2000000 附近）
-   - 在 `boot_params` 结构中设置：
-     - `ramdisk_image`：initrd 在内存中的地址
-     - `ramdisk_size`：initrd 的大小（解压后的大小）
+> **详细说明**：关于 `grub_cmd_initrd()` 函数的完整源代码分析，请参见 [grub_cmd_initrd() 函数详细讲解](#grub_cmd_initrd-函数详细讲解)。
 
-2. **内核读取 initrd**：
-   - 内核启动后，从 `boot_params.ramdisk_image` 读取 initrd 地址
-   - 从 `boot_params.ramdisk_size` 读取 initrd 大小
-   - 将 initrd 挂载为临时根文件系统（initramfs）
-   - 从 initrd 中加载驱动模块，初始化硬件
-   - 最后切换到真正的根文件系统
-
-**关键点：**
-- **GRUB 负责**：将 initrd 文件从磁盘读取、解压（如果需要）、加载到内存，并告诉内核位置
-- **内核负责**：从内存中读取 initrd，挂载为文件系统，加载驱动，切换到真正的根文件系统
+**内核读取 initrd：**
+- 内核启动后，从 `boot_params.ramdisk_image` 和 `ramdisk_size` 获取 initrd 位置和大小
+- 将 initrd 挂载为临时根文件系统（initramfs）
+- 加载驱动模块，初始化硬件，最后切换到真正的根文件系统
 
 > **详细说明**：关于 vmlinuz 文件结构的完整分析，请参见 [附录：vmlinuz 文件详细结构分析](#附录vmlinuz-文件详细结构分析)。
 
