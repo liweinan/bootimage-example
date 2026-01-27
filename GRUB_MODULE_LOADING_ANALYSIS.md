@@ -240,6 +240,348 @@ for (p = path_list; p; p = p->next)
 | 模块加载 | `grub/grub-core/kern/main.c:58-75` | `grub_load_modules()` |
 | FOR_MODULES 宏 | `grub/include/grub/kernel.h:104-110` | 遍历宏定义 |
 
+## 两种模块加载方式的区别
+
+**关键问题**：通过 `grub_load_modules()` 加载的模块和通过 `insmod` 命令加载的模块有什么区别？
+
+### 1. 加载方式对比
+
+| 特性 | `grub_load_modules()`（嵌入模块） | `insmod` 命令（文件系统模块） |
+|------|--------------------------------|---------------------------|
+| **模块来源** | 嵌入在 `core.img` 中 | 存储在文件系统中（`/boot/grub/i386-pc/*.mod`） |
+| **加载时机** | 启动时自动加载（`grub_main()` 中） | 运行时按需加载（`grub.cfg` 中指定） |
+| **加载函数** | `grub_dl_load_core(addr, size)` | `grub_dl_load_file(filename)` 或 `grub_dl_load(name)` |
+| **数据来源** | 内存（`core.img` 的模块区域） | 文件系统（需要文件系统驱动已加载） |
+| **指定方式** | 构建 `core.img` 时通过 `--modules` 参数 | `grub.cfg` 中通过 `insmod` 命令 |
+| **依赖关系** | 构建时解析（`moddep.lst`） | 运行时解析（需要文件系统可访问） |
+| **内存占用** | 永久占用（直到系统重启） | 动态分配（可卸载） |
+| **可用性** | 始终可用（启动时已加载） | 需要文件系统驱动先加载 |
+
+### 2. 源代码实现对比
+
+#### 2.1 `grub_load_modules()` - 嵌入模块加载
+
+**源代码位置**：`grub/grub-core/kern/main.c:58-75`
+
+```c
+static void
+grub_load_modules (void)
+{
+    struct grub_module_header *header;
+    
+    // 遍历 core.img 中嵌入的所有模块
+    FOR_MODULES (header)
+    {
+        // 只加载 ELF 格式的模块
+        if (header->type != OBJ_TYPE_ELF)
+            continue;
+        
+        // 从内存加载模块（不需要文件系统）
+        if (! grub_dl_load_core ((char *) header + sizeof (struct grub_module_header),
+                                 (header->size - sizeof (struct grub_module_header))))
+            grub_fatal ("%s", grub_errmsg);
+    }
+}
+```
+
+**关键点**：
+- 使用 `FOR_MODULES` 宏遍历 `grub_modbase` 到 `modend` 之间的所有模块
+- 直接调用 `grub_dl_load_core(addr, size)`，数据已经在内存中
+- **不需要文件系统支持**（此时文件系统驱动可能还未加载）
+
+#### 2.2 `insmod` 命令 - 文件系统模块加载
+
+**源代码位置**：`grub/grub-core/kern/corecmd.c:76-93`
+
+```c
+grub_core_cmd_insmod (struct grub_command *cmd, int argc, char *argv[])
+{
+    grub_dl_t mod;
+    
+    if (argc == 0)
+        return grub_error (GRUB_ERR_BAD_ARGUMENT, "one argument expected");
+    
+    // 判断是路径还是模块名
+    if (argv[0][0] == '/' || argv[0][0] == '(' || argv[0][0] == '+')
+        // 路径格式：insmod /boot/grub/i386-pc/ext2.mod
+        mod = grub_dl_load_file (argv[0]);
+    else
+        // 模块名格式：insmod linux（自动查找 $prefix/i386-pc/linux.mod）
+        mod = grub_dl_load (argv[0]);
+    
+    if (mod)
+        grub_dl_ref (mod);  // 增加引用计数，防止模块被卸载
+    
+    return 0;
+}
+```
+
+**关键点**：
+- 支持两种格式：路径（`/boot/grub/i386-pc/ext2.mod`）或模块名（`linux`）
+- 模块名格式会自动查找 `$prefix/i386-pc/<name>.mod`
+- **需要文件系统支持**（需要读取 `.mod` 文件）
+
+#### 2.3 `grub_dl_load_file()` - 从文件系统加载
+
+**源代码位置**：`grub/grub-core/kern/dl.c:825-865`
+
+```c
+grub_dl_t
+grub_dl_load_file (const char *filename)
+{
+    grub_file_t file = NULL;
+    grub_ssize_t size;
+    void *core = 0;
+    grub_dl_t mod = 0;
+    
+    // 步骤 1: 打开文件（需要文件系统驱动）
+    file = grub_file_open (filename, GRUB_FILE_TYPE_GRUB_MODULE);
+    if (! file)
+        return 0;
+    
+    // 步骤 2: 读取文件大小
+    size = grub_file_size (file);
+    
+    // 步骤 3: 分配内存
+    core = grub_malloc (size);
+    if (! core)
+    {
+        grub_file_close (file);
+        return 0;
+    }
+    
+    // 步骤 4: 读取文件内容到内存
+    if (grub_file_read (file, core, size) != (int) size)
+    {
+        grub_file_close (file);
+        grub_free (core);
+        return 0;
+    }
+    
+    // 步骤 5: 关闭文件（必须在处理依赖之前关闭）
+    grub_file_close (file);
+    
+    // 步骤 6: 从内存加载模块（调用 grub_dl_load_core）
+    mod = grub_dl_load_core (core, size);
+    
+    // 步骤 7: 释放临时缓冲区
+    grub_free (core);
+    
+    if (! mod)
+        return 0;
+    
+    // 步骤 8: 减少引用计数（因为 grub_dl_load_core 会增加引用）
+    mod->ref_count--;
+    
+    return mod;
+}
+```
+
+**关键点**：
+- 需要先打开文件（`grub_file_open`），这需要文件系统驱动已加载
+- 读取文件内容到临时缓冲区
+- 然后调用 `grub_dl_load_core()` 从内存加载（与嵌入模块使用相同的函数）
+- 最后释放临时缓冲区
+
+#### 2.4 `grub_dl_load()` - 通过模块名加载
+
+**源代码位置**：`grub/grub-core/kern/dl.c:869-902`
+
+```c
+grub_dl_t
+grub_dl_load (const char *name)
+{
+    char *filename;
+    grub_dl_t mod;
+    const char *grub_dl_dir = grub_env_get ("prefix");
+    
+    // 步骤 1: 检查模块是否已加载
+    mod = grub_dl_get (name);
+    if (mod)
+        return mod;
+    
+    // 步骤 2: 检查是否禁用模块加载
+    if (grub_no_modules)
+        return 0;
+    
+    // 步骤 3: 获取 prefix 环境变量（通常是 /boot/grub）
+    if (! grub_dl_dir)
+    {
+        grub_error (GRUB_ERR_FILE_NOT_FOUND, "variable `prefix' isn't set");
+        return 0;
+    }
+    
+    // 步骤 4: 构建完整路径（如 /boot/grub/i386-pc/linux.mod）
+    filename = grub_xasprintf ("%s/" GRUB_TARGET_CPU "-" GRUB_PLATFORM "/%s.mod",
+                               grub_dl_dir, name);
+    if (! filename)
+        return 0;
+    
+    // 步骤 5: 从文件系统加载
+    mod = grub_dl_load_file (filename);
+    grub_free (filename);
+    
+    if (! mod)
+        return 0;
+    
+    // 步骤 6: 验证模块名称是否匹配
+    if (grub_strcmp (mod->name, name) != 0)
+        grub_error (GRUB_ERR_BAD_MODULE, "mismatched names");
+    
+    return mod;
+}
+```
+
+**关键点**：
+- 自动构建模块文件路径：`$prefix/i386-pc/<name>.mod`
+- 检查模块是否已加载（避免重复加载）
+- 需要 `prefix` 环境变量已设置
+
+#### 2.5 `grub_dl_load_core()` - 核心加载函数（两种方式共用）
+
+**源代码位置**：`grub/grub-core/kern/dl.c:805-821`
+
+```c
+grub_dl_load_core (void *addr, grub_size_t size)
+{
+    grub_dl_t mod;
+    
+    // 步骤 1: 解析 ELF 文件（不初始化）
+    mod = grub_dl_load_core_noinit (addr, size);
+    
+    if (!mod)
+        return NULL;
+    
+    // 步骤 2: 调用模块初始化函数
+    grub_dl_init (mod);  // 调用 mod->init，注册命令等
+    
+    return mod;
+}
+```
+
+**关键点**：
+- **两种加载方式最终都调用这个函数**
+- 区别在于数据来源：
+  - 嵌入模块：数据已经在内存中（`core.img` 的模块区域）
+  - 文件系统模块：需要先从文件系统读取到临时缓冲区
+
+### 3. 实际使用场景
+
+#### 场景 1：模块嵌入在 core.img 中
+
+```bash
+# 构建 core.img 时嵌入 linux 模块
+grub-mkimage --modules "ext2 part_msdos biosdisk normal linux search ls" \
+             --output /boot/grub/i386-pc/core.img
+
+# grub.cfg 中无需 insmod
+menuentry "Linux" {
+    linux /boot/vmlinuz root=/dev/sda1
+    initrd /boot/initrd.img
+}
+```
+
+**流程**：
+1. `grub_main()` → `grub_load_modules()` 自动加载所有嵌入模块
+2. `linux` 命令立即可用（无需 `insmod linux`）
+
+#### 场景 2：模块不在 core.img 中
+
+```bash
+# 构建 core.img 时不包含 linux 模块
+grub-mkimage --modules "ext2 part_msdos biosdisk normal search ls" \
+             --output /boot/grub/i386-pc/core.img
+
+# grub.cfg 中需要 insmod
+menuentry "Linux" {
+    insmod linux        # ← 从文件系统加载 linux.mod
+    linux /boot/vmlinuz root=/dev/sda1
+    initrd /boot/initrd.img
+}
+```
+
+**流程**：
+1. `grub_main()` → `grub_load_modules()` 加载嵌入模块（不包含 `linux`）
+2. 执行 `insmod linux` → `grub_dl_load("linux")` → 从 `/boot/grub/i386-pc/linux.mod` 加载
+3. `linux` 命令现在可用
+
+#### 场景 3：按需加载可选模块
+
+```bash
+# grub.cfg
+menuentry "Graphical Menu" {
+    insmod gfxterm      # 图形终端（可选模块）
+    insmod gfxmenu      # 图形菜单（可选模块）
+    insmod png          # PNG 图像支持（可选模块）
+    # ... 使用图形菜单
+}
+```
+
+**说明**：
+- 这些模块通常不嵌入在 `core.img` 中（节省空间）
+- 只在需要时通过 `insmod` 加载
+
+### 4. 内存和性能对比
+
+| 特性 | 嵌入模块 | 文件系统模块 |
+|------|---------|------------|
+| **内存占用** | 永久占用（在 `core.img` 中） | 动态分配（可卸载） |
+| **加载速度** | 快（数据已在内存） | 较慢（需要文件 I/O） |
+| **文件系统依赖** | 无（启动时加载） | 有（需要文件系统驱动） |
+| **core.img 大小** | 较大（包含所有模块） | 较小（只包含必需模块） |
+| **灵活性** | 低（构建时确定） | 高（运行时选择） |
+
+### 5. 依赖关系处理
+
+#### 嵌入模块的依赖
+
+**构建时解析**：
+```bash
+# grub-mkimage 或 grub-install 解析依赖
+grub_util_resolve_dependencies(dir, "moddep.lst", mods)
+# 读取 moddep.lst，自动添加依赖模块
+```
+
+**示例**：
+- 指定 `linux` → 自动添加 `relocator`（依赖）
+- 指定 `normal` → 自动添加 `search`, `ls`, `configfile`（依赖）
+
+#### 文件系统模块的依赖
+
+**运行时解析**：
+```c
+// grub/grub-core/kern/dl.c:grub_dl_load_core_noinit()
+// 解析 ELF 文件的依赖关系（.dynamic 段）
+// 递归加载依赖模块
+```
+
+**示例**：
+- `insmod linux` → 自动加载 `relocator`（如果未加载）
+
+### 6. 总结
+
+**关键区别**：
+
+1. **数据来源**：
+   - 嵌入模块：数据在 `core.img` 中（内存）
+   - 文件系统模块：数据在文件系统中（需要 I/O）
+
+2. **加载时机**：
+   - 嵌入模块：启动时自动加载（`grub_main()`）
+   - 文件系统模块：运行时按需加载（`insmod` 命令）
+
+3. **文件系统依赖**：
+   - 嵌入模块：不需要文件系统（启动时加载）
+   - 文件系统模块：需要文件系统驱动已加载
+
+4. **灵活性**：
+   - 嵌入模块：构建时确定，灵活性低
+   - 文件系统模块：运行时选择，灵活性高
+
+5. **最终加载函数**：
+   - 两种方式最终都调用 `grub_dl_load_core(addr, size)`
+   - 区别在于数据来源和加载时机
+
 ## 数据结构定义
 
 ### 1. 模块类型枚举
