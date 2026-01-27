@@ -1535,6 +1535,67 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
    - 需要切换到实模式才能跳转到内核（内核入口点是实模式代码）
    - 切换代码本身也在 `0x100000+`，如果直接执行，执行过程中可能被覆盖
 
+**⚠️ UEFI 启动方式完全不同：**
+
+**UEFI 不需要 relocator 机制**，原因如下：
+
+1. **运行模式不同**：
+   - **BIOS 启动**：GRUB 在保护模式下运行，内核入口点是实模式代码，需要模式切换
+   - **UEFI 启动**：GRUB 和内核都在保护模式/长模式下运行，不需要模式切换
+
+2. **启动方式不同**：
+   - **BIOS 启动**：使用 relocator 代码手动跳转到内核入口点
+   - **UEFI 启动**：使用 EFI 的 `StartImage` 服务（`grub_efi_system_table->boot_services->start_image()`）
+
+3. **源代码位置**：
+   - **BIOS 启动**：`grub/grub-core/loader/i386/linux.c` → `grub_relocator32_boot()`
+   - **UEFI 启动**：`grub/grub-core/loader/efi/linux.c` → `grub_arch_efi_linux_boot_image()` → `grub_efi_start_image()`
+
+4. **UEFI 启动流程**（`grub/grub-core/loader/efi/linux.c:194-280`）：
+   ```c
+   grub_arch_efi_linux_boot_image (grub_addr_t addr, grub_size_t size, char *args)
+   {
+       // 步骤 1: 创建内存映射设备路径
+       mempath = grub_malloc (2 * sizeof (grub_efi_memory_mapped_device_path_t));
+       mempath[0].start_address = addr;  // 内核地址
+       mempath[0].end_address = addr + size;
+       
+       // 步骤 2: 使用 EFI LoadImage 服务加载内核
+       status = grub_efi_load_image (0, grub_efi_image_handle,
+                                     (grub_efi_device_path_t *) mempath,
+                                     (void *) addr, size, &image_handle);
+       
+       // 步骤 3: 设置命令行参数（转换为 UTF-16）
+       loaded_image = grub_efi_get_loaded_image (image_handle);
+       loaded_image->load_options = ...;  // 内核命令行参数
+       
+       // 步骤 4: 使用 EFI StartImage 服务启动内核
+       // ⚠️ 关键：这是 EFI 固件提供的服务，不需要 relocator
+       status = grub_efi_start_image (image_handle, 0, NULL);
+       // 如果成功，不会返回（控制权转移到内核）
+   }
+   ```
+
+5. **为什么 UEFI 不需要 relocator？**
+   - **EFI 服务处理**：`StartImage` 服务由 EFI 固件实现，负责：
+     - 设置正确的 CPU 状态（寄存器、段、分页等）
+     - 准备内核执行环境
+     - 跳转到内核入口点
+   - **内存管理**：EFI 使用 `ExitBootServices()` 将内存控制权交给内核，GRUB 代码可以被覆盖
+   - **标准协议**：UEFI 定义了标准的启动协议，内核以 EFI 可执行文件格式加载
+
+6. **对比总结**：
+
+| 特性 | BIOS 启动 | UEFI 启动 |
+|------|----------|----------|
+| **GRUB 运行模式** | 保护模式 | 保护模式/长模式 |
+| **内核入口点模式** | 实模式 | 保护模式/长模式 |
+| **是否需要模式切换** | ✅ 是（保护→实） | ❌ 否 |
+| **跳转方式** | relocator 代码手动跳转 | EFI `StartImage` 服务 |
+| **relocator 机制** | ✅ 需要 | ❌ 不需要 |
+| **源代码文件** | `loader/i386/linux.c` | `loader/efi/linux.c` |
+| **关键函数** | `grub_relocator32_boot()` | `grub_efi_start_image()` |
+
 3. **安全区域选择**：
    - 安全区域：`0x1000-0x9a000`（1MB 以下的常规内存）
    - 这个区域不会被加载到 `0x100000+` 的内核覆盖
