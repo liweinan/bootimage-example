@@ -1113,6 +1113,166 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
 }
 ```
 
+### grub_cmd_initrd() 函数
+
+**源代码位置：** `grub/grub-core/loader/i386/linux.c:1065-1166`
+
+**功能：**
+- 读取 initrd/initramfs 文件（支持多个文件，GRUB 会合并）
+- 分配内存（尽量放在高地址区域，4KB 对齐）
+- 加载 initrd 到内存
+- 设置 `boot_params` 中的 `ramdisk_image` 和 `ramdisk_size`
+
+**前置条件：**
+- 必须先执行 `linux` 命令加载内核（`grub_cmd_linux()`）
+- 如果未加载内核，会返回错误：`"you need to load the kernel first"`
+
+**完整源代码分析：**
+
+```c
+// grub/grub-core/loader/i386/linux.c:1065-1166
+static grub_err_t
+grub_cmd_initrd (grub_command_t cmd, int argc, char *argv[])
+{
+    grub_size_t size = 0, aligned_size = 0;
+    grub_addr_t addr_min, addr_max;
+    grub_addr_t addr;
+    struct grub_linux_initrd_context initrd_ctx = { 0, 0, 0 };
+
+    // 步骤 1: 检查参数
+    if (argc == 0)
+    {
+        grub_error (GRUB_ERR_BAD_ARGUMENT, N_("filename expected"));
+        goto fail;
+    }
+
+    // 步骤 2: 检查内核是否已加载
+    if (! loaded)
+    {
+        grub_error (GRUB_ERR_BAD_ARGUMENT, 
+                    N_("you need to load the kernel first"));
+        goto fail;
+    }
+
+    // 步骤 3: 初始化 initrd 上下文（支持多个文件）
+    // grub_initrd_init 会打开所有指定的 initrd 文件
+    // 支持多个文件（GRUB 会将它们合并成一个 initramfs）
+    if (grub_initrd_init (argc, argv, &initrd_ctx))
+        goto fail;
+
+    // 步骤 4: 计算 initrd 总大小
+    size = grub_get_initrd_size (&initrd_ctx);
+    aligned_size = ALIGN_UP (size, 4096);  // 4KB 对齐
+
+    // 步骤 5: 确定 initrd 的最大地址
+    // 从内核头部读取 initrd_addr_max 字段
+    if (grub_le_to_cpu16 (linux_params.hdr.version) >= 0x0203)
+    {
+        addr_max = grub_cpu_to_le32 (linux_params.hdr.initrd_addr_max);
+        // Linux 的 initrd_addr_max 有时会设置为一个过大的值
+        // 需要限制在 0x3fffffff（约 1GB）以内
+        if (addr_max > GRUB_LINUX_INITRD_MAX_ADDRESS)
+            addr_max = GRUB_LINUX_INITRD_MAX_ADDRESS;
+    }
+    else
+        addr_max = GRUB_LINUX_INITRD_MAX_ADDRESS;
+
+    // 步骤 6: 考虑用户指定的内存限制
+    if (linux_mem_size != 0 && linux_mem_size < addr_max)
+        addr_max = linux_mem_size;
+
+    // 步骤 7: 避免 Linux 2.2/2.3 的内存范围检查 bug
+    addr_max -= 0x10000;  // 减去 64KB
+
+    // 步骤 8: 计算最小地址（内核加载位置之后）
+    addr_min = (grub_addr_t) prot_mode_target + prot_init_space;
+
+    // 步骤 9: 计算 initrd 加载地址（尽量放在高地址）
+    // Linux 期望 initrd 在高地址区域
+    addr = (addr_max - aligned_size) & ~0xFFF;  // 4KB 对齐
+
+    if (addr < addr_min)
+    {
+        grub_error (GRUB_ERR_OUT_OF_RANGE, "the initrd is too big");
+        goto fail;
+    }
+
+    // 步骤 10: 分配内存
+    {
+        grub_relocator_chunk_t ch;
+        err = grub_relocator_alloc_chunk_align (relocator, &ch,
+                                                addr_min, addr, aligned_size,
+                                                0x1000,  // 4KB 对齐
+                                                GRUB_RELOCATOR_PREFERENCE_HIGH,
+                                                1);
+        if (err)
+            goto fail;
+        initrd_mem = get_virtual_current_address (ch);
+        initrd_mem_target = get_physical_target_address (ch);
+    }
+
+    // 步骤 11: 加载 initrd 到内存
+    // grub_initrd_load 会读取所有 initrd 文件并合并
+    if (grub_initrd_load (&initrd_ctx, initrd_mem))
+        goto fail;
+
+    // 步骤 12: 设置 boot_params 中的 initrd 信息
+    // ⚠️ 关键：这些信息会传递给内核
+    linux_params.hdr.ramdisk_image = initrd_mem_target;  // initrd 物理地址
+    linux_params.hdr.ramdisk_size = size;                 // initrd 大小
+    linux_params.hdr.root_dev = 0x0100;                   // 根设备（RAM disk）
+
+fail:
+    grub_initrd_close (&initrd_ctx);
+    return grub_errno;
+}
+```
+
+**关键点：**
+
+1. **高地址优先**：initrd 尽量放在高地址区域（`GRUB_RELOCATOR_PREFERENCE_HIGH`）
+   - 这样可以避免与内核解压后的代码冲突
+   - Linux 期望 initrd 在高地址
+
+2. **地址限制**：
+   - 最大地址：`initrd_addr_max`（通常是 0x3fffffff，约 1GB）
+   - 最小地址：内核加载位置之后（`prot_mode_target + prot_init_space`）
+
+3. **多文件支持**：
+   - `grub_initrd_init` 支持多个 initrd 文件
+   - GRUB 会将它们合并成一个 initramfs
+   - 语法：`initrd /boot/initrd.img /boot/extra.img`
+
+4. **与内核的关系**：
+   - `ramdisk_image` 和 `ramdisk_size` 通过 `boot_params` 传递给内核
+   - 内核启动后从这些地址读取 initrd
+
+**initrd 内存布局示例：**
+
+```
+内存地址                  内容
+─────────────────────────────────────────
+0x100000 - 0x1FFFFF      内核镜像（vmlinuz）
+0x200000 - ...           内核解压区域
+...
+0x2F000000 - 0x2FFFFFFF  initrd（尽量在高地址）
+                         ↑ ramdisk_image 指向这里
+```
+
+### GRUB loader 机制和 boot 命令
+
+**执行流程概述：**
+
+在 `grub_cmd_linux()` 和 `grub_cmd_initrd()` 执行完毕后，GRUB 通过 loader 机制延迟执行跳转：
+
+```
+1. grub_cmd_linux() → 注册 grub_linux_boot() 函数
+2. grub_cmd_initrd() → 设置 initrd 信息
+3. menuentry 结束后 → 隐式调用 boot 命令
+4. boot 命令 → 调用注册的 grub_linux_boot()
+5. grub_linux_boot() → grub_relocator32_boot() → 跳转到内核
+```
+
 **`grub_loader_set` 函数详解：**
 
 `grub_loader_set` 是 GRUB 的 loader 注册机制，用于设置启动和卸载函数，供后续 `boot` 命令调用。
@@ -1260,152 +1420,6 @@ menuentry "Linux 5.x.x" {
 # 2. initrd 命令 → grub_cmd_initrd() 加载 initramfs
 # 3. menuentry 结束后隐式 boot → grub_linux_boot() → grub_relocator32_boot()
 # 4. 跳转到内核入口点（code32_start）
-```
-
-### grub_cmd_initrd() 函数
-
-**源代码位置：** `grub/grub-core/loader/i386/linux.c:1065-1166`
-
-**功能：**
-- 读取 initrd/initramfs 文件（支持多个文件，GRUB 会合并）
-- 分配内存（尽量放在高地址区域，4KB 对齐）
-- 加载 initrd 到内存
-- 设置 `boot_params` 中的 `ramdisk_image` 和 `ramdisk_size`
-
-**前置条件：**
-- 必须先执行 `linux` 命令加载内核（`grub_cmd_linux()`）
-- 如果未加载内核，会返回错误：`"you need to load the kernel first"`
-
-**完整源代码分析：**
-
-```c
-// grub/grub-core/loader/i386/linux.c:1065-1166
-static grub_err_t
-grub_cmd_initrd (grub_command_t cmd, int argc, char *argv[])
-{
-    grub_size_t size = 0, aligned_size = 0;
-    grub_addr_t addr_min, addr_max;
-    grub_addr_t addr;
-    struct grub_linux_initrd_context initrd_ctx = { 0, 0, 0 };
-
-    // 步骤 1: 检查参数
-    if (argc == 0)
-    {
-        grub_error (GRUB_ERR_BAD_ARGUMENT, N_("filename expected"));
-        goto fail;
-    }
-
-    // 步骤 2: 检查内核是否已加载
-    if (! loaded)
-    {
-        grub_error (GRUB_ERR_BAD_ARGUMENT, 
-                    N_("you need to load the kernel first"));
-        goto fail;
-    }
-
-    // 步骤 3: 初始化 initrd 上下文（支持多个文件）
-    // grub_initrd_init 会打开所有指定的 initrd 文件
-    // 支持多个文件（GRUB 会将它们合并成一个 initramfs）
-    if (grub_initrd_init (argc, argv, &initrd_ctx))
-        goto fail;
-
-    // 步骤 4: 计算 initrd 总大小
-    size = grub_get_initrd_size (&initrd_ctx);
-    aligned_size = ALIGN_UP (size, 4096);  // 4KB 对齐
-
-    // 步骤 5: 确定 initrd 的最大地址
-    // 从内核头部读取 initrd_addr_max 字段
-    if (grub_le_to_cpu16 (linux_params.hdr.version) >= 0x0203)
-    {
-        addr_max = grub_cpu_to_le32 (linux_params.hdr.initrd_addr_max);
-        // Linux 的 initrd_addr_max 有时会设置为一个过大的值
-        // 需要限制在 0x3fffffff（约 1GB）以内
-        if (addr_max > GRUB_LINUX_INITRD_MAX_ADDRESS)
-            addr_max = GRUB_LINUX_INITRD_MAX_ADDRESS;
-    }
-    else
-        addr_max = GRUB_LINUX_INITRD_MAX_ADDRESS;
-
-    // 步骤 6: 考虑用户指定的内存限制
-    if (linux_mem_size != 0 && linux_mem_size < addr_max)
-        addr_max = linux_mem_size;
-
-    // 步骤 7: 避免 Linux 2.2/2.3 的内存范围检查 bug
-    addr_max -= 0x10000;  // 减去 64KB
-
-    // 步骤 8: 计算最小地址（内核加载位置之后）
-    addr_min = (grub_addr_t) prot_mode_target + prot_init_space;
-
-    // 步骤 9: 计算 initrd 加载地址（尽量放在高地址）
-    // Linux 期望 initrd 在高地址区域
-    addr = (addr_max - aligned_size) & ~0xFFF;  // 4KB 对齐
-
-    if (addr < addr_min)
-    {
-        grub_error (GRUB_ERR_OUT_OF_RANGE, "the initrd is too big");
-        goto fail;
-    }
-
-    // 步骤 10: 分配内存
-    {
-        grub_relocator_chunk_t ch;
-        err = grub_relocator_alloc_chunk_align (relocator, &ch,
-                                                addr_min, addr, aligned_size,
-                                                0x1000,  // 4KB 对齐
-                                                GRUB_RELOCATOR_PREFERENCE_HIGH,
-                                                1);
-        if (err)
-            goto fail;
-        initrd_mem = get_virtual_current_address (ch);
-        initrd_mem_target = get_physical_target_address (ch);
-    }
-
-    // 步骤 11: 加载 initrd 到内存
-    // grub_initrd_load 会读取所有 initrd 文件并合并
-    if (grub_initrd_load (&initrd_ctx, initrd_mem))
-        goto fail;
-
-    // 步骤 12: 设置 boot_params 中的 initrd 信息
-    // ⚠️ 关键：这些信息会传递给内核
-    linux_params.hdr.ramdisk_image = initrd_mem_target;  // initrd 物理地址
-    linux_params.hdr.ramdisk_size = size;                 // initrd 大小
-    linux_params.hdr.root_dev = 0x0100;                   // 根设备（RAM disk）
-
-fail:
-    grub_initrd_close (&initrd_ctx);
-    return grub_errno;
-}
-```
-
-**关键点：**
-
-1. **高地址优先**：initrd 尽量放在高地址区域（`GRUB_RELOCATOR_PREFERENCE_HIGH`）
-   - 这样可以避免与内核解压后的代码冲突
-   - Linux 期望 initrd 在高地址
-
-2. **地址限制**：
-   - 最大地址：`initrd_addr_max`（通常是 0x3fffffff，约 1GB）
-   - 最小地址：内核加载位置之后（`prot_mode_target + prot_init_space`）
-
-3. **多文件支持**：
-   - `grub_initrd_init` 支持多个 initrd 文件
-   - GRUB 会将它们合并成一个 initramfs
-   - 语法：`initrd /boot/initrd.img /boot/extra.img`
-
-4. **与内核的关系**：
-   - `ramdisk_image` 和 `ramdisk_size` 通过 `boot_params` 传递给内核
-   - 内核启动后从这些地址读取 initrd
-
-**initrd 内存布局示例：**
-
-```
-内存地址                  内容
-─────────────────────────────────────────
-0x100000 - 0x1FFFFF      内核镜像（vmlinuz）
-0x200000 - ...           内核解压区域
-...
-0x2F000000 - 0x2FFFFFFF  initrd（尽量在高地址）
-                         ↑ ramdisk_image 指向这里
 ```
 
 ### grub_linux_boot() 函数
