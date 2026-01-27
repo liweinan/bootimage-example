@@ -252,6 +252,21 @@ grub_main (void)
     //   - 遍历 core.img 中的所有模块（OBJ_TYPE_ELF 类型）
     //   - 使用 grub_dl_load_core() 加载每个模块
     //   - 模块包括：文件系统驱动（ext2, fat, iso9660 等）、磁盘驱动、命令等
+    // ⚠️ 关键澄清：加载所有嵌入的模块，不是只加载 grub.cfg 中 insmod 的模块
+    //   - grub_load_modules() 加载所有嵌入在 core.img 中的模块（构建时通过 grub-mkimage 指定）
+    //   - insmod 命令用于运行时从文件系统动态加载额外的模块（不在 core.img 中）
+    //   - 两种加载方式的区别：
+    //     1. grub_load_modules()：加载嵌入模块（core.img 中，启动时自动加载）
+    //        - 使用 grub_dl_load_core() 从内存加载
+    //        - 模块在构建 core.img 时通过 --modules 参数指定
+    //        - 例如：grub-mkimage --modules "ext2 part_msdos linux" ...
+    //     2. insmod 命令：加载文件系统模块（/boot/grub/i386-pc/*.mod，运行时按需加载）
+    //        - 使用 grub_dl_load_file() 或 grub_dl_load() 从文件系统加载
+    //        - 模块在 grub.cfg 中通过 insmod 命令指定
+    //        - 例如：insmod linux（从 /boot/grub/i386-pc/linux.mod 加载）
+    // 实际场景：
+    //   - 如果 linux.mod 嵌入在 core.img 中：grub_load_modules() 会自动加载，无需 insmod
+    //   - 如果 linux.mod 不在 core.img 中：需要在 grub.cfg 中使用 insmod linux 加载
     // 源代码位置：grub/grub-core/kern/main.c:58-75
 
     grub_boot_time ("After loading embedded modules.");
