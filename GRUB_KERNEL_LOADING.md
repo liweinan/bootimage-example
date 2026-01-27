@@ -1670,7 +1670,11 @@ grub_loader_set (grub_err_t (*boot) (void),
 
 **⚠️ 多个内核加载的处理：**
 
-**问题：如果加载多个内核会怎样？**
+**问题：如果加载多个内核会怎样？需要复制多个内核吗？**
+
+**答案：** 不需要！GRUB 的 loader 机制确保**只有最后一个内核是活动的**，之前的内核会被自动卸载。
+
+**详细说明：**
 
 **答案：** GRUB 只保留**最后一个加载的内核**，之前的内核会被自动卸载。
 
@@ -1728,6 +1732,45 @@ grub_loader_set (grub_err_t (*boot) (void),
    
    boot 时：
    0x100000 (1MB) → 内核 2（从临时缓冲区复制到此）
+   ```
+
+5. **⚠️ 多内核时也需要复制吗？**
+   
+   **答案：是的，但只有最后一个内核会被复制并启动。**
+   
+   **详细说明：**
+   - **每个内核**在加载时都会：
+     1. 分配临时缓冲区（通常在 16MB+）
+     2. 将内核镜像复制到临时缓冲区
+     3. 设置 `boot_params`
+     4. 注册启动函数
+   
+   - **当加载新内核时**：
+     1. 自动卸载之前的内核（调用 `grub_linux_unload()`）
+     2. 释放之前内核的临时缓冲区内存
+     3. 为新内核分配新的临时缓冲区
+   
+   - **boot 时**：
+     1. 只有**最后一个加载的内核**会被复制到 0x100000
+     2. 之前的内核已经被卸载，不会参与启动过程
+     3. relocator 代码只复制最后一个内核
+   
+   **示例流程**：
+   ```bash
+   # 用户执行：
+   linux /boot/vmlinuz-5.10 root=/dev/sda1    # 内核 1 加载到临时缓冲区（16MB+）
+   linux /boot/vmlinuz-5.15 root=/dev/sda1    # 内核 2 加载到临时缓冲区（16MB+），内核 1 被卸载
+   boot
+   
+   # boot 时执行：
+   grub_linux_boot() → grub_relocator32_boot()
+     ↓
+   relocator 代码执行：
+     1. 复制内核 2 从临时缓冲区（16MB+）→ 0x100000
+     2. 切换到实模式
+     3. 跳转到内核 2 的 code32_start @ 0x100000
+   
+   # 内核 1 不会被复制，因为它已经被卸载
    ```
 
 5. **为什么这样设计？**
@@ -2028,6 +2071,39 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
    - **内存管理**：EFI 使用 `ExitBootServices()` 将内存控制权交给内核，GRUB 代码可以被覆盖
    - **标准协议**：UEFI 定义了标准的启动协议，内核以 EFI 可执行文件格式加载
 
+6. **⚠️ UEFI 模式下需要复制内核吗？**
+   
+   **答案：不需要！** UEFI 模式下，内核加载方式完全不同：
+   
+   - **内核加载地址**：由 EFI 固件决定，可以是任意地址（通常在高地址区域）
+   - **不需要复制**：内核直接加载到最终执行地址，不需要临时缓冲区
+   - **EFI LoadImage 服务**：负责将内核加载到合适的内存位置
+   - **EFI StartImage 服务**：负责启动内核，处理所有地址重定位和模式切换
+   
+   **UEFI 启动流程**：
+   ```c
+   // grub/grub-core/loader/efi/linux.c
+   grub_arch_efi_linux_boot_image (grub_addr_t addr, grub_size_t size, char *args)
+   {
+       // 内核已经加载到 addr（由 grub_cmd_linux() 加载）
+       // 不需要复制，直接使用 EFI 服务启动
+       
+       // 1. 创建内存映射设备路径
+       mempath[0].start_address = addr;  // 内核当前地址（可能是任意地址）
+       
+       // 2. 使用 EFI LoadImage 服务（可能重定位内核）
+       grub_efi_load_image (..., (void *) addr, size, &image_handle);
+       
+       // 3. 使用 EFI StartImage 服务启动内核
+       grub_efi_start_image (image_handle, 0, NULL);
+       // EFI 固件会处理所有地址重定位和模式切换
+   }
+   ```
+   
+   **关键区别**：
+   - **BIOS**：内核必须复制到 0x100000，因为地址计算基于这个固定地址
+   - **UEFI**：内核可以加载到任意地址，EFI 固件负责处理地址重定位
+
 6. **对比总结**：
 
 | 特性 | BIOS 启动 | UEFI 启动 |
@@ -2097,6 +2173,48 @@ relocator 代码 = preamble（初始化）
 - **relocator 代码本身**被复制到安全区域（0x1000-0x9a000）
 - **relocator 代码中包含复制内核的逻辑**（forward/backward 复制代码）
 - **内核**被复制到 0x100000（由 relocator 代码中的复制逻辑执行）
+
+**⚠️ 为什么必须复制内核？不能直接跳转到临时缓冲区吗？**
+
+**答案：** 理论上，如果内核是可重定位的（`relocatable = true`），可以跳转到临时缓冲区，但**实际实现中仍然需要复制**，原因如下：
+
+1. **地址计算基于 0x100000**：
+   ```c
+   // grub/grub-core/loader/i386/linux.c:1178-1180
+   linux_params.code32_start = prot_mode_target + 
+                               grub_le_to_cpu32 (lh.code32_start) - 
+                               GRUB_LINUX_BZIMAGE_ADDR;
+   // 其中：
+   // - prot_mode_target = 0x100000（最终目标地址）
+   // - lh.code32_start：内核头部中的字段，相对于 0x100000 的偏移
+   // - GRUB_LINUX_BZIMAGE_ADDR = 0x100000
+   ```
+   - `code32_start` 的计算假设内核在 `prot_mode_target`（0x100000）
+   - 如果跳转到临时缓冲区（16MB+），`code32_start` 的地址会错误
+
+2. **boot_params 中的地址都是相对于 0x100000 的**：
+   - `boot_params.cmd_line_ptr`：命令行参数地址
+   - `boot_params.ramdisk_image`：initramfs 地址
+   - `boot_params.code32_start`：内核入口点地址
+   - 这些地址都是基于内核在 0x100000 的假设计算的
+
+3. **内核 setup 代码期望在 0x100000**：
+   - 内核的 setup 代码（`arch/x86/boot/header.S`）中有硬编码的地址假设
+   - 即使内核是可重定位的，setup 代码仍然期望在 0x100000 位置
+   - 内核的解压代码也会假设自己在 0x100000
+
+4. **如果跳转到临时缓冲区需要大量调整**：
+   - 需要重新计算所有 `boot_params` 中的地址
+   - 需要调整内核头部中的地址字段
+   - 需要确保内核的解压代码能正确处理地址
+   - 这增加了复杂性和出错风险
+
+5. **复制操作是安全的**：
+   - 复制操作在 relocator 代码中执行，非常快速（通常几毫秒）
+   - 复制发生在模式切换之前，不会影响执行流程
+   - 复制后，所有地址计算都是正确的，不需要额外调整
+
+**结论**：即使内核是可重定位的，GRUB 仍然选择复制内核到 0x100000，因为这是最简单、最安全、最兼容的方式。
 
 **如果直接跳转会发生什么？**
 
