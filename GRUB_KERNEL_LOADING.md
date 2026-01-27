@@ -1457,7 +1457,7 @@ grub_linux_boot (void)
 
 **功能：**
 - 设置寄存器值（`grub_relocator32_eip`、`grub_relocator32_esi`）
-- 准备 relocator 代码（切换到保护模式并跳转）
+- 准备 relocator 代码（切换到实模式并跳转）
 - 执行跳转到内核入口点（`code32_start`）
 
 **完整源代码分析：**
@@ -1466,26 +1466,148 @@ grub_linux_boot (void)
 // grub/grub-core/lib/i386/relocator.c
 grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state state, ...)
 {
-    // 设置寄存器值
+    // 步骤 1: 在安全区域（0x1000-0x9a000）分配内存
+    // 这个区域在 1MB 以下，不会被加载到 0x100000+ 的内核覆盖
+    err = grub_relocator_alloc_chunk_align_safe (rel, &ch,
+        0x1000,   // 最小地址
+        0x9a000,  // 最大地址（1MB 以下的安全区域）
+        RELOCATOR_SIZEOF (32),  // relocator 代码大小
+        16,       // 对齐
+        GRUB_RELOCATOR_PREFERENCE_LOW,
+        avoid_efi_bootservices);
+    
+    relocator_mem = get_virtual_current_address (ch);  // 获取安全区域的虚拟地址
+    
+    // 步骤 2: 设置寄存器值
     // grub_relocator32_eip 是 relocator 代码中的一个全局变量
     // 用于存储目标跳转地址，relocator 代码执行时会读取这个变量并加载到 EIP
     grub_relocator32_eip = state.eip;  // 内核入口点地址（code32_start）
     grub_relocator32_esi = state.esi;  // boot_params 地址
     
-    // 准备 relocator 代码（切换到保护模式并跳转）
-    // 将 relocator 代码复制到 relocator_mem 内存区域
-    grub_memmove (relocator_mem, &grub_relocator32_start, ...);
+    // 步骤 3: 将 relocator 代码复制到安全区域
+    // ⚠️ 关键问题 1：relocator 代码具体对应哪个文件？
+    // 答案：grub/grub-core/lib/i386/relocator32.S
+    // 这是一个汇编文件，包含切换到实模式并跳转到内核的代码
+    // &grub_relocator32_start 是这段代码在 GRUB 内存中的起始地址
+    grub_memmove (relocator_mem, &grub_relocator32_start, RELOCATOR_SIZEOF (32));
     
-    // 执行跳转（关闭中断，切换到保护模式，跳转到 state.eip）
+    // 步骤 4: 执行跳转（关闭中断，跳转到安全区域的 relocator 代码）
     asm volatile ("cli");
-    ((void (*) (void)) relst) ();  // 跳转到 relocator 代码
+    ((void (*) (void)) relocator_mem) ();  // 跳转到安全区域的 relocator 代码
     // relocator 代码会：
-    //   1. 切换到保护模式
-    //   2. 设置 GDT
-    //   3. 从 grub_relocator32_eip 读取地址并加载到 EIP 寄存器
-    //   4. 跳转到内核入口点（code32_start）
-    //   5. 此时 ESI 寄存器包含 boot_params 的地址
+    //   1. 切换到实模式（从保护模式切换回来）
+    //   2. 设置段寄存器（CS、DS、ES、SS）
+    //   3. 设置栈指针（ESP）
+    //   4. 从 grub_relocator32_eip 读取地址并加载到 EIP 寄存器
+    //   5. 执行远跳转（ljmp）到内核入口点（code32_start）
+    //   6. 此时 ESI 寄存器包含 boot_params 的地址
 }
+```
+
+**⚠️ 关键问题解答：**
+
+**问题 1：relocator 代码具体对应哪个文件？**
+
+**答案：** `grub/grub-core/lib/i386/relocator32.S`
+
+这是一个汇编源文件，包含以下关键功能：
+- 从保护模式切换到实模式
+- 设置段寄存器（CS、DS、ES、SS）为实模式值
+- 设置栈指针（ESP）
+- 从全局变量读取目标地址（`grub_relocator32_eip`）
+- 执行远跳转（`ljmp`）到内核入口点
+
+**源代码位置：** `grub/grub-core/lib/i386/relocator32.S`
+
+**问题 2：为什么要复制？**
+
+**答案：** 因为 GRUB 的代码在 0x100000+，会被内核覆盖，必须复制到安全区域。
+
+**详细原因：**
+
+1. **GRUB 代码位置问题**：
+   - GRUB 解压后的代码在 `0x100000+`（1MB 以上）
+   - 内核镜像也加载到 `0x100000`（1MB）
+   - **内核会覆盖 GRUB 的代码区域**
+
+2. **执行时机问题**：
+   - `grub_relocator32_boot()` 在保护模式下执行（GRUB 的 C 代码）
+   - 需要切换到实模式才能跳转到内核（内核入口点是实模式代码）
+   - 切换代码本身也在 `0x100000+`，如果直接执行，执行过程中可能被覆盖
+
+3. **安全区域选择**：
+   - 安全区域：`0x1000-0x9a000`（1MB 以下的常规内存）
+   - 这个区域不会被加载到 `0x100000+` 的内核覆盖
+   - 复制 relocator 代码到这里，确保执行时不会被覆盖
+
+4. **自包含代码**：
+   - relocator 代码是自包含的，包含完整的 GDT 和跳转指令
+   - 不依赖 GRUB 的其他代码，可以独立执行
+   - 复制后，即使原始代码被覆盖也不影响执行
+
+**问题 3：直接跳转到内核入口点地址（code32_start）不行吗？**
+
+**答案：** 不行。原因如下：
+
+1. **运行模式不匹配**：
+   - GRUB 在**保护模式**下运行（32 位保护模式）
+   - 内核入口点（`code32_start`）是**实模式**代码
+   - 不能直接从保护模式跳转到实模式代码，需要先切换模式
+
+2. **段寄存器状态不正确**：
+   - 保护模式下，段寄存器是段选择子（指向 GDT 中的段描述符）
+   - 实模式下，段寄存器是段基址（直接用于地址计算）
+   - 跳转前必须设置正确的段寄存器值
+
+3. **分页可能启用**：
+   - GRUB 可能启用了分页（页表映射）
+   - 内核入口点期望在实模式下运行（无分页）
+   - 需要禁用分页
+
+4. **栈和寄存器状态**：
+   - 内核期望特定的寄存器状态（如 `ESI` 包含 `boot_params` 地址）
+   - 需要设置正确的栈指针（ESP）
+   - relocator 代码负责设置这些状态
+
+**relocator 代码的作用：**
+
+relocator 代码是一个"桥梁"，负责：
+1. **模式切换**：从保护模式切换到实模式
+2. **环境准备**：设置段寄存器、栈指针、寄存器状态
+3. **安全跳转**：从安全区域执行，确保不被覆盖
+4. **参数传递**：确保 `ESI` 寄存器包含 `boot_params` 地址
+
+**如果直接跳转会发生什么？**
+
+```c
+// ❌ 错误做法：直接跳转
+asm volatile ("jmp *%0" : : "r" (code32_start));
+
+// 问题：
+// 1. 仍在保护模式下，段寄存器是选择子，不是实模式段基址
+// 2. 如果启用了分页，地址映射可能不正确
+// 3. 寄存器状态（ESI、ESP）可能不正确
+// 4. 内核期望实模式环境，但仍在保护模式下
+// 结果：系统崩溃或不可预测的行为
+```
+
+**正确的流程：**
+
+```
+GRUB 保护模式代码（0x100000+）
+    ↓
+复制 relocator 代码到安全区域（0x1000-0x9a000）
+    ↓
+跳转到安全区域的 relocator 代码
+    ↓
+relocator 代码执行：
+    1. 切换到实模式
+    2. 设置段寄存器（CS、DS、ES、SS）
+    3. 设置栈指针（ESP）
+    4. 设置 ESI = boot_params 地址
+    5. 执行 ljmp 跳转到 code32_start
+    ↓
+内核入口点（code32_start @ 0x100000，实模式）
 ```
 
 ### code32_start 地址的来源和传递过程
