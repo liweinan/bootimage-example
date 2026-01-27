@@ -1676,32 +1676,80 @@ grub_loader_set (grub_err_t (*boot) (void),
 
 **详细说明：**
 
-**答案：** GRUB 只保留**最后一个加载的内核**，之前的内核会被自动卸载。
-
-**详细说明：**
-
 1. **自动卸载机制**：
    - `grub_loader_set_ex()` 在设置新的 loader 之前，会先调用之前的 `unload` 函数
    - 这意味着如果执行两次 `linux` 命令，第一次加载的内核会被卸载
 
-2. **卸载过程**（`grub_linux_unload()`）：
+2. **卸载过程分析**：
+
+   **`grub_linux_unload()` 函数**（`grub/grub-core/loader/i386/linux.c`）：
    ```c
-   // grub/grub-core/loader/i386/linux.c
    static grub_err_t
    grub_linux_unload (void)
    {
-       // 释放临时缓冲区内存（prot_mode_mem，通常在 16MB+）
-       if (prot_mode_mem)
-           grub_relocator_free_chunk (relocator, prot_mode_chunk);
-       
-       // 释放其他资源
-       grub_free (kernel);
-       grub_free (linux_params);
-       
-       loaded = 0;
+       grub_dl_unref (my_mod);      // 减少模块引用计数
+       loaded = 0;                   // 清除加载标志
+       grub_free (linux_cmdline);    // 释放命令行参数字符串
+       linux_cmdline = 0;
        return GRUB_ERR_NONE;
    }
    ```
+   
+   **⚠️ 关键点**：`grub_linux_unload()` **不直接释放临时缓冲区内存**（`prot_mode_mem`）。
+   
+   **实际的资源释放机制**：
+   
+   临时缓冲区内存的释放是在**加载新内核时自动完成的**，通过 `allocate_pages()` 函数：
+   
+   ```c
+   // grub/grub-core/loader/i386/linux.c
+   static void
+   free_pages (void)
+   {
+       grub_relocator_unload (relocator);  // 释放 relocator 和所有 chunk
+       relocator = NULL;
+       prot_mode_mem = initrd_mem = 0;     // 清除指针
+       prot_mode_target = initrd_mem_target = 0;
+   }
+   
+   static grub_err_t
+   allocate_pages (grub_size_t prot_size, ...)
+   {
+       // ⚠️ 关键：在分配新页面之前，先释放旧的
+       free_pages ();  // 释放之前内核的临时缓冲区
+       
+       // 然后分配新的临时缓冲区
+       relocator = grub_relocator_new ();
+       // ... 分配新的内存 ...
+   }
+   ```
+   
+   **完整的卸载流程**：
+   
+   当加载新内核时（执行第二个 `linux` 命令）：
+   ```
+   1. grub_loader_set_ex() 检测到已有内核加载
+      ↓
+   2. 调用 grub_linux_unload()
+      - 释放 linux_cmdline
+      - 设置 loaded = 0
+      ↓
+   3. grub_cmd_linux() 开始加载新内核
+      ↓
+   4. allocate_pages() 被调用
+      ↓
+   5. free_pages() 自动释放之前内核的临时缓冲区
+      - grub_relocator_unload (relocator)
+      - 释放 prot_mode_mem（临时缓冲区，16MB+）
+      - 释放 initrd_mem（如果存在）
+      ↓
+   6. 分配新内核的临时缓冲区
+   ```
+   
+   **为什么这样设计？**
+   - **简化卸载函数**：`grub_linux_unload()` 只负责清理轻量级资源
+   - **自动资源管理**：临时缓冲区在分配新缓冲区时自动释放，避免重复释放
+   - **错误处理**：如果新内核加载失败，旧的内核资源仍然可用
 
 3. **实际场景示例**：
    ```bash
@@ -1734,11 +1782,11 @@ grub_loader_set (grub_err_t (*boot) (void),
    0x100000 (1MB) → 内核 2（从临时缓冲区复制到此）
    ```
 
-5. **⚠️ 多内核时也需要复制吗？**
+4. **⚠️ 多内核时也需要复制吗？**
    
    **答案：是的，但只有最后一个内核会被复制并启动。**
    
-   **详细说明：**
+   **详细说明**：
    - **每个内核**在加载时都会：
      1. 分配临时缓冲区（通常在 16MB+）
      2. 将内核镜像复制到临时缓冲区
@@ -1746,9 +1794,14 @@ grub_loader_set (grub_err_t (*boot) (void),
      4. 注册启动函数
    
    - **当加载新内核时**：
-     1. 自动卸载之前的内核（调用 `grub_linux_unload()`）
-     2. 释放之前内核的临时缓冲区内存
-     3. 为新内核分配新的临时缓冲区
+     1. `grub_loader_set_ex()` 检测到已有内核，调用 `grub_linux_unload()`
+        - 释放 `linux_cmdline` 字符串
+        - 设置 `loaded = 0`
+     2. `grub_cmd_linux()` 开始加载新内核
+     3. `allocate_pages()` 被调用，首先调用 `free_pages()`
+        - 释放之前内核的临时缓冲区（`prot_mode_mem`，16MB+）
+        - 释放 relocator 和所有 chunk
+     4. 为新内核分配新的临时缓冲区
    
    - **boot 时**：
      1. 只有**最后一个加载的内核**会被复制到 0x100000
