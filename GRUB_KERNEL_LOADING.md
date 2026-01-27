@@ -351,7 +351,121 @@ grub_main (void)
     //   - 典型 x86_64-efi 配置：ext2, part_gpt, efi_gop, normal, linux, search, ls
     //   - 可以通过 grub-install 或 grub-mkimage 的 --modules 参数自定义
     //
-    // 源代码位置：grub/grub-core/kern/main.c:58-75
+    // 📋 分析过程和方法：
+    //
+    // 1. 模块定义文件（Makefile.core.def）：
+    //    源代码位置：grub/grub-core/Makefile.core.def
+    //    这是 GRUB 构建系统的核心配置文件，定义了所有可用的模块
+    //    每个模块通过以下格式定义：
+    //    ```
+    //    module = {
+    //      name = ext2;                    // 模块名称
+    //      common = fs/ext2.c;             // 源代码文件（所有平台通用）
+    //      i386_pc = disk/i386/pc/...;     // 平台特定源文件（可选）
+    //      enable = i386_pc;               // 启用条件（可选）
+    //    };
+    //    ```
+    //    示例模块定义：
+    //    - ext2 模块：grub/grub-core/Makefile.core.def:1491-1494
+    //      ```def
+    //      module = {
+    //        name = ext2;
+    //        common = fs/ext2.c;
+    //      };
+    //      ```
+    //    - biosdisk 模块：grub/grub-core/Makefile.core.def:1356-1360
+    //      ```def
+    //      module = {
+    //        name = biosdisk;
+    //        i386_pc = disk/i386/pc/biosdisk.c;
+    //        enable = i386_pc;
+    //      };
+    //      ```
+    //    - linux 模块：grub/grub-core/Makefile.core.def:1897-1913
+    //      ```def
+    //      module = {
+    //        name = linux;
+    //        x86 = loader/i386/linux.c;
+    //        i386_pc = lib/i386/pc/vesa_modes_table.c;
+    //        ...
+    //      };
+    //      ```
+    //
+    // 2. 目录结构分析：
+    //    通过查看源代码目录结构，可以了解模块的分类：
+    //    ```bash
+    //    # 文件系统模块（42 个）
+    //    ls /Users/weli/works/grub/grub-core/fs/*.c
+    //    # 输出：ext2.c, fat.c, iso9660.c, btrfs.c, xfs.c, ntfs.c, ...
+    //
+    //    # 磁盘驱动模块（24 个）
+    //    ls /Users/weli/works/grub/grub-core/disk/*.c
+    //    # 输出：biosdisk.c, ahci.c, ata.c, scsi.c, lvm.c, cryptodisk.c, ...
+    //
+    //    # 分区表模块（11 个）
+    //    ls /Users/weli/works/grub/grub-core/partmap/*.c
+    //    # 输出：msdos.c, gpt.c, apple.c, sun.c, plan.c, ...
+    //
+    //    # 加载器模块
+    //    ls /Users/weli/works/grub/grub-core/loader/*.c
+    //    # 输出：i386/linux.c, efi/linux.c, i386/pc/linux.c, ...
+    //
+    //    # 命令模块
+    //    ls /Users/weli/works/grub/grub-core/commands/*.c
+    //    # 输出：normal.c, search.c, ls.c, cat.c, set.c, ...
+    //
+    //    # 终端模块
+    //    ls /Users/weli/works/grub/grub-core/term/*.c
+    //    # 输出：gfxterm.c, vga_text.c, serial.c, at_keyboard.c, ...
+    //
+    //    # 视频模块
+    //    ls /Users/weli/works/grub/grub-core/video/*.c
+    //    # 输出：vbe.c, vga.c, efi_gop.c, efi_uga.c, ...
+    //    ```
+    //
+    // 3. 模块加载代码分析：
+    //    源代码位置：grub/grub-core/kern/main.c:58-75
+    //    ```c
+    //    static void
+    //    grub_load_modules (void)
+    //    {
+    //      struct grub_module_header *header;
+    //      FOR_MODULES (header)  // 遍历 core.img 中的所有模块
+    //      {
+    //        if (header->type != OBJ_TYPE_ELF)
+    //          continue;
+    //        // 加载所有 ELF 格式的模块
+    //        grub_dl_load_core (...);
+    //      }
+    //    }
+    //    ```
+    //    关键点：
+    //    - FOR_MODULES 宏遍历 core.img 中嵌入的所有模块
+    //    - 只加载 OBJ_TYPE_ELF 类型的模块（ELF 格式的可执行模块）
+    //    - 使用 grub_dl_load_core() 从内存加载模块（不是从文件系统）
+    //
+    // 4. 模块注册机制：
+    //    每个模块通过 GRUB_MOD_INIT 宏注册命令和功能
+    //    示例（linux 模块）：
+    //    源代码位置：grub/grub-core/loader/i386/linux.c:1171-1178
+    //    ```c
+    //    GRUB_MOD_INIT(linux)
+    //    {
+    //      cmd_linux = grub_register_command ("linux", grub_cmd_linux, ...);
+    //      cmd_initrd = grub_register_command ("initrd", grub_cmd_initrd, ...);
+    //    }
+    //    ```
+    //
+    // 5. 如何确定默认嵌入的模块：
+    //    - grub-install 会根据平台自动选择默认模块
+    //    - 可以通过 --modules 参数查看或自定义
+    //    - 典型命令：grub-install --modules "ext2 part_msdos biosdisk normal linux search ls"
+    //
+    // 源代码位置：
+    //   - 模块定义：grub/grub-core/Makefile.core.def
+    //   - 模块加载：grub/grub-core/kern/main.c:58-75
+    //   - 模块注册：各模块的 GRUB_MOD_INIT 宏（如 loader/i386/linux.c:1171）
+    //   - 目录结构：grub/grub-core/{fs,disk,partmap,loader,commands,term,video}/
 
     grub_boot_time ("After loading embedded modules.");
 
