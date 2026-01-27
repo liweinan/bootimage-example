@@ -20,7 +20,7 @@ grub_cmd_linux()（执行 linux 命令）
     ├─ 源代码位置：grub/grub-core/loader/i386/linux.c:680-1062
     ├─ 加载内核镜像到临时缓冲区（通常在 16MB+，不是 0x100000）
     ├─ 设置内核启动参数（boot_params）
-    ├─ 最终目标地址：0x100000（boot 时 relocator 复制到此）
+    ├─ 最终目标地址：0x100000（boot 时 relocator 代码会将内核复制到此）
     └─ 注册启动函数 grub_linux_boot()
         ↓
 grub_cmd_initrd()（执行 initrd 命令，可选）
@@ -838,8 +838,13 @@ grub_parser_execute("grub.cfg 内容")
 3. **内存布局与 Relocator 机制**：
    - GRUB 解压后也在 0x100000（1MB），与内核目标地址相同
    - 内核**先被加载到 relocator 管理的临时缓冲区**（通常在 0x1000000 = 16MB 以上）
-   - `boot` 命令执行时，relocator 代码被复制到**低内存**（0x1000-0x9a000）
-   - 执行 relocator：将内核从临时位置复制到 0x100000，然后跳转
+   - `boot` 命令执行时：
+     - 构建 relocator 代码（包含复制内核的代码 + 跳转代码）
+     - 将 relocator 代码复制到**低内存**（0x1000-0x9a000）
+     - 执行 relocator 代码：
+       1. 将内核从临时缓冲区（16MB+）复制到 0x100000
+       2. 切换到实模式
+       3. 跳转到内核入口点（code32_start @ 0x100000）
    - 此时 GRUB 代码被覆盖，但已不需要
 
 **Relocator 数据结构（`grub-core/lib/relocator.c:56-65`）：**
@@ -1158,8 +1163,8 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
     //      - 0x1000000 = 16 * 1024 * 1024 = 16 MB（硬编码在源代码中）
     //      - 选择 16MB 的原因：避开 GRUB 区域，避开系统保留区域，历史原因
     // 返回两个地址：
-    //   - prot_mode_mem：临时缓冲区地址（GRUB 用于写入数据，通常在 16MB+）
-    //   - prot_mode_target：最终目标地址（0x100000，boot 时 relocator 复制到此）
+   //   - prot_mode_mem：临时缓冲区地址（GRUB 用于写入数据，通常在 16MB+）
+   //   - prot_mode_target：最终目标地址（0x100000，boot 时 relocator 代码会将内核复制到此）
     
     // 步骤 9: 复制内核到临时缓冲区（不是最终位置！）
     // 注意：这里只是复制文件内容到内存，不解压
@@ -1836,7 +1841,13 @@ menuentry "Linux 5.x.x" {
 # 1. linux 命令 → grub_cmd_linux() 加载内核到临时缓冲区（通常在 16MB+）
 # 2. initrd 命令 → grub_cmd_initrd() 加载 initramfs
 # 3. menuentry 结束后隐式 boot → grub_linux_boot() → grub_relocator32_boot()
-# 4. relocator 将内核从临时缓冲区复制到 0x100000，然后跳转到内核入口点（code32_start）
+# 4. boot → grub_linux_boot() → grub_relocator32_boot()
+#    - 构建 relocator 代码（包含复制内核的代码 + 跳转代码）
+#    - 将 relocator 代码复制到安全区域（0x1000-0x9a000）
+#    - 执行 relocator 代码：
+#      a. 将内核从临时缓冲区（16MB+）复制到 0x100000
+#      b. 切换到实模式
+#      c. 跳转到内核入口点（code32_start @ 0x100000）
 ```
 
 ### grub_linux_boot() 函数
@@ -1901,23 +1912,36 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
     grub_relocator32_eip = state.eip;  // 内核入口点地址（code32_start）
     grub_relocator32_esi = state.esi;  // boot_params 地址
     
-    // 步骤 3: 将 relocator 代码复制到安全区域
-    // ⚠️ 关键问题 1：relocator 代码具体对应哪个文件？
-    // 答案：grub/grub-core/lib/i386/relocator32.S
-    // 这是一个汇编文件，包含切换到实模式并跳转到内核的代码
-    // &grub_relocator32_start 是这段代码在 GRUB 内存中的起始地址
-    grub_memmove (relocator_mem, &grub_relocator32_start, RELOCATOR_SIZEOF (32));
+    // 步骤 3: 将 relocator32.S 的基础代码复制到安全区域
+    // 这是 relocator 的基础框架代码（relocator32.S）
+    grub_memmove (get_virtual_current_address (ch), &grub_relocator32_start,
+                  RELOCATOR_SIZEOF (32));
     
-    // 步骤 4: 执行跳转（关闭中断，跳转到安全区域的 relocator 代码）
+    // 步骤 4: 构建完整的 relocator 代码（包含复制内核的代码）
+    // ⚠️ 关键：relocator 代码不是简单的跳转代码，而是包含：
+    //   1. preamble：初始化代码
+    //   2. forward/backward 复制代码：将内核从临时缓冲区（src = 16MB+）复制到目标（target = 0x100000）
+    //   3. jumper：切换到实模式并跳转到内核入口点的代码
+    // 这些代码是在 grub_relocator_prepare_relocs() 中动态生成的
+    err = grub_relocator_prepare_relocs (rel, 
+                                         get_physical_target_address (ch),  // 安全区域的物理地址
+                                         &relst,  // 输出：构建好的 relocator 代码地址
+                                         NULL);
+    
+    // 步骤 5: 执行跳转（关闭中断，跳转到构建好的 relocator 代码）
     asm volatile ("cli");
-    ((void (*) (void)) relocator_mem) ();  // 跳转到安全区域的 relocator 代码
-    // relocator 代码会：
-    //   1. 切换到实模式（从保护模式切换回来）
-    //   2. 设置段寄存器（CS、DS、ES、SS）
-    //   3. 设置栈指针（ESP）
-    //   4. 从 grub_relocator32_eip 读取地址并加载到 EIP 寄存器
-    //   5. 执行远跳转（ljmp）到内核入口点（code32_start）
-    //   6. 此时 ESI 寄存器包含 boot_params 的地址
+    ((void (*) (void)) relst) ();  // 跳转到构建好的 relocator 代码
+    // relocator 代码执行顺序：
+    //   1. preamble：初始化
+    //   2. forward/backward 复制代码：将内核从临时缓冲区（16MB+）复制到 0x100000
+    //      - 如果 src < target：使用 backward 复制（从高地址向低地址复制）
+    //      - 如果 src > target：使用 forward 复制（从低地址向高地址复制）
+    //   3. 切换到实模式（从保护模式切换回来）
+    //   4. 设置段寄存器（CS、DS、ES、SS）
+    //   5. 设置栈指针（ESP）
+    //   6. 从 grub_relocator32_eip 读取地址并加载到 EIP 寄存器
+    //   7. 执行远跳转（ljmp）到内核入口点（code32_start @ 0x100000）
+    //   8. 此时 ESI 寄存器包含 boot_params 的地址
 }
 ```
 
@@ -2053,10 +2077,26 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
 **relocator 代码的作用：**
 
 relocator 代码是一个"桥梁"，负责：
-1. **模式切换**：从保护模式切换到实模式
-2. **环境准备**：设置段寄存器、栈指针、寄存器状态
-3. **安全跳转**：从安全区域执行，确保不被覆盖
-4. **参数传递**：确保 `ESI` 寄存器包含 `boot_params` 地址
+1. **复制内核**：将内核从临时缓冲区（16MB+）复制到最终目标（0x100000）
+   - 如果 `src < target`：使用 backward 复制（从高地址向低地址复制）
+   - 如果 `src > target`：使用 forward 复制（从低地址向高地址复制）
+2. **模式切换**：从保护模式切换到实模式
+3. **环境准备**：设置段寄存器、栈指针、寄存器状态
+4. **安全跳转**：从安全区域执行，确保不被覆盖
+5. **参数传递**：确保 `ESI` 寄存器包含 `boot_params` 地址
+
+**relocator 代码的组成**（由 `grub_relocator_prepare_relocs()` 动态生成）：
+
+```
+relocator 代码 = preamble（初始化）
+              + forward/backward 复制代码（如果 src != target）
+              + jumper（跳转到内核入口点）
+```
+
+**关键点**：
+- **relocator 代码本身**被复制到安全区域（0x1000-0x9a000）
+- **relocator 代码中包含复制内核的逻辑**（forward/backward 复制代码）
+- **内核**被复制到 0x100000（由 relocator 代码中的复制逻辑执行）
 
 **如果直接跳转会发生什么？**
 
