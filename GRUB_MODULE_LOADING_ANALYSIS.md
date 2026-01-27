@@ -8,10 +8,237 @@
 
 GRUB 的 `grub_load_modules()` 函数通过 `FOR_MODULES` 宏遍历 `core.img` 中嵌入的所有模块，并加载 ELF 格式的模块。这个过程涉及：
 
-1. **模块信息结构**（`grub_module_info`）：位于 `grub_modbase`，包含模块区域的元数据
-2. **模块头部结构**（`grub_module_header`）：每个模块都有一个头部，包含类型和大小
-3. **FOR_MODULES 宏**：遍历所有模块的循环宏
-4. **模块加载**：使用 `grub_dl_load_core()` 从内存加载模块
+1. **模块列表定义**：模块列表在构建 `core.img` 时通过 `grub-mkimage` 或 `grub-install` 指定
+2. **模块信息结构**（`grub_module_info`）：位于 `grub_modbase`，包含模块区域的元数据
+3. **模块头部结构**（`grub_module_header`）：每个模块都有一个头部，包含类型和大小
+4. **FOR_MODULES 宏**：遍历所有模块的循环宏
+5. **模块加载**：使用 `grub_dl_load_core()` 从内存加载模块
+
+## 模块列表的定义位置
+
+**关键问题**：`FOR_MODULES` 宏遍历的模块列表是在哪里定义的？
+
+**答案**：模块列表在构建 `core.img` 时通过 `grub-mkimage` 或 `grub-install` 指定，并嵌入到 `core.img` 中。
+
+### 1. 模块列表的构建过程
+
+**源代码位置**：`grub/util/mkimage.c:883-910`
+
+```c
+void
+grub_install_generate_image (const char *dir, const char *prefix,
+                             FILE *out, const char *outname, char *mods[],
+                             ...)
+{
+    // mods[] 是模块名称数组（如 ["ext2", "part_msdos", "linux", NULL]）
+    
+    // 步骤 1: 解析模块依赖关系
+    path_list = grub_util_resolve_dependencies (dir, "moddep.lst", mods);
+    // 读取 moddep.lst 文件，解析每个模块的依赖关系
+    // 返回完整的模块文件路径列表（包括依赖模块）
+    
+    // 步骤 2: 计算总大小
+    total_module_size = sizeof(struct grub_module_info);
+    for (p = path_list; p; p = p->next)
+        total_module_size += grub_util_get_image_size(p->name) + sizeof(struct grub_module_header);
+    
+    // 步骤 3: 构建模块信息头部
+    modinfo->magic = GRUB_MODULE_MAGIC;
+    modinfo->offset = sizeof(struct grub_module_info);
+    modinfo->size = total_module_size;
+    
+    // 步骤 4: 追加每个模块
+    for (p = path_list; p; p = p->next)
+    {
+        struct grub_module_header *header = (kernel_img + offset);
+        header->type = OBJ_TYPE_ELF;
+        header->size = mod_size + sizeof(*header);
+        offset += sizeof(*header);
+        
+        // 复制模块文件内容
+        grub_util_load_image(p->name, kernel_img + offset);
+        offset += mod_size;
+    }
+}
+```
+
+### 2. 模块列表的来源
+
+#### 方式 1：通过 grub-mkimage 命令行参数
+
+**用户直接指定**：
+```bash
+grub-mkimage --modules "ext2 part_msdos biosdisk normal linux search ls" \
+             --output /boot/grub/i386-pc/core.img
+```
+
+**源代码位置**：`grub/util/grub-mkimage.c:273`
+```c
+// 解析 --modules 参数
+if (strcmp(arg, "--modules") == 0)
+{
+    arguments->modules[arguments->nmodules++] = xstrdup(next_arg);
+}
+```
+
+#### 方式 2：通过 grub-install（自动检测）
+
+**grub-install 会根据以下信息自动添加模块**：
+
+1. **平台特定模块**（根据 `--target` 参数）：
+   - **i386-pc**：`biosdisk`（BIOS 磁盘驱动）
+   - **x86_64-efi**：`efidisk`（EFI 磁盘驱动）
+
+2. **文件系统检测**（`probe_mods()` 函数）：
+   - 检测根文件系统的文件系统类型
+   - 自动添加对应的文件系统模块（如 `ext2`, `xfs`, `btrfs` 等）
+   - **源代码位置**：`grub/util/grub-install.c:420-477`
+
+3. **分区表检测**（`push_partmap_module()` 函数）：
+   - 检测分区表类型（MBR、GPT 等）
+   - 自动添加对应的分区表模块（如 `part_msdos`, `part_gpt`）
+   - **源代码位置**：`grub/util/grub-install.c:399-411`
+
+4. **压缩算法模块**（`decompressors()` 函数）：
+   - 根据压缩算法自动添加（如 `gzio`, `xzio`, `lzopio`）
+   - **源代码位置**：`grub/util/grub-install-common.c:596-617`
+
+5. **其他必需模块**：
+   - `normal`：normal 模式（菜单显示）
+   - `linux`：Linux 内核加载器
+   - `search`：search 命令
+   - `ls`：ls 命令
+
+**源代码位置**：`grub/util/grub-install-common.c:726-730`
+```c
+grub_install_generate_image (dir, prefix, fp, outname,
+                             modules.entries,  // ← 模块列表
+                             memdisk_path, ...);
+```
+
+**modules.entries 的构建过程**：
+```c
+// grub/util/grub-install-common.c:359-360
+struct install_list modules = { 1, 0, 0, 0 };  // is_default=1, entries=NULL
+
+// 如果用户通过 --modules 参数指定
+grub_install_push_module("ext2");  // modules.is_default = 0, 添加模块
+
+// 或者 grub-install 自动检测并添加
+probe_mods(disk);  // 检测文件系统、分区表等，自动添加模块
+```
+
+### 3. 模块依赖关系解析
+
+**源代码位置**：`grub/util/resolve.c:236-276`
+
+```c
+struct grub_util_path_list *
+grub_util_resolve_dependencies (const char *prefix,
+                                const char *dep_list_file,  // "moddep.lst"
+                                char *modules[])            // 模块名称数组
+{
+    // 步骤 1: 读取 moddep.lst 文件
+    // moddep.lst 包含每个模块的依赖关系
+    // 格式示例：
+    //   ext2: part_msdos
+    //   linux: relocator
+    //   normal: search ls
+    dep_list = read_dep_list(fp);
+    
+    // 步骤 2: 解析每个模块及其依赖
+    while (*modules)
+    {
+        add_module(prefix, dep_list, &mod_list, &path_list, *modules);
+        // add_module 会递归添加依赖模块
+        modules++;
+    }
+    
+    // 步骤 3: 返回完整的模块文件路径列表（包括依赖）
+    return path_list;
+}
+```
+
+**moddep.lst 文件位置**：
+- 构建时：`/usr/lib/grub/<platform>/moddep.lst`
+- 运行时：`/boot/grub/<platform>/moddep.lst`
+
+**示例 moddep.lst 内容**：
+```
+ext2: part_msdos
+fat: part_msdos part_gpt
+linux: relocator
+normal: search ls configfile
+search: ls
+```
+
+### 4. 模块在 core.img 中的嵌入过程
+
+**源代码位置**：`grub/util/mkimage.c:1051-1065`
+
+```c
+// 遍历解析后的模块路径列表
+for (p = path_list; p; p = p->next)
+{
+    struct grub_module_header *header;
+    size_t mod_size;
+    
+    // 获取模块文件大小
+    mod_size = ALIGN_ADDR(grub_util_get_image_size(p->name));
+    
+    // 创建模块头部
+    header = (struct grub_module_header *)(kernel_img + offset);
+    header->type = grub_host_to_target32(OBJ_TYPE_ELF);
+    header->size = grub_host_to_target32(mod_size + sizeof(*header));
+    offset += sizeof(*header);
+    
+    // 复制模块文件内容（ELF 格式的 .mod 文件）
+    grub_util_load_image(p->name, kernel_img + offset);
+    offset += mod_size;
+}
+```
+
+### 5. 总结：模块列表的定义流程
+
+```
+1. 用户或 grub-install 指定模块列表
+   ├─ 方式 1: grub-mkimage --modules "ext2 part_msdos linux"
+   └─ 方式 2: grub-install（自动检测文件系统、分区表等）
+       ├─ probe_mods() 检测文件系统 → 添加 ext2, xfs 等
+       ├─ push_partmap_module() 检测分区表 → 添加 part_msdos, part_gpt
+       ├─ decompressors() 根据压缩算法 → 添加 gzio, xzio
+       └─ 添加必需模块：normal, linux, search, ls
+   
+2. grub_util_resolve_dependencies() 解析依赖
+   ├─ 读取 moddep.lst 文件
+   ├─ 解析每个模块的依赖关系
+   └─ 返回完整的模块文件路径列表（包括依赖）
+   
+3. grub_install_generate_image() 构建 core.img
+   ├─ 计算所有模块的总大小
+   ├─ 创建 grub_module_info 头部
+   └─ 为每个模块创建头部并追加模块数据
+   
+4. 模块被嵌入到 core.img 中
+   └─ 位于 GRUB 核心代码之后（grub_modbase）
+   
+5. 运行时 grub_load_modules() 加载
+   └─ FOR_MODULES 宏遍历所有嵌入的模块
+       └─ 加载 OBJ_TYPE_ELF 类型的模块
+```
+
+### 6. 关键源代码文件位置
+
+| 功能 | 文件路径 | 说明 |
+|------|---------|------|
+| 模块列表构建 | `grub/util/mkimage.c:883-1065` | `grub_install_generate_image()` |
+| 依赖关系解析 | `grub/util/resolve.c:236-276` | `grub_util_resolve_dependencies()` |
+| 模块添加函数 | `grub/util/grub-install-common.c:394-407` | `grub_install_push_module()` |
+| 文件系统检测 | `grub/util/grub-install.c:420-477` | `probe_mods()` |
+| 分区表检测 | `grub/util/grub-install.c:399-411` | `push_partmap_module()` |
+| 压缩模块添加 | `grub/util/grub-install-common.c:596-617` | `decompressors()` |
+| 模块加载 | `grub/grub-core/kern/main.c:58-75` | `grub_load_modules()` |
+| FOR_MODULES 宏 | `grub/include/grub/kernel.h:104-110` | 遍历宏定义 |
 
 ## 数据结构定义
 
