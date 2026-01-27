@@ -444,6 +444,9 @@ grub_main (void)
     //    - 只加载 OBJ_TYPE_ELF 类型的模块（ELF 格式的可执行模块）
     //    - 使用 grub_dl_load_core() 从内存加载模块（不是从文件系统）
     //
+    //    ⚠️ 详细分析：关于 FOR_MODULES 宏的工作原理、模块数据结构、内存布局等，
+    //    请参见 [GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)
+    //
     // 4. 模块注册机制：
     //    每个模块通过 GRUB_MOD_INIT 宏注册命令和功能
     //    示例（linux 模块）：
@@ -461,10 +464,15 @@ grub_main (void)
     //    - 可以通过 --modules 参数查看或自定义
     //    - 典型命令：grub-install --modules "ext2 part_msdos biosdisk normal linux search ls"
     //
+    // ⚠️ 详细分析：关于 FOR_MODULES 宏的读取过程、模块数据结构、内存布局等，
+    // 请参见 [GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)
+    //
     // 源代码位置：
     //   - 模块定义：grub/grub-core/Makefile.core.def
     //   - 模块加载：grub/grub-core/kern/main.c:58-75
     //   - 模块注册：各模块的 GRUB_MOD_INIT 宏（如 loader/i386/linux.c:1171）
+    //   - FOR_MODULES 宏：grub/include/grub/kernel.h:104-110
+    //   - 数据结构：grub/include/grub/kernel.h:39-69
     //   - 目录结构：grub/grub-core/{fs,disk,partmap,loader,commands,term,video}/
 
     grub_boot_time ("After loading embedded modules.");
