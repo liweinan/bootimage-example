@@ -2101,8 +2101,15 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
    ```
    
    **关键区别**：
-   - **BIOS**：内核必须复制到 0x100000，因为地址计算基于这个固定地址
-   - **UEFI**：内核可以加载到任意地址，EFI 固件负责处理地址重定位
+   - **BIOS**：
+     - 内核入口点是 setup 代码（`header.S`），期望在 0x100000
+     - `code32_start` 是相对于 0x100000 的偏移
+     - 必须复制到 0x100000，因为地址计算基于这个固定地址
+   - **UEFI**：
+     - 内核入口点是 EFI stub（`efi32_stub_entry`/`efi64_stub_entry`），是位置无关的
+     - EFI stub 可以加载到任意地址，不需要在 0x100000
+     - EFI 固件通过 `LoadImage` 和 `StartImage` 服务处理地址重定位
+     - 解压代码会处理后续的地址重定位（如果是可重定位内核）
 
 6. **对比总结**：
 
@@ -2198,10 +2205,18 @@ relocator 代码 = preamble（初始化）
    - `boot_params.code32_start`：内核入口点地址
    - 这些地址都是基于内核在 0x100000 的假设计算的
 
-3. **内核 setup 代码期望在 0x100000**：
-   - 内核的 setup 代码（`arch/x86/boot/header.S`）中有硬编码的地址假设
-   - 即使内核是可重定位的，setup 代码仍然期望在 0x100000 位置
-   - 内核的解压代码也会假设自己在 0x100000
+3. **内核 setup 代码期望在 0x100000（仅 BIOS 模式）**：
+   - **BIOS 模式**：内核入口点是 setup 代码（`arch/x86/boot/header.S`）
+     - setup 代码期望在 0x100000 位置
+     - `code32_start` 是相对于 0x100000 的偏移
+     - 即使内核是可重定位的，setup 代码仍然期望在 0x100000 位置
+   - **UEFI 模式**：内核入口点是 EFI stub（`arch/x86/boot/startup/efi-mixed.S`）
+     - EFI stub 是**位置无关的**（使用相对地址，如 `call 1f; popl %ecx`）
+     - EFI stub 可以加载到任意地址，不需要在 0x100000
+     - EFI stub 会调用 `efi32_startup`，然后跳转到 `efi_stub_entry`
+     - 解压代码（`head_64.S`）会处理地址重定位：
+       - 如果是可重定位内核：计算实际加载地址
+       - 如果不是：使用 `LOAD_PHYSICAL_ADDR`（通常是 0x100000）
 
 4. **如果跳转到临时缓冲区需要大量调整**：
    - 需要重新计算所有 `boot_params` 中的地址
@@ -2214,7 +2229,15 @@ relocator 代码 = preamble（初始化）
    - 复制发生在模式切换之前，不会影响执行流程
    - 复制后，所有地址计算都是正确的，不需要额外调整
 
-**结论**：即使内核是可重定位的，GRUB 仍然选择复制内核到 0x100000，因为这是最简单、最安全、最兼容的方式。
+**结论**：
+- **BIOS 模式**：即使内核是可重定位的，GRUB 仍然选择复制内核到 0x100000，因为：
+  1. setup 代码期望在 0x100000
+  2. `code32_start` 和 `boot_params` 中的地址都是相对于 0x100000 计算的
+  3. 这是最简单、最安全、最兼容的方式
+- **UEFI 模式**：不需要复制到 0x100000，因为：
+  1. EFI stub 是位置无关的，可以加载到任意地址
+  2. EFI 固件通过 `LoadImage` 和 `StartImage` 服务处理地址重定位
+  3. 解压代码会处理后续的地址重定位（如果是可重定位内核）
 
 **如果直接跳转会发生什么？**
 
