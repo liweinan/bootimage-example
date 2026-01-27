@@ -789,6 +789,12 @@ struct grub_relocator_chunk {
 ```c
 if (relocatable)
 {
+    // ⚠️ 问题 1：为什么还要尝试 preferred_address (0x100000)？
+    // 虽然 GRUB 代码在 0x100000，但尝试这个地址有以下原因：
+    // 1. 代码路径统一：可重定位内核可能不需要精确在 0x100000
+    // 2. 兼容性：某些特殊系统配置可能允许在 0x100000 分配
+    // 3. 理论上，如果 GRUB 代码已被清理或系统内存布局特殊，可能成功
+    // 4. 实际运行中，这个尝试几乎总是失败，但代码逻辑保持统一
     // 第一次尝试：在 preferred_address (0x100000) 分配
     // min_addr = max_addr = 0x100000，表示只接受这个精确地址
     err = grub_relocator_alloc_chunk_align(relocator, &ch,
@@ -797,16 +803,35 @@ if (relocatable)
                                             prot_size, 1,
                                             GRUB_RELOCATOR_PREFERENCE_LOW, 1);
     
+    // ⚠️ 问题 2：如何分析代码得出 16MB？
+    // 代码中直接写的是 0x1000000，这就是 16MB：
+    //   0x1000000 = 16 * 1024 * 1024 = 16,777,216 字节 = 16 MB
+    // 选择 16MB 的原因：
+    // 1. 避开 GRUB 代码区域（0x100000 到约 0x118000，约 1.1MB）
+    // 2. 避开可能的系统保留区域（如 ACPI、BIOS 数据等）
+    // 3. 16MB 是一个常见的"安全边界"，确保有足够空间
+    // 4. 历史原因：早期 Linux 内核解压目标地址通常是 16MB
     // 如果失败，循环尝试在 16MB 以上分配（逐步降低对齐要求）
     for (; err && *align + 1 > min_align; (*align)--)
     {
         grub_errno = GRUB_ERR_NONE;
         err = grub_relocator_alloc_chunk_align(relocator, &ch,
-                                                0x1000000,           // min_addr = 16MB
+                                                0x1000000,           // min_addr = 16MB (硬编码)
                                                 UP_TO_TOP32(prot_size), // max_addr = 4GB - size
                                                 prot_size, 1 << *align,
                                                 GRUB_RELOCATOR_PREFERENCE_LOW, 1);
     }
+}
+else
+{
+    // 非可重定位内核：必须精确在 preferred_address (0x100000)
+    // 这种情况下，如果 0x100000 被占用，分配会直接失败
+    err = grub_relocator_alloc_chunk_align(relocator, &ch,
+                                            preferred_address,  // min_addr = 0x100000
+                                            preferred_address,  // max_addr = 0x100000
+                                            prot_size, 1,
+                                            GRUB_RELOCATOR_PREFERENCE_LOW, 1);
+    // 如果失败，内核无法加载（非可重定位内核必须在这个地址）
 }
 
 prot_mode_mem = get_virtual_current_address(ch);    // 临时位置（src）
@@ -889,6 +914,68 @@ for (i = 0; i < num_regions; i++)
     grub_mm_init_region ((void *) beg, fin - beg);
 }
 ```
+
+**两个关键问题的详细解答：**
+
+**问题 1：既然 GRUB 代码在 0x100000，为什么还要尝试 preferred_address？**
+
+虽然 GRUB 代码确实在 0x100000，但代码仍会尝试在这个地址分配，原因如下：
+
+1. **代码路径统一**：
+   - 可重定位内核（`relocatable = true`）理论上可以在不同地址加载
+   - 代码逻辑统一处理，先尝试首选地址，失败后再回退
+   - 这样代码更简洁，不需要特殊判断
+
+2. **兼容性考虑**：
+   - 某些特殊系统配置可能允许在 0x100000 分配（例如 GRUB 代码已被清理）
+   - 某些嵌入式系统或特殊引导场景可能有不同的内存布局
+   - 保持代码的通用性，不假设所有情况都会失败
+
+3. **实际运行情况**：
+   - **在标准 PC 系统上，这个尝试几乎总是失败**（因为 GRUB 代码占用）
+   - 但代码仍会执行这个尝试，然后立即回退到 16MB 以上
+   - 性能影响可忽略（只是一次内存分配尝试）
+
+4. **非可重定位内核的情况**：
+   - 如果内核不可重定位（`relocatable = false`），必须精确在 0x100000
+   - 这种情况下，如果 0x100000 被占用，分配会直接失败，内核无法加载
+   - 可重定位内核的优势就是可以回退到其他地址
+
+**问题 2：如何分析代码得出 16MB？**
+
+16MB 是**硬编码在源代码中的值**，分析过程如下：
+
+1. **源代码位置**：
+   ```c
+   // grub-core/loader/i386/linux.c:805
+   err = grub_relocator_alloc_chunk_align(relocator, &ch,
+                                           0x1000000,  // ← 这里就是 16MB
+                                           UP_TO_TOP32(prot_size),
+                                           ...);
+   ```
+
+2. **数值计算**：
+   ```
+   0x1000000 = 16 * 1024 * 1024 = 16,777,216 字节 = 16 MB
+   ```
+
+3. **为什么选择 16MB？**
+   - **避开 GRUB 区域**：GRUB 代码在 0x100000 到约 0x118000（约 1.1MB），16MB 远高于此
+   - **避开系统保留区域**：BIOS 可能在某些低地址区域保留内存（如 ACPI、BIOS 数据等）
+   - **安全边界**：16MB 是一个常见的"安全边界"，确保有足够的连续内存空间
+   - **历史原因**：早期 Linux 内核解压目标地址通常是 16MB（`CONFIG_PHYSICAL_START` 默认值）
+   - **对齐考虑**：16MB 是 2^24，便于内存对齐和地址计算
+
+4. **代码分析步骤**：
+   - 在 GRUB 源代码中搜索 `0x1000000`
+   - 找到 `grub-core/loader/i386/linux.c` 中的分配逻辑
+   - 查看上下文，理解这是 fallback 地址
+   - 计算 `0x1000000` 的十进制值：16 * 1024 * 1024 = 16 MB
+
+5. **实际验证**：
+   - 可以通过调试 GRUB 或查看内存映射来验证
+   - 在 GRUB 命令行执行 `lsmem` 或查看内存布局
+   - 确认临时缓冲区确实在 16MB 以上
 
 **`grub_modules_get_end()` 实现（`grub-core/kern/main.c:44-54`）：**
 
@@ -995,9 +1082,13 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
     allocate_pages (prot_size, &align, min_align, relocatable, preferred_address);
     // allocate_pages 内部调用 grub_relocator_alloc_chunk_align()：
     //   1. 首先尝试在 preferred_address (0x100000) 分配
-    //   2. 如果失败（GRUB 代码占用），则在 0x1000000 (16MB) 以上分配
+    //      - 对于可重定位内核：这个尝试几乎总是失败（GRUB 代码占用）
+    //      - 但代码仍会尝试，保持逻辑统一和兼容性
+    //   2. 如果失败，则在 0x1000000 (16MB) 以上分配
+    //      - 0x1000000 = 16 * 1024 * 1024 = 16 MB（硬编码在源代码中）
+    //      - 选择 16MB 的原因：避开 GRUB 区域，避开系统保留区域，历史原因
     // 返回两个地址：
-    //   - prot_mode_mem：临时缓冲区地址（GRUB 用于写入数据）
+    //   - prot_mode_mem：临时缓冲区地址（GRUB 用于写入数据，通常在 16MB+）
     //   - prot_mode_target：最终目标地址（0x100000，boot 时 relocator 复制到此）
     
     // 步骤 9: 复制内核到临时缓冲区（不是最终位置！）
