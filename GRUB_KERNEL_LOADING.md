@@ -4,7 +4,9 @@
 
 ## 流程概述
 
-从 `_start` 调用 `grub_main()` 后，GRUB 开始加载 Linux 内核的完整流程：
+从 `_start` 调用 `grub_main()` 后，GRUB 开始加载 Linux 内核的完整流程。**BIOS 和 UEFI 的启动流程不同**：
+
+### BIOS 启动流程
 
 ```
 grub_main()（grub/grub-core/kern/main.c）
@@ -49,6 +51,65 @@ Linux 内核 Setup 代码（实模式）
     ├─ 初始化基本环境
     ├─ 切换到保护模式
     └─ 跳转到压缩内核解压代码
+```
+
+### UEFI 启动流程
+
+```
+grub_main()（grub/grub-core/kern/main.c）
+    ├─ 源代码位置：grub/grub-core/kern/main.c
+    ├─ 解析 grub.cfg 配置文件
+    ├─ 显示启动菜单（如果配置）
+    ├─ 用户选择启动 Linux 内核
+    └─ 执行 menuentry 中的命令：
+        ↓
+grub_cmd_linux()（执行 linux 命令）
+    ├─ 源代码位置：grub/grub-core/loader/efi/linux.c:477-600
+    ├─ 验证内核格式（PE/COFF，UEFI stub 内核）
+    ├─ 分配内存（使用 EFI AllocatePages）
+    ├─ 加载内核镜像到内存
+    ├─ 准备命令行参数（转换为 UTF-16）
+    └─ 注册启动函数 grub_linux_boot()
+        ↓
+grub_cmd_initrd()（执行 initrd 命令，可选）
+    ├─ 源代码位置：grub/grub-core/loader/efi/linux.c:400-476
+    ├─ 方式 1：LoadFile2 协议（现代内核，image_version >= 1）
+    │   └─ 安装 LoadFile2 协议，内核通过协议读取 initrd
+    └─ 方式 2：直接加载（非 x86 架构或旧内核）
+        ├─ 分配内存
+        ├─ 加载 initrd 到内存
+        └─ 设置 FDT（设备树）中的 initrd 信息
+        ↓
+用户按 Enter 选择启动项
+        ↓
+grub_linux_boot() → grub_arch_efi_linux_boot_image()
+    ├─ 源代码位置：grub/grub-core/loader/efi/linux.c:270-280
+    └─ 调用 grub_arch_efi_linux_boot_image()
+        ↓
+grub_arch_efi_linux_boot_image() → grub_efi_start_image()
+    ├─ 源代码位置：grub/grub-core/loader/efi/linux.c:194-280
+    ├─ 创建内存映射设备路径（Memory Mapped Device Path）
+    ├─ 使用 EFI LoadImage 服务加载内核
+    │   └─ grub_efi_load_image(image_handle, device_path, kernel_addr, size)
+    ├─ 设置命令行参数（load_options，UTF-16 格式）
+    └─ 使用 EFI StartImage 服务启动内核
+        └─ grub_efi_start_image(image_handle, 0, NULL)
+            ↓
+EFI 固件执行内核（通过 StartImage 服务）
+    ├─ EFI 固件负责：
+    │   ├─ 设置 CPU 状态（寄存器、段、分页等）
+    │   ├─ 准备内核执行环境
+    │   └─ 跳转到内核入口点（PE/COFF EntryPoint）
+    └─ 控制权转移到内核（GRUB 不再执行）
+        ↓
+Linux 内核 EFI stub 代码（保护模式/长模式）
+    ├─ 源代码位置：linux/arch/x86/boot/compressed/efi_stub_64.S
+    ├─ 运行模式：保护模式/长模式（UEFI 环境）
+    ├─ 验证内核签名（PE/COFF 格式）
+    ├─ 处理 EFI 系统表（EFI System Table）
+    ├─ 处理命令行参数（从 load_options 读取）
+    ├─ 处理 initrd（通过 LoadFile2 协议或 FDT）
+    └─ 继续内核初始化流程
         ↓
 压缩内核解压代码（startup_32）
     ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
@@ -82,10 +143,18 @@ startup_64（64 位内核入口点）
         └─ 最终调用 start_kernel()
 ```
 
-**关键点：**
-- **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
-- **用户交互触发**：跳转由用户在菜单中选择启动项时触发
-- **寄存器状态**：跳转时 `ESI` 包含 `boot_params` 地址，`EIP` 指向内核入口点（`code32_start`）
+**关键点对比：**
+
+| 特性 | BIOS 启动 | UEFI 启动 |
+|------|----------|----------|
+| **延迟执行机制** | ✅ `grub_cmd_linux()` 只负责准备，不执行跳转 | ✅ 相同 |
+| **用户交互触发** | ✅ 跳转由用户在菜单中选择启动项时触发 | ✅ 相同 |
+| **寄存器状态** | `ESI` = `boot_params` 地址<br>`EIP` = `code32_start` | 由 EFI 固件设置（通过 `StartImage` 服务） |
+| **跳转方式** | relocator 代码手动跳转 | EFI `StartImage` 服务 |
+| **内核格式** | bzImage（实模式 setup + 压缩内核） | PE/COFF（UEFI stub 内核） |
+| **内核入口点** | `code32_start`（实模式代码） | PE/COFF EntryPoint（保护模式/长模式） |
+| **模式切换** | 需要（保护模式 → 实模式） | 不需要（都在保护模式/长模式） |
+| **参数传递** | `boot_params` 结构（通过 `ESI` 寄存器） | EFI System Table + 命令行参数（通过 `load_options`） |
 
 ## 核心函数详解
 
@@ -1258,6 +1327,268 @@ fail:
 0x2F000000 - 0x2FFFFFFF  initrd（尽量在高地址）
                          ↑ ramdisk_image 指向这里
 ```
+
+## UEFI 启动流程详解
+
+**⚠️ 注意：** 以下内容专门针对 **UEFI 启动方式**，与 BIOS 启动方式不同。
+
+### UEFI 启动流程概述
+
+UEFI 启动流程与 BIOS 的主要区别：
+
+1. **内核格式**：UEFI 使用 PE/COFF 格式的内核（UEFI stub 内核），而不是传统的 bzImage
+2. **启动方式**：使用 EFI 的 `LoadImage` 和 `StartImage` 服务，而不是 relocator 代码
+3. **运行模式**：GRUB 和内核都在保护模式/长模式下运行，不需要模式切换
+4. **参数传递**：通过 EFI System Table 和命令行参数，而不是 `boot_params` 结构
+
+### grub_cmd_linux() 函数（UEFI 版本）
+
+**源代码位置：** `grub/grub-core/loader/efi/linux.c:477-600`
+
+**功能：**
+- 验证内核格式（必须是 PE/COFF 格式，UEFI stub 内核）
+- 分配内存（使用 EFI `AllocatePages` 服务）
+- 加载内核镜像到内存
+- 准备命令行参数（转换为 UTF-16 格式）
+- 注册启动函数 `grub_linux_boot()`
+
+**完整源代码分析：**
+
+```c
+// grub/grub-core/loader/efi/linux.c:477-600
+static grub_err_t
+grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
+{
+    grub_file_t file = 0;
+    struct linux_arch_kernel_header lh;
+    grub_err_t err;
+
+    // 步骤 1: 打开内核文件
+    file = grub_file_open (argv[0], GRUB_FILE_TYPE_LINUX_KERNEL);
+    
+    // 步骤 2: 验证内核格式（必须是 PE/COFF，UEFI stub 内核）
+    if (grub_arch_efi_linux_load_image_header (file, &lh) != GRUB_ERR_NONE)
+    {
+        // 如果不是 UEFI stub 内核，回退到传统 BIOS 加载方式（仅 x86）
+        #if defined(__i386__) || defined(__x86_64__)
+        return grub_cmd_linux_x86_legacy (cmd, argc, argv);
+        #else
+        goto fail;  // 非 x86 架构必须使用 UEFI stub 内核
+        #endif
+    }
+    
+    // 步骤 3: 分配内存（使用 EFI AllocatePages 服务）
+    kernel_size = grub_file_size (file);
+    kernel_addr = grub_efi_allocate_any_pages (
+        GRUB_EFI_BYTES_TO_PAGES (kernel_size));
+    
+    // 步骤 4: 加载内核镜像到内存
+    grub_file_seek (file, 0);
+    grub_file_read (file, kernel_addr, kernel_size);
+    
+    // 步骤 5: 准备命令行参数（转换为 UTF-16）
+    cmdline_size = grub_loader_cmdline_size (argc, argv) + sizeof (LINUX_IMAGE);
+    linux_args = grub_malloc (cmdline_size);
+    grub_create_loader_cmdline (argc, argv, linux_args, ...);
+    
+    // 步骤 6: 注册启动函数
+    grub_loader_set (grub_linux_boot, grub_linux_unload, 0);
+    loaded = 1;
+}
+```
+
+**关键点：**
+
+1. **内核格式验证**：
+   - 必须包含 PE/COFF 头部（`GRUB_PE32_MAGIC`）
+   - 必须是 UEFI stub 内核（编译时启用 `CONFIG_EFI_STUB`）
+   - 如果不是，x86 架构会回退到传统 BIOS 加载方式
+
+2. **内存分配**：
+   - 使用 `grub_efi_allocate_any_pages()`（EFI `AllocatePages` 服务）
+   - 不需要指定固定地址（如 0x100000），EFI 会自动分配
+
+3. **命令行参数**：
+   - 转换为 UTF-16 格式（EFI 使用 UTF-16 字符串）
+   - 存储在 `linux_args` 中，后续传递给内核
+
+### grub_cmd_initrd() 函数（UEFI 版本）
+
+**源代码位置：** `grub/grub-core/loader/efi/linux.c:400-476`
+
+**功能：**
+- 支持两种 initrd 加载方式：
+  1. **LoadFile2 协议**（现代内核，image_version >= 1）
+  2. **直接加载**（非 x86 架构或旧内核）
+
+**LoadFile2 协议方式（推荐）：**
+
+```c
+// grub/grub-core/loader/efi/linux.c:400-476
+static grub_err_t
+grub_cmd_initrd (grub_command_t cmd, int argc, char *argv[])
+{
+    // 步骤 1: 检查是否使用 LoadFile2 协议
+    if (initrd_use_loadfile2)
+    {
+        // 安装 LoadFile2 协议
+        status = b->install_multiple_protocol_interfaces (
+            &initrd_lf2_handle,
+            &load_file2_guid,
+            &initrd_lf2,  // LoadFile2 协议接口
+            &device_path_guid,
+            &initrd_lf2_device_path,
+            NULL);
+        
+        // 内核启动后，会通过 LoadFile2 协议读取 initrd
+        // GRUB 不需要预先加载 initrd 到内存
+        return GRUB_ERR_NONE;
+    }
+    
+    // 步骤 2: 直接加载方式（非 x86 架构或旧内核）
+    #if !defined(__i386__) && !defined(__x86_64__)
+    initrd_size = grub_get_initrd_size (&initrd_ctx);
+    initrd_mem = allocate_initrd_mem (initrd_pages);
+    grub_initrd_load (&initrd_ctx, initrd_mem);
+    
+    // 设置 FDT（设备树）中的 initrd 信息
+    grub_fdt_set_prop64 (fdt, node, "linux,initrd-start", initrd_start);
+    grub_fdt_set_prop64 (fdt, node, "linux,initrd-end", initrd_end);
+    #endif
+}
+```
+
+**关键点：**
+
+1. **LoadFile2 协议**（现代方式）：
+   - GRUB 安装 LoadFile2 协议接口
+   - 内核启动后，通过协议读取 initrd（延迟加载）
+   - 不需要预先分配内存和加载 initrd
+
+2. **直接加载方式**（传统方式）：
+   - 预先分配内存并加载 initrd
+   - 对于非 x86 架构，通过 FDT（设备树）传递 initrd 信息
+   - 对于 x86 架构，回退到传统 BIOS 方式
+
+### grub_linux_boot() 函数（UEFI 版本）
+
+**源代码位置：** `grub/grub-core/loader/efi/linux.c:270-280`
+
+**功能：**
+- 调用 `grub_arch_efi_linux_boot_image()` 启动内核
+
+**完整源代码分析：**
+
+```c
+// grub/grub-core/loader/efi/linux.c:270-280
+static grub_err_t
+grub_linux_boot (void)
+{
+#if !defined(__i386__) && !defined(__x86_64__)
+    // 非 x86 架构：准备 FDT（设备树）
+    if (finalize_params_linux () != GRUB_ERR_NONE)
+        return grub_errno;
+#endif
+
+    // 调用 EFI 启动函数
+    return grub_arch_efi_linux_boot_image (
+        (grub_addr_t) kernel_addr,
+        kernel_size,
+        linux_args);
+}
+```
+
+### grub_arch_efi_linux_boot_image() 函数
+
+**源代码位置：** `grub/grub-core/loader/efi/linux.c:194-280`
+
+**功能：**
+- 创建内存映射设备路径（Memory Mapped Device Path）
+- 使用 EFI `LoadImage` 服务加载内核
+- 设置命令行参数（`load_options`）
+- 使用 EFI `StartImage` 服务启动内核
+
+**完整源代码分析：**
+
+```c
+// grub/grub-core/loader/efi/linux.c:194-280
+grub_arch_efi_linux_boot_image (grub_addr_t addr, grub_size_t size, char *args)
+{
+    grub_efi_memory_mapped_device_path_t *mempath;
+    grub_efi_handle_t image_handle;
+    grub_efi_status_t status;
+    grub_efi_loaded_image_t *loaded_image;
+    
+    // 步骤 1: 创建内存映射设备路径
+    mempath = grub_malloc (2 * sizeof (grub_efi_memory_mapped_device_path_t));
+    mempath[0].header.type = GRUB_EFI_HARDWARE_DEVICE_PATH_TYPE;
+    mempath[0].header.subtype = GRUB_EFI_MEMORY_MAPPED_DEVICE_PATH_SUBTYPE;
+    mempath[0].start_address = addr;  // 内核地址
+    mempath[0].end_address = addr + size;
+    
+    // 步骤 2: 使用 EFI LoadImage 服务加载内核
+    status = grub_efi_load_image (
+        0,                              // boot_policy = false
+        grub_efi_image_handle,         // parent_image_handle
+        (grub_efi_device_path_t *) mempath,  // device_path
+        (void *) addr,                  // source_buffer
+        size,                           // source_size
+        &image_handle);                 // image_handle (输出)
+    
+    // 步骤 3: 设置命令行参数（转换为 UTF-16）
+    loaded_image = grub_efi_get_loaded_image (image_handle);
+    args_len = grub_strlen (args);
+    len = (args_len + 1) * sizeof (grub_efi_char16_t);
+    loaded_image->load_options = grub_efi_allocate_any_pages (
+        GRUB_EFI_BYTES_TO_PAGES (len));
+    len = grub_utf8_to_utf16 (
+        loaded_image->load_options, len,
+        (grub_uint8_t *) args, args_len, NULL);
+    loaded_image->load_options_size = len * sizeof (grub_efi_char16_t);
+    
+    // 步骤 4: 使用 EFI StartImage 服务启动内核
+    // ⚠️ 关键：这是 EFI 固件提供的服务，负责：
+    //   1. 设置 CPU 状态（寄存器、段、分页等）
+    //   2. 准备内核执行环境
+    //   3. 跳转到内核入口点（PE/COFF EntryPoint）
+    //   4. 控制权转移到内核（GRUB 不再执行）
+    status = grub_efi_start_image (image_handle, 0, NULL);
+    
+    // 如果成功，不会返回（控制权已转移到内核）
+    // 如果返回，说明启动失败
+    grub_error (GRUB_ERR_BAD_OS, "start_image() returned 0x%x", status);
+}
+```
+
+**关键点：**
+
+1. **内存映射设备路径**：
+   - 告诉 EFI 固件内核在内存中的位置
+   - EFI 使用设备路径（Device Path）来标识资源
+
+2. **LoadImage 服务**：
+   - EFI 固件提供的服务，用于加载可执行镜像
+   - 解析 PE/COFF 头部，准备执行环境
+
+3. **StartImage 服务**：
+   - EFI 固件提供的服务，用于启动已加载的镜像
+   - **不需要 relocator 代码**：EFI 固件负责所有环境准备和跳转
+   - 控制权转移到内核后，GRUB 不再执行
+
+4. **参数传递**：
+   - 命令行参数通过 `load_options` 字段传递（UTF-16 格式）
+   - EFI System Table 通过 EFI 环境自动传递
+   - initrd 通过 LoadFile2 协议或 FDT 传递
+
+**UEFI vs BIOS 启动对比：**
+
+| 步骤 | BIOS 启动 | UEFI 启动 |
+|------|----------|----------|
+| **加载内核** | `grub_cmd_linux()` 直接读取文件到内存 | `grub_cmd_linux()` → `grub_efi_load_image()` |
+| **设置参数** | `boot_params` 结构 | `load_options`（UTF-16）+ EFI System Table |
+| **启动内核** | `grub_relocator32_boot()` 手动跳转 | `grub_efi_start_image()` EFI 服务 |
+| **模式切换** | 保护模式 → 实模式（relocator 代码） | 不需要（都在保护模式/长模式） |
+| **环境准备** | relocator 代码设置寄存器、段等 | EFI 固件自动处理 |
 
 ### GRUB loader 机制和 boot 命令
 
