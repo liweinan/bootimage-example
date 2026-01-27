@@ -270,6 +270,23 @@ grub_main (void)
     //   - 如果 linux.mod 嵌入在 core.img 中：grub_load_modules() 会自动加载，无需 insmod
     //   - 如果 linux.mod 不在 core.img 中：需要在 grub.cfg 中使用 insmod linux 加载
     //
+    // ⚠️ 重要说明：linux 命令是由 linux.mod 模块提供的
+    //   - linux.mod 是一个独立的 ELF 模块文件（/boot/grub/i386-pc/linux.mod）
+    //   - linux.mod 可以嵌入到 core.img 中，也可以作为独立文件存在
+    //   - 如果嵌入：grub_load_modules() 在步骤 8 自动加载，linux 命令立即可用
+    //   - 如果没有嵌入：需要在 grub.cfg 中使用 insmod linux 加载，然后才能使用 linux 命令
+    //   - 源代码位置：grub/grub-core/loader/i386/linux.c:1171-1178
+    //     ```c
+    //     GRUB_MOD_INIT(linux)
+    //     {
+    //       cmd_linux = grub_register_command ("linux", grub_cmd_linux, ...);
+    //       cmd_initrd = grub_register_command ("initrd", grub_cmd_initrd, ...);
+    //     }
+    //     ```
+    //   - 判断方法：
+    //     * 如果 grub.cfg 中没有 insmod linux，说明 linux.mod 已嵌入到 core.img 中
+    //     * 如果 grub.cfg 中有 insmod linux，说明 linux.mod 没有嵌入，需要从文件系统加载
+    //
     // 📋 核心模块分类（i386-pc 平台典型配置）：
     //
     // 1. 文件系统驱动模块（fs/）：
@@ -731,6 +748,8 @@ grub_core_cmd_insmod (struct grub_command *cmd, int argc, char *argv[])
 |------|----------|------|------|
 | 核心命令 | `grub_register_core_commands()` | `set`, `ls`, `insmod`, `unset` | 内置于 GRUB 内核，始终可用 |
 | 模块命令 | 各模块的 `GRUB_MOD_INIT()` | `linux`, `initrd`, `boot`, `search` | 需要加载模块后才能使用 |
+| | | | ⚠️ `linux` 命令由 `linux.mod` 提供（/boot/grub/i386-pc/linux.mod） |
+| | | | ⚠️ `linux.mod` 可以嵌入到 core.img 中，也可以作为独立文件 |
 
 **模块加载与命令注册机制：**
 
@@ -955,6 +974,15 @@ menuentry "Linux 5.x.x" {
 # iso/boot/grub/grub.cfg
 set root='cd0'  # 设置根设备为 CD-ROM
 
+# 加载必要的模块以支持 ISO 文件系统
+insmod iso9660
+insmod part_msdos
+insmod part_gpt
+insmod loopback
+
+# ⚠️ 注意：如果 linux.mod 没有嵌入到 core.img 中，需要添加：
+# insmod linux
+
 menuentry "Linux Kernel (Debian Installer)" {
     set root='cd0'
     linux /boot/vmlinuz root=/dev/ram0 rw console=ttyS0,115200
@@ -964,6 +992,8 @@ menuentry "Linux Kernel (Debian Installer)" {
 # - console=ttyS0,115200 用于串口输出（QEMU 中可用 -serial stdio 查看）
 # - 脚本下载的 "linux" 保存为 "vmlinuz"，"initrd.gz" 保存为 "initrd.img"
 # - GRUB 可以自动处理压缩的 initrd 文件（gzip 格式）
+# - 如果 grub.cfg 中没有 insmod linux，说明 linux.mod 已嵌入到 core.img 中
+# - 如果 grub.cfg 中有 insmod linux，说明 linux.mod 没有嵌入，需要从文件系统加载
 ```
 
 > **相关文档**：
