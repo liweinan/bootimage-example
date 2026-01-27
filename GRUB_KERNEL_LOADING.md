@@ -258,6 +258,26 @@ grub_main (void)
 
     // 步骤 9: 检查是否禁用 CLI（命令行界面）
     check_is_cli_disabled ();
+    // 功能：
+    //   - 检查 core.img 中是否有 OBJ_TYPE_DISABLE_CLI 类型的模块
+    //   - 如果找到，设置 cli_disabled = true，禁用命令行界面
+    // 用途：
+    //   - 主要用于安全启动（Secure Boot）或系统安全策略
+    //   - 防止用户通过命令行界面修改启动参数或执行未授权操作
+    //   - 与 BIOS/UEFI 启动模式无关（两种模式都支持此功能）
+    // 对后续执行流程的影响：
+    //   1. 菜单显示（normal/menu_text.c:181）：
+    //      - 如果 CLI 被禁用，不显示"按 'c' 进入命令行"的提示
+    //      - 用户只能选择菜单项，无法进入命令行编辑启动参数
+    //   2. 认证检查（normal/auth.c:242）：
+    //      - 如果 CLI 被禁用，直接拒绝访问命令行（返回 GRUB_ACCESS_DENIED）
+    //   3. Rescue 模式（kern/rescue_reader.c:82）：
+    //      - 如果 CLI 被禁用，阻止进入 rescue 模式的命令行
+    // 实际场景：
+    //   - 企业环境：管理员可能禁用 CLI，强制用户只能选择预定义的启动项
+    //   - 安全启动：配合 Secure Boot，防止恶意修改启动参数
+    //   - 嵌入式系统：某些嵌入式设备可能不需要交互式命令行
+    // 源代码位置：grub/grub-core/kern/main.c:263-276
 
     // 步骤 10: 设置根设备和前缀路径
     grub_set_prefix_and_root ();
