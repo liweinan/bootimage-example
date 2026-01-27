@@ -18,8 +18,9 @@ grub_main()（grub/grub-core/kern/main.c）
         ↓
 grub_cmd_linux()（执行 linux 命令）
     ├─ 源代码位置：grub/grub-core/loader/i386/linux.c:680-1062
-    ├─ 加载内核镜像到内存（0x100000）
+    ├─ 加载内核镜像到临时缓冲区（通常在 16MB+，不是 0x100000）
     ├─ 设置内核启动参数（boot_params）
+    ├─ 最终目标地址：0x100000（boot 时 relocator 复制到此）
     └─ 注册启动函数 grub_linux_boot()
         ↓
 grub_cmd_initrd()（执行 initrd 命令，可选）
@@ -676,7 +677,7 @@ menuentry "Linux 5.x.x" {
 
 # 用户按 Enter 选择 "Linux 5.x.x" 后，GRUB 执行 menuentry 中的命令：
 # 1. 执行 linux 命令 → 调用 grub_cmd_linux()
-#    - 加载内核到高地址（0x100000 = 1MB，不会覆盖 GRUB）
+#    - 加载内核到临时缓冲区（通常在 16MB+），boot 时复制到 0x100000
 #    - 注册 grub_linux_boot() 作为启动函数
 # 2. 执行 initrd 命令 → 调用 grub_cmd_initrd()
 #    - 加载 initramfs 到高地址
@@ -829,7 +830,7 @@ grub_parser_execute("grub.cfg 内容")
    - 用户在菜单界面选择并按 Enter 后，才执行所选 menuentry 中的命令
 
 2. **menuentry 执行流程**：
-   - 用户按 Enter 后，执行 `linux` 命令 → `grub_cmd_linux()` 加载内核到 0x100000（1MB）
+   - 用户按 Enter 后，执行 `linux` 命令 → `grub_cmd_linux()` 加载内核到临时缓冲区（通常在 16MB+）
    - 执行 `initrd` 命令 → `grub_cmd_initrd()` 加载 initramfs
    - menuentry 执行完毕后，GRUB 隐式调用 boot 命令
    - boot 命令调用 `grub_linux_boot()` → `grub_relocator32_boot()` 跳转到内核
@@ -1624,9 +1625,27 @@ void EXPORT_FUNC (grub_loader_set) (grub_err_t (*boot) (void),
   - `GRUB_LOADER_FLAG_PXE_NOT_UNLOAD = 2`：不卸载 PXE 资源
   - `GRUB_LOADER_FLAG_EFI_KEEP_ALLOCATED_MEMORY = 4`：保持 EFI 分配的内存
 
-**函数实现（`grub/grub-core/commands/boot.c:163-174`）：**
+**函数实现（`grub/grub-core/commands/boot.c:140-180`）：**
 
 ```c
+void
+grub_loader_set_ex (grub_err_t (*boot) (void *context),
+                    grub_err_t (*unload) (void *context),
+                    void *context,
+                    int flags)
+{
+    // ⚠️ 关键：如果已经加载了内核，先卸载之前的内核
+    if (grub_loader_loaded && grub_loader_unload_func)
+        grub_loader_unload_func (grub_loader_context);
+    
+    // 设置新的 loader
+    grub_loader_boot_func = boot;
+    grub_loader_unload_func = unload;
+    grub_loader_context = context;
+    grub_loader_flags = flags;
+    grub_loader_loaded = 1;
+}
+
 void
 grub_loader_set (grub_err_t (*boot) (void),
                  grub_err_t (*unload) (void),
@@ -1643,6 +1662,73 @@ grub_loader_set (grub_err_t (*boot) (void),
     simple_loader_hooks.unload = unload;  // 保存 grub_linux_unload
 }
 ```
+
+**⚠️ 多个内核加载的处理：**
+
+**问题：如果加载多个内核会怎样？**
+
+**答案：** GRUB 只保留**最后一个加载的内核**，之前的内核会被自动卸载。
+
+**详细说明：**
+
+1. **自动卸载机制**：
+   - `grub_loader_set_ex()` 在设置新的 loader 之前，会先调用之前的 `unload` 函数
+   - 这意味着如果执行两次 `linux` 命令，第一次加载的内核会被卸载
+
+2. **卸载过程**（`grub_linux_unload()`）：
+   ```c
+   // grub/grub-core/loader/i386/linux.c
+   static grub_err_t
+   grub_linux_unload (void)
+   {
+       // 释放临时缓冲区内存（prot_mode_mem，通常在 16MB+）
+       if (prot_mode_mem)
+           grub_relocator_free_chunk (relocator, prot_mode_chunk);
+       
+       // 释放其他资源
+       grub_free (kernel);
+       grub_free (linux_params);
+       
+       loaded = 0;
+       return GRUB_ERR_NONE;
+   }
+   ```
+
+3. **实际场景示例**：
+   ```bash
+   # 场景 1：在同一个 menuentry 中加载多个内核
+   menuentry "Test" {
+       linux /boot/vmlinuz-5.10 root=/dev/sda1    # 第一个内核
+       linux /boot/vmlinuz-5.15 root=/dev/sda1    # 第二个内核（第一个被卸载）
+       boot  # 只会启动第二个内核（5.15）
+   }
+   
+   # 场景 2：在不同 menuentry 中加载内核
+   menuentry "Linux 5.10" {
+       linux /boot/vmlinuz-5.10 root=/dev/sda1
+   }
+   menuentry "Linux 5.15" {
+       linux /boot/vmlinuz-5.15 root=/dev/sda1    # 如果之前选择了 5.10，它会被卸载
+   }
+   ```
+
+4. **内存布局（加载多个内核时）**：
+   ```
+   第一次加载内核：
+   0x1000000+ (16MB+) → 内核 1 临时缓冲区（prot_mode_mem）
+   
+   第二次加载内核（第一个被卸载）：
+   0x1000000+ (16MB+) → 内核 2 临时缓冲区（prot_mode_mem）
+   （内核 1 的内存已被释放）
+   
+   boot 时：
+   0x100000 (1MB) → 内核 2（从临时缓冲区复制到此）
+   ```
+
+5. **为什么这样设计？**
+   - **简化管理**：只保留一个内核，避免内存浪费
+   - **明确行为**：用户明确知道哪个内核会被启动
+   - **资源清理**：自动释放不需要的内核内存
 
 **全局状态变量（`grub/grub-core/commands/boot.c:30-33`）：**
 
@@ -1747,10 +1833,10 @@ menuentry "Linux 5.x.x" {
 }
 
 # 用户按 Enter 选择后，执行顺序：
-# 1. linux 命令 → grub_cmd_linux() 加载内核到 0x100000
+# 1. linux 命令 → grub_cmd_linux() 加载内核到临时缓冲区（通常在 16MB+）
 # 2. initrd 命令 → grub_cmd_initrd() 加载 initramfs
 # 3. menuentry 结束后隐式 boot → grub_linux_boot() → grub_relocator32_boot()
-# 4. 跳转到内核入口点（code32_start）
+# 4. relocator 将内核从临时缓冲区复制到 0x100000，然后跳转到内核入口点（code32_start）
 ```
 
 ### grub_linux_boot() 函数
@@ -1858,8 +1944,11 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
 
 1. **GRUB 代码位置问题**：
    - GRUB 解压后的代码在 `0x100000+`（1MB 以上）
-   - 内核镜像也加载到 `0x100000`（1MB）
-   - **内核会覆盖 GRUB 的代码区域**
+   - 内核的**最终目标地址**是 `0x100000`（1MB）
+   - **但内核不是直接加载到 0x100000**，而是：
+     - **临时缓冲区**：先加载到 `prot_mode_mem`（通常在 16MB+）
+     - **最终目标**：`prot_mode_target = 0x100000`（boot 时 relocator 复制到此）
+   - **内核最终会覆盖 GRUB 的代码区域**（在 boot 时复制后）
 
 2. **执行时机问题**：
    - `grub_relocator32_boot()` 在保护模式下执行（GRUB 的 C 代码）
