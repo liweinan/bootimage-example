@@ -248,6 +248,8 @@ grub_main (void)
 
     // 步骤 8: 加载嵌入的模块
     grub_load_modules ();
+    // ⚠️ 注意：这一步只加载嵌入在 core.img 中的模块
+    // 通过 insmod 命令加载的动态模块（文件系统中的 .mod 文件）不在这一步处理
     // 功能：
     //   - 遍历 core.img 中的所有模块（OBJ_TYPE_ELF 类型）
     //   - 使用 grub_dl_load_core() 加载每个模块
@@ -923,6 +925,7 @@ grub_register_command (const char *name,
 **功能：**
 - 解析并执行 `grub.cfg` 配置文件
 - **关键**：当遇到 `linux` 命令时，会调用 `grub_cmd_linux()` 加载内核
+- **⚠️ 处理 `insmod` 命令**：当遇到 `insmod` 命令时，会调用 `grub_core_cmd_insmod()` 加载动态模块
 
 **配置示例：**
 
@@ -1066,9 +1069,14 @@ grub_parser_execute("grub.cfg 内容")
     │   ├─ "set root='hd0,1'"
     │   │   └─ grub_env_set("root", "hd0,1")  // 设置环境变量
     │   │
-    │   ├─ "menuentry 'Linux' { linux /vmlinuz; initrd /initrd.img }"
+    │   ├─ "insmod gfxterm"  // ⚠️ 在 menuentry 外的 insmod 命令
+    │   │   └─ grub_core_cmd_insmod("gfxterm")
+    │   │       └─ grub_dl_load("gfxterm")  // 立即从文件系统加载模块
+    │   │           └─ grub_dl_load_file("/boot/grub/i386-pc/gfxterm.mod")
+    │   │
+    │   ├─ "menuentry 'Linux' { insmod linux; linux /vmlinuz; initrd /initrd.img }"
     │   │   └─ grub_cmd_menuentry()  // ⚠️ 只注册 menuentry，不执行内部命令
-    │   │       └─ 将 menuentry 添加到菜单列表
+    │   │       └─ 将 menuentry 添加到菜单列表（包括内部的 insmod 命令）
     │   │
     │   └─ ... 其他命令 ...
     │
@@ -1077,17 +1085,47 @@ grub_parser_execute("grub.cfg 内容")
 用户按 Enter 选择 menuentry 后：
     │
     └─ GRUB 执行该 menuentry 的命令
+        ├─ "insmod linux" → grub_core_cmd_insmod("linux")  // ⚠️ 此时才执行 menuentry 中的 insmod
+        │   └─ grub_dl_load("linux")  // 从文件系统加载模块
         ├─ "linux /vmlinuz" → grub_cmd_linux()
         ├─ "initrd /initrd.img" → grub_cmd_initrd()
         └─ 隐式 boot → grub_linux_boot()
 ```
 
+**⚠️ `insmod` 命令的处理时机：**
+
+1. **在 `menuentry` 外的 `insmod` 命令**：
+   - 在 `grub_parser_execute()` 解析 `grub.cfg` 时**立即执行**
+   - 例如：`grub.cfg` 顶部的 `insmod gfxterm` 会在显示菜单前加载模块
+   - **源代码位置**：`grub/grub-core/kern/main.c:364` → `grub_parser_execute(load_config)`
+
+2. **在 `menuentry` 内的 `insmod` 命令**：
+   - 在 `grub_parser_execute()` 解析时**不执行**（只注册 menuentry）
+   - 用户选择该 menuentry 并按 Enter 后**才执行**
+   - 例如：`menuentry "Linux" { insmod linux; linux /vmlinuz }` 中的 `insmod linux` 只在用户选择该菜单项时执行
+
+3. **`insmod` 命令的处理函数**：
+   - **源代码位置**：`grub/grub-core/kern/corecmd.c:76-93`
+   - 调用 `grub_dl_load()` 或 `grub_dl_load_file()` 从文件系统加载模块
+   - 加载的模块会注册其提供的命令（如 `linux` 命令由 `linux.mod` 提供）
+
 **关键点：**
 
 1. **配置文件解析时机**：
-   - `grub_parser_execute()` 在 `grub_main()` 中执行
-   - 解析 `grub.cfg` 时，**只是注册 menuentry**，不执行其中的命令
+   - `grub_parser_execute()` 在 `grub_main()` 中执行（**步骤 9**）
+   - 解析 `grub.cfg` 时：
+     - **menuentry 外的命令**（如 `insmod gfxterm`）**立即执行**
+     - **menuentry 内的命令**（如 `insmod linux`, `linux /vmlinuz`）**只注册，不执行**
    - 用户在菜单界面选择并按 Enter 后，才执行所选 menuentry 中的命令
+
+2. **`insmod` 命令的处理步骤**：
+   - **在 `grub_main()` 的步骤 9**：`grub_parser_execute(load_config)` 执行配置文件
+   - 当遇到 `insmod` 命令时：
+     - 调用 `grub_rescue_parse_line()` 解析命令行
+     - 调用 `grub_command_find("insmod")` 查找命令
+     - 调用 `grub_core_cmd_insmod()` 执行命令
+     - 调用 `grub_dl_load()` 或 `grub_dl_load_file()` 从文件系统加载模块
+     - 模块加载后，调用模块的 `grub_mod_init()` 注册其提供的命令
 
 2. **menuentry 执行流程**：
    - 用户按 Enter 后，执行 `linux` 命令 → `grub_cmd_linux()` 加载内核到临时缓冲区（通常在 16MB+）
