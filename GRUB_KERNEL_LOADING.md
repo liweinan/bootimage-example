@@ -267,6 +267,90 @@ grub_main (void)
     // 实际场景：
     //   - 如果 linux.mod 嵌入在 core.img 中：grub_load_modules() 会自动加载，无需 insmod
     //   - 如果 linux.mod 不在 core.img 中：需要在 grub.cfg 中使用 insmod linux 加载
+    //
+    // 📋 核心模块分类（i386-pc 平台典型配置）：
+    //
+    // 1. 文件系统驱动模块（fs/）：
+    //    - ext2：ext2/ext3/ext4 文件系统支持（最常用）
+    //    - fat：FAT12/FAT16/FAT32 文件系统支持（UEFI ESP 分区）
+    //    - iso9660：ISO 9660 文件系统支持（CD/DVD 镜像）
+    //    - btrfs：Btrfs 文件系统支持
+    //    - xfs：XFS 文件系统支持
+    //    - ntfs：NTFS 文件系统支持（Windows）
+    //    - hfs/hfsplus：HFS/HFS+ 文件系统支持（macOS）
+    //    - minix：Minix 文件系统支持
+    //    - jfs：JFS 文件系统支持
+    //    - f2fs：F2FS 文件系统支持
+    //    - erofs：EROFS 文件系统支持
+    //
+    // 2. 分区表模块（partmap/）：
+    //    - part_msdos：MBR 分区表支持（传统 BIOS）
+    //    - part_gpt：GPT 分区表支持（UEFI）
+    //    - part_apple：Apple 分区表支持（macOS）
+    //    - part_sun：Sun 分区表支持（SPARC）
+    //    - part_plan：Plan 9 分区表支持
+    //
+    // 3. 磁盘驱动模块（disk/）：
+    //    - biosdisk：BIOS 磁盘驱动（传统 BIOS，使用 INT 13h）
+    //    - ahci：AHCI SATA 控制器驱动
+    //    - ata：ATA/IDE 控制器驱动
+    //    - pata：PATA（并行 ATA）驱动
+    //    - scsi：SCSI 磁盘驱动
+    //    - usbms：USB 大容量存储设备驱动
+    //    - lvm：LVM（逻辑卷管理）支持
+    //    - mdraid_linux：Linux 软件 RAID 支持
+    //    - cryptodisk：加密磁盘支持（LUKS）
+    //    - luks/luks2：LUKS 加密支持
+    //    - geli：GELI 加密支持（FreeBSD）
+    //
+    // 4. 加载器模块（loader/）：
+    //    - linux：Linux 内核加载器（grub_cmd_linux, grub_cmd_initrd）
+    //    - multiboot：Multiboot 规范加载器
+    //    - multiboot2：Multiboot2 规范加载器
+    //    - xnu：macOS XNU 内核加载器
+    //    - chain：链式加载器（加载其他引导加载程序）
+    //    - efi：EFI 应用加载器（UEFI 模式）
+    //
+    // 5. 命令模块（commands/）：
+    //    - normal：normal 模式（菜单显示、用户交互）
+    //    - search：search 命令（查找文件系统）
+    //    - ls：ls 命令（列出文件）
+    //    - cat：cat 命令（显示文件内容）
+    //    - set：set 命令（设置环境变量）
+    //    - unset：unset 命令（取消环境变量）
+    //    - configfile：configfile 命令（加载配置文件）
+    //    - menuentry：menuentry 命令（定义菜单项）
+    //    - boot：boot 命令（启动内核）
+    //    - reboot：reboot 命令（重启系统）
+    //    - halt：halt 命令（关机）
+    //
+    // 6. 终端模块（term/）：
+    //    - gfxterm：图形终端支持（VGA、framebuffer）
+    //    - vga_text：VGA 文本模式终端
+    //    - serial：串口终端支持
+    //    - at_keyboard：AT 键盘驱动
+    //    - usb_keyboard：USB 键盘驱动
+    //
+    // 7. 视频模块（video/）：
+    //    - vbe：VBE（VESA BIOS Extensions）支持
+    //    - vga：VGA 视频支持
+    //    - efi_gop：EFI GOP（Graphics Output Protocol）支持（UEFI）
+    //    - efi_uga：EFI UGA（Universal Graphics Adapter）支持（UEFI）
+    //
+    // 8. 其他模块：
+    //    - relocator：代码重定位器（用于内核加载）
+    //    - verifiers：文件签名验证器（Secure Boot）
+    //    - gzio：gzip 压缩/解压支持
+    //    - xzio：xz 压缩/解压支持
+    //    - lzopio：lzop 压缩/解压支持
+    //    - font：字体加载支持
+    //    - gettext：国际化支持
+    //
+    // ⚠️ 注意：实际嵌入的模块取决于构建 core.img 时的配置
+    //   - 典型 i386-pc 配置：ext2, part_msdos, biosdisk, normal, linux, search, ls
+    //   - 典型 x86_64-efi 配置：ext2, part_gpt, efi_gop, normal, linux, search, ls
+    //   - 可以通过 grub-install 或 grub-mkimage 的 --modules 参数自定义
+    //
     // 源代码位置：grub/grub-core/kern/main.c:58-75
 
     grub_boot_time ("After loading embedded modules.");
