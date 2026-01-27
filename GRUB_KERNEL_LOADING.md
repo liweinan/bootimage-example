@@ -208,6 +208,25 @@ grub_main (void)
 
     // 步骤 4: 初始化验证器 API（用于验证文件签名）
     grub_verifiers_init ();
+    // 功能：
+    //   - 注册文件过滤器 GRUB_FILE_FILTER_VERIFY
+    //   - 当打开文件时，自动调用验证器验证文件签名
+    //   - 主要用于安全启动（Secure Boot）场景
+    // 验证的文件类型（根据 lockdown_verifier）：
+    //   - GRUB_FILE_TYPE_LINUX_KERNEL：Linux 内核（vmlinuz）
+    //   - GRUB_FILE_TYPE_GRUB_MODULE：GRUB 模块（文件系统驱动、命令等）
+    //   - GRUB_FILE_TYPE_MULTIBOOT_KERNEL：Multiboot 内核
+    //   - GRUB_FILE_TYPE_XEN_HYPERVISOR：Xen 虚拟机监控程序
+    //   - GRUB_FILE_TYPE_BSD_KERNEL：BSD 内核
+    //   - GRUB_FILE_TYPE_XNU_KERNEL：macOS 内核
+    //   - GRUB_FILE_TYPE_ACPI_TABLE：ACPI 表
+    //   - GRUB_FILE_TYPE_DEVICE_TREE_IMAGE：设备树镜像
+    //   - 以及其他可执行文件类型
+    // 工作原理：
+    //   - 当调用 grub_file_open() 打开文件时（如 grub_file_open(argv[0], GRUB_FILE_TYPE_LINUX_KERNEL)）
+    //   - 文件过滤器会自动调用 grub_verifiers_open() 验证文件签名
+    //   - 如果签名验证失败，文件打开会失败，阻止加载未签名的内核或模块
+    // 源代码位置：grub/grub-core/kern/verifiers.c:225-228
 
     // 步骤 5: 加载嵌入的配置文件（grub.cfg）
     grub_load_config ();
