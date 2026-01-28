@@ -18,7 +18,9 @@
 
 ## 补充说明文档
 
-- [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)（已拆分为：[x86 CPU 运行模式详解](X86_CPU_MODES.md)、[BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)、[BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)）
+- [x86 CPU 运行模式详解](X86_CPU_MODES.md)
+- [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)
+- [BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)
 - [BIOS 代码布局分析：128KB 映射区域内的代码与保护模式代码](BIOS_CODE_LAYOUT_ANALYSIS.md)
 - [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)
 - [boot.asm 与 GRUB boot.S 对比分析](BOOTSECTOR_COMPARISON.md)

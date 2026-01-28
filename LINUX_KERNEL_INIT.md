@@ -4,7 +4,7 @@
 
 > **相关文档**：
 > - **前置阶段**：关于 GRUB 跳转后的早期启动（Setup 代码、模式切换、startup_64），请参见 [Linux 内核早期启动详细流程](LINUX_KERNEL_EARLY_BOOT.md)
-> - 关于启动流程概述，请参见 [boot_flow.md](boot_flow.md)
+> - 关于启动流程概述，请参见 [BOOT_FLOW.md](BOOT_FLOW.md)
 > - 关于 GRUB 加载内核，请参见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)
 
 ## start_kernel() 初始化流程
@@ -584,7 +584,7 @@ sysret 返回用户空间
 
 ## 相关文档
 
-- [boot_flow.md](boot_flow.md) - 完整启动流程概述
+- [BOOT_FLOW.md](BOOT_FLOW.md) - 完整启动流程概述
 - [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) - GRUB 加载内核详解
 - [VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md) - vmlinuz 文件结构分析
 - [INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md) - initramfs 分析

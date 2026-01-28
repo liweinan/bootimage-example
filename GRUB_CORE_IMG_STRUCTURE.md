@@ -2,7 +2,7 @@
 
 本文档详细说明 GRUB `core.img` 的内部结构、构建过程、块列表机制以及相关源代码分析。
 
-> **相关文档**：关于 GRUB 启动流程，请参见 [boot_flow.md](boot_flow.md)。
+> **相关文档**：关于 GRUB 启动流程，请参见 [BOOT_FLOW.md](BOOT_FLOW.md)。
 
 ## core.img 概述
 
@@ -334,6 +334,6 @@ save_blocklists (grub_disk_addr_t sector, unsigned offset, unsigned length,
 
 ## 相关文档
 
-- [boot_flow.md](boot_flow.md) - GRUB 启动流程
+- [BOOT_FLOW.md](BOOT_FLOW.md) - GRUB 启动流程
 - [GRUB_ARCHITECTURE_AND_INIT.md](GRUB_ARCHITECTURE_AND_INIT.md) - GRUB 架构设计与初始化
 - [GRUB_MODE_SWITCHING.md](GRUB_MODE_SWITCHING.md) - GRUB 模式切换函数详解

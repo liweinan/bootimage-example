@@ -127,18 +127,16 @@ DISPLAY=:1 make run-gui
 ### BIOS 相关文档
 
 - **[BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md)** - BIOS 内存布局与地址映射详解
-- **[BIOS_MEMORY_MODE.md](BIOS_MEMORY_MODE.md)** - BIOS 内存模式分析
-- **[BIOS_MEMORY_MODE_ANALYSIS.md](BIOS_MEMORY_MODE_ANALYSIS.md)** - BIOS 内存模式详细分析
 - **[BIOS_MEMORY_QA.md](BIOS_MEMORY_QA.md)** - BIOS 内存相关问答
 - **[BIOS_CODE_LAYOUT_ANALYSIS.md](BIOS_CODE_LAYOUT_ANALYSIS.md)** - BIOS 代码布局分析
 - **[BIOS_INTERRUPT_COMPLETE.md](BIOS_INTERRUPT_COMPLETE.md)** - BIOS 中断完整文档
 - **[BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)** - BIOS IVT 与 Linux 内核 IDT 对比
-- **[bios_size.md](bios_size.md)** - BIOS 大小与映射关系详解
-- **[bios_verification_report.md](bios_verification_report.md)** - BIOS 固定地址验证报告
+- **[BIOS_SIZE.md](BIOS_SIZE.md)** - BIOS 大小与映射关系详解
+- **[BIOS_VERIFICATION_REPORT.md](BIOS_VERIFICATION_REPORT.md)** - BIOS 固定地址验证报告
 
 ### SeaBIOS 相关文档
 
-- **[fill_seabios_analysis.md](fill_seabios_analysis.md)** - SeaBIOS 与 Linux 内核地址转换机制对比分析
+- **[FILL_SEABIOS_ANALYSIS.md](FILL_SEABIOS_ANALYSIS.md)** - SeaBIOS 与 Linux 内核地址转换机制对比分析
 - **[SEABIOS_PROTECTION_MODE_CODE.md](SEABIOS_PROTECTION_MODE_CODE.md)** - SeaBIOS 保护模式代码的真正用途
 - **[SEABIOS_ENTRY_13_ANALYSIS.md](SEABIOS_ENTRY_13_ANALYSIS.md)** - SeaBIOS INT 13h 入口分析
 - **[SEABIOS_HANDLE_POST_ENTRY.md](SEABIOS_HANDLE_POST_ENTRY.md)** - SeaBIOS handle_post 入口分析
@@ -147,7 +145,6 @@ DISPLAY=:1 make run-gui
 
 - **[BOOT_FLOW.md](BOOT_FLOW.md)** - 计算机启动流程详解（从 QEMU 到 Linux 内核的完整流程）
 - **[BOOT_FLOW_NOTES.md](BOOT_FLOW_NOTES.md)** - 启动流程笔记
-- **[BOOT_FLOW_OPTIMIZATION_ANALYSIS.md](BOOT_FLOW_OPTIMIZATION_ANALYSIS.md)** - 启动流程优化分析
 - **[BOOT_FLOW_QA.md](BOOT_FLOW_QA.md)** - 启动流程问答
 - **[BOOT_FLOW_TIMELINE.md](BOOT_FLOW_TIMELINE.md)** - 启动流程完整时间线（从 QEMU 启动到 Linux 内核接管的详细时间序列）
 - **[BOOT_FLOW_SOURCE_INDEX.md](BOOT_FLOW_SOURCE_INDEX.md)** - 启动流程关键源代码文件索引
@@ -198,7 +195,7 @@ DISPLAY=:1 make run-gui
 ### 内存管理文档
 
 - **[LINUX_USERSPACE_MEMORY.md](LINUX_USERSPACE_MEMORY.md)** - Linux 用户空间内存管理
-- **[fill.md](fill.md)** - 内存填充相关文档
+- **[FILL.md](FILL.md)** - 内存填充相关文档
 
 ### UEFI 相关文档
 
@@ -220,10 +217,6 @@ DISPLAY=:1 make run-gui
 
 - **[DOS_BOOTLOADER.md](DOS_BOOTLOADER.md)** - DOS 的引导加载程序（Bootloader）概念
 - **[DOS_BIOS_INT_USAGE.md](DOS_BIOS_INT_USAGE.md)** - DOS 如何使用 BIOS 的 INT 服务
-### 分析与优化文档
-
-- **[BIOS_DOCS_OPTIMIZATION_ANALYSIS.md](BIOS_DOCS_OPTIMIZATION_ANALYSIS.md)** - BIOS 文档优化分析
-- **[EXTRACTION_ANALYSIS.md](EXTRACTION_ANALYSIS.md)** - 提取分析文档
 
 ### 分析与验证工具
 

@@ -602,7 +602,9 @@ reloc_preinit(void *f, void *arg)
 
 ### 相关文档
 
-- [BIOS 运行模式与内存访问详解](BIOS_MEMORY_MODE.md)（已拆分为：[x86 CPU 运行模式详解](X86_CPU_MODES.md)、[BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)、[BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)）
+- [x86 CPU 运行模式详解](X86_CPU_MODES.md)
+- [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)
+- [BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)
 - [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)
 - [BIOS 启动流程详解](BOOT_FLOW.md)
 

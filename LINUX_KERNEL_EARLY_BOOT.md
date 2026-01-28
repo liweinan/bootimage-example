@@ -4,7 +4,7 @@
 
 > **相关文档**：
 > - **后续阶段**：关于 `start_kernel()` 之后的内核初始化（子系统初始化、PID 0/1/2、syscall 设置），请参见 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md)
-> - 关于启动流程概述，请参见 [boot_flow.md](boot_flow.md)
+> - 关于启动流程概述，请参见 [BOOT_FLOW.md](BOOT_FLOW.md)
 
 ## 内核早期启动（64 位）
 
