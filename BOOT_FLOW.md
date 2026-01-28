@@ -4,6 +4,47 @@
 
 ---
 
+## 如何阅读本文档
+
+### 快速导航
+
+**按学习目标选择：**
+- 🎯 **了解完整启动流程** → 阅读本文档各章节概述
+- 🔍 **深入某个阶段** → 点击章节末尾的详细文档链接
+- ⏱️ **时间线视图** → [BOOT_FLOW_TIMELINE.md](BOOT_FLOW_TIMELINE.md) - 完整执行时间线
+- ❓ **常见问题** → [BOOT_FLOW_QA.md](BOOT_FLOW_QA.md) - Q&A 格式问答
+- 📚 **源代码索引** → [BOOT_FLOW_SOURCE_INDEX.md](BOOT_FLOW_SOURCE_INDEX.md) - 关键源文件位置
+
+### 文档层次结构
+
+```
+层级 1: 启动流程概述（本文档）
+  ├─ QEMU 硬件初始化
+  ├─ SeaBIOS 固件加载
+  ├─ BIOS 引导流程
+  ├─ GRUB 引导加载器
+  └─ Linux 内核启动
+
+层级 2: 详细分析文档
+  ├─ GRUB_KERNEL_LOADING.md - GRUB 加载内核完整流程
+  ├─ LINUX_KERNEL_EARLY_BOOT.md - 内核早期启动详细分析
+  ├─ LINUX_KERNEL_INIT.md - start_kernel() 初始化
+  └─ LINUX_KERNEL_INTERRUPT_TAKEOVER.md - 中断系统接管
+
+层级 3: 技术深度文档
+  ├─ BOOT_FLOW_NOTES.md - 16 个技术深度说明
+  ├─ X86_CPU_MODES.md - CPU 模式切换机制
+  ├─ BIOS_MEMORY_LAYOUT.md - 内存布局详解
+  └─ [其他专题文档 - 见下方相关文档索引]
+```
+
+**建议阅读路径：**
+1. **初学者**：先读本文档概述 → 再选择感兴趣的详细文档
+2. **深入研究**：本文档 → 层级 2 详细分析 → 层级 3 技术深度 → 源代码
+3. **问题导向**：先查看 BOOT_FLOW_QA.md → 根据答案中的链接深入
+
+---
+
 ## 目录
 
 - [QEMU 加载 SeaBIOS](#qemu-加载-seabios)
@@ -16,34 +57,62 @@
 - [关键源代码文件索引](#关键源代码文件索引)
 - [附录](#附录)
 
-## 补充说明文档
+## 相关文档索引
 
-- [x86 CPU 运行模式详解](X86_CPU_MODES.md)
-- [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)
-- [BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)
-- [BIOS 代码布局分析：128KB 映射区域内的代码与保护模式代码](BIOS_CODE_LAYOUT_ANALYSIS.md)
+### 核心参考文档（各阶段详细分析）
+
+这些文档提供各启动阶段的完整源代码分析和实现细节：
+
+- 📖 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md) - grub_main() 到内核入口点完整分析
+- 📖 [Linux 内核早期启动详细流程（64 位）](LINUX_KERNEL_EARLY_BOOT.md) - Setup 代码、模式切换、startup_64
+- 📖 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md) - start_kernel()、PID 0/1/2、系统调用初始化
+- 📖 [Linux 内核中断系统接管](LINUX_KERNEL_INTERRUPT_TAKEOVER.md) - IDT 设置、PIC 重编程、APIC 配置
+- 📖 [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md) - IVT、中断服务程序、硬件初始化
+
+### 系统层次专题文档
+
+**BIOS / 固件层：**
+- [x86 CPU 运行模式详解](X86_CPU_MODES.md) - 实模式、保护模式、长模式切换机制
+- [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md) - 内存映射、地址空间、ROM 映射
+- [BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md) - 常见内存相关问题解答
+- [BIOS 代码布局分析](BIOS_CODE_LAYOUT_ANALYSIS.md) - 128KB 映射区域与保护模式代码
+- [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md) - 中断向量表对比
+
+**SeaBIOS 实现：**
+- [SeaBIOS entry_13_official 实现详细分析](SEABIOS_ENTRY_13_ANALYSIS.md) - INT 13h 磁盘服务实现
+- [SeaBIOS handle_post 入口地址定义机制](SEABIOS_HANDLE_POST_ENTRY.md) - POST 入口点机制
+
+**GRUB 引导加载器：**
+- [GRUB Core 镜像结构与构建](GRUB_CORE_IMG_STRUCTURE.md) - core.img 结构、块列表、内存布局
+- [GRUB 模式切换机制](GRUB_MODE_SWITCHING.md) - real_to_prot、prot_to_real 实现
+- [GRUB BIOS 中断使用场景](GRUB_BIOS_INTERRUPT_USAGE.md) - 保护模式下调用 BIOS 服务
+
+**Linux 内核：**
+- [Linux 内核中断处理机制](LINUX_INTERRUPT_HANDLING.md) - Top Half 和 Bottom Half
+- [Linux 用户空间内存模型](LINUX_USERSPACE_MEMORY.md) - 内存管理、汇编内存访问
+- [vmlinuz 文件结构详解](VMLINUZ_STRUCTURE.md) - bzImage 格式、boot_params、Setup 代码
+- [Initramfs 分析](INITRAMFS_ANALYSIS.md) - initrd 内容、BusyBox 启动
+
+### 对比分析文档
+
 - [QEMU vs 真实硬件 BIOS 加载对比](QEMU_VS_HARDWARE_BIOS.md)
-- [boot.asm 与 GRUB boot.S 对比分析](BOOTSECTOR_COMPARISON.md)
 - [UEFI vs BIOS 引导机制对比](UEFI_VS_BIOS_BOOT.md)
-- [A20 地址线技术详解](A20_ADDRESS_LINE.md)
-- [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md)
+- [boot.asm vs GRUB boot.S 对比](BOOTSECTOR_COMPARISON.md)
 - [UEFI 中断处理机制](UEFI_INTERRUPT_HANDLING.md)
-- [SeaBIOS entry_13_official 实现详细分析](SEABIOS_ENTRY_13_ANALYSIS.md)
-- [SeaBIOS handle_post 入口地址定义机制分析](SEABIOS_HANDLE_POST_ENTRY.md)
 
-## 附录
+### 技术深度与参考资料
 
+- [BOOT_FLOW 技术细节说明](BOOT_FLOW_NOTES.md) - 16 个技术深度说明
+- [BOOT_FLOW 常见问题解答](BOOT_FLOW_QA.md) - Q&A 格式问答
+- [BOOT_FLOW 完整时间线](BOOT_FLOW_TIMELINE.md) - 从 QEMU 到内核的执行时间线
+- [BOOT_FLOW 源代码文件索引](BOOT_FLOW_SOURCE_INDEX.md) - 关键源代码文件位置
+- [A20 地址线技术详解](A20_ADDRESS_LINE.md) - 历史背景、启用机制
+
+### 示例与扩展
+
+- [最小引导扇区程序示例](BOOTSECTOR_EXAMPLE.md) - 完整代码示例、内存地址、中断服务
 - [附录A：键盘中断处理代码分析](APPENDIX_A_KEYBOARD_INTERRUPT.md)
 - [附录B：应用层事件机制](APPENDIX_B_EVENT_MECHANISM.md)
-- [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md) - 整合了所有中断相关内容的完整文档
-- [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)
-- [Linux 用户空间内存模型详解](LINUX_USERSPACE_MEMORY.md) - Linux 用户空间内存模型、内存管理和汇编内存访问
-- [BOOT_FLOW 技术细节说明](BOOT_FLOW_NOTES.md)
-- [BOOT_FLOW 常见问题解答](BOOT_FLOW_QA.md)
-
-### 最小引导扇区程序示例
-
-> **详细说明**：关于最小引导扇区程序的完整代码示例、关键内存地址和中断服务说明，请参见 [最小引导扇区程序示例](BOOTSECTOR_EXAMPLE.md)。
 
 ---
 
@@ -2227,286 +2296,124 @@ grub_main()（1MB 以上，0x100000+）
 
 ## GRUB 加载 Linux 内核
 
-### 从 grub_main() 到内核入口点
+### GRUB 加载内核流程概述
 
-**执行流程衔接：**
+GRUB 从 `grub_main()` 开始加载 Linux 内核的关键步骤：
 
-从 `_start` 调用 `grub_main()` 后，GRUB 开始加载 Linux 内核：
+**1. 内核加载 (grub_cmd_linux)**
+- 解析 grub.cfg 配置文件
+- 加载内核镜像到内存 (0x100000)
+- 设置 boot_params 结构（内核启动参数）
+- 加载 initramfs (如果存在)
 
-```
-grub_main()（grub/grub-core/kern/main.c）
-    ├─ 源代码位置：grub/grub-core/kern/main.c
-    ├─ 解析 grub.cfg 配置文件
-    ├─ 显示启动菜单（如果配置）
-    ├─ 用户选择启动 Linux 内核
-    └─ 执行 linux 命令 → grub_cmd_linux()
-        ↓
-grub_cmd_linux()（grub/grub-core/loader/i386/linux.c）
-    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
-    ├─ 加载内核镜像到内存（0x100000）
-    ├─ 设置内核启动参数（boot_params）
-    └─ 注册启动函数 grub_linux_boot()
-        ↓
-grub_linux_boot() → grub_relocator32_boot()
-    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
-    └─ 跳转到内核入口点（code32_start）
-        ↓
-grub_relocator32_boot() 跳转到内核入口点（code32_start）
-    ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
-    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 的偏移）
-    └─ 寄存器状态：
-        ├─ ESI = boot_params 地址
-        ├─ ESP = 栈指针
-        └─ EIP = code32_start（内核入口点）
-    ↓
-Linux 内核 Setup 代码（实模式）
-    ├─ 源代码位置：linux/arch/x86/boot/header.S
-    ├─ 内存位置：0x100000（1MB）或内核指定的地址
-    ├─ 运行模式：实模式（初始阶段）
-    ├─ 验证内核签名（boot_flag = 0xAA55）
-    ├─ 初始化基本环境
-    ├─ 切换到保护模式
-    └─ 跳转到压缩内核解压代码
-        ↓
-压缩内核解压代码（startup_32）
-    ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
-    ├─ 运行模式：32 位保护模式 → 64 位长模式
-    ├─ 设置页表（身份映射：物理地址 = 线性地址）
-    ├─ 切换到 64 位长模式
-    ├─ 解压内核（gzip 解压）
-    └─ 跳转到 startup_64
-        ↓
-startup_64（64 位内核入口点）
-    ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
-    ├─ 运行模式：64 位长模式
-    ├─ 保存 boot_params 结构地址（%RSI → %R15）
-    ├─ 设置初始内核栈
-    ├─ 设置 GS 段基址（per-CPU 数据）
-    ├─ 设置 GDT 和早期 IDT
-    ├─ 切换到内核代码段（__KERNEL_CS）
-    ├─ 激活内存加密（SEV/SME，如果支持）
-    ├─ 验证和清理 CPU 配置（verify_cpu）
-    └─ 继续内核初始化流程
-        ↓
-内核继续初始化（x86_64_start_kernel）
-    ├─ 源代码位置：linux/arch/x86/kernel/head64.c
-    ├─ 设置早期中断处理程序（idt_setup_early_handler）
-    │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
-    ├─ TDX 早期初始化（tdx_early_init，如果支持）
-    ├─ 复制引导数据（copy_bootdata）
-    ├─ 加载微码更新（load_ucode_boot）
-    ├─ 设置内核高地址映射
-    └─ 启动内核预留区域初始化（x86_64_start_reservations）
-        └─ 最终调用 start_kernel()
-            ↓
-start_kernel() → rest_init() → kernel_init() → 执行用户空间 init
-```
+**2. 跳转到内核 (grub_relocator32_boot)**
+- 切换到保护模式
+- 设置寄存器状态：
+  - ESI = boot_params 结构地址
+  - CS = 内核代码段
+  - EIP = code32_start (内核入口点)
+- 跳转到 Linux 内核 Setup 代码
 
-> **详细说明**：关于 `start_kernel()`、PID 0/1/2 进程、系统调用初始化等内核初始化的详细分析，请参见 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md)。
->
-> 关于 GRUB 加载内核的详细代码流程、内核镜像结构、内存布局、启动参数传递等，请参见 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md)。  
-> 关于 vmlinuz 文件结构的完整分析，请参见 [vmlinuz 文件详细结构分析](VMLINUZ_STRUCTURE.md)。
-
-**内核启动文档覆盖范围：**
+**3. 文档覆盖范围**
 
 ```
-LINUX_KERNEL_EARLY_BOOT.md          LINUX_KERNEL_INIT.md
-─────────────────────────────       ───────────────────────
-GRUB 跳转                            
+GRUB_KERNEL_LOADING.md              LINUX_KERNEL_EARLY_BOOT.md          LINUX_KERNEL_INIT.md
+───────────────────────             ────────────────────────────        ────────────────────
+grub_main()                         
     ↓                               
-Setup 代码（实模式）                  
+grub_cmd_linux()                    
     ↓                               
-模式切换（保护模式 → 长模式）          
-    ↓                               
-startup_64                          
-    ↓                               
-x86_64_start_kernel                 
-    ↓                               
-start_kernel() ─────────────────→   start_kernel()
+grub_relocator32_boot() ────────→   Setup 代码（实模式）
                                         ↓
-                                    子系统初始化
+                                    模式切换
                                         ↓
-                                    rest_init()
-                                        ↓
-                                    PID 0/1/2 创建
-                                        ↓
-                                    syscall 初始化
+                                    startup_64 ────────────────────→    start_kernel()
+                                        ↓                                   ↓
+                                    x86_64_start_kernel()               子系统初始化
+                                                                            ↓
+                                                                        PID 0/1/2 创建
 ```
+
+> 📖 **详细分析文档**：
+> - [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md) - 完整的源代码分析、内存布局、参数传递机制
+> - [GRUB Core 镜像结构与构建](GRUB_CORE_IMG_STRUCTURE.md) - core.img 结构、块列表机制
+> - [vmlinuz 文件详细结构分析](VMLINUZ_STRUCTURE.md) - bzImage 格式、Setup 代码、压缩内核结构
+
 
 ### 内核早期启动（64 位）
 
-**说明**：内核从 GRUB 跳转后，首先执行的是内核镜像中的 setup 代码（实模式），然后切换到保护模式，最终到达 `startup_64`。GRUB 跳转的地址是 `code32_start`，这是 setup 代码的入口点。
+内核从 GRUB 跳转后，经历以下关键阶段：
 
-**重要澄清：vmlinuz 文件的压缩结构**
+**1. Setup 代码（实模式）**
+- 源代码：linux/arch/x86/boot/header.S、main.c
+- 执行硬件检测、内存检测、参数处理
+- 调用 go_to_protected_mode() 切换到保护模式
 
-- **vmlinuz 文件包含两部分**：
-  1. **Setup 代码**（未压缩）：可以直接执行，GRUB 只是将其从磁盘复制到内存
-  2. **压缩的内核代码**（gzip 压缩）：需要由 Setup 代码解压
-- **GRUB 的作用**：只是将整个 vmlinuz 文件从磁盘复制到内存，**不解压**
-- **解压时机**：由内核自己的 Setup 代码完成解压，不是 GRUB
+**2. 解压内核（32 位保护模式 → 64 位长模式）**
+- 源代码：linux/arch/x86/boot/compressed/head_64.S (startup_32)
+- 关键步骤：
+  - 设置页表（身份映射）
+  - 启用 PAE (CR4.PAE = 1)
+  - 启用长模式 (EFER.LME = 1)
+  - 启用分页 (CR0.PG = 1) ← CPU 进入 64 位长模式
+  - 解压内核（gzip）
 
-**执行流程概述：**
+**3. 64 位内核入口（startup_64）**
+- 源代码：linux/arch/x86/kernel/head_64.S
+- 初始化 64 位环境：
+  - 保存 boot_params 地址 (%RSI → %R15)
+  - 设置内核栈、GS 段基址
+  - 设置 GDT 和早期 IDT
+  - 调用 x86_64_start_kernel() → start_kernel()
 
-```
-grub_relocator32_boot() 跳转到内核入口点（code32_start）
-    ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
-    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 的偏移）
-    └─ 寄存器状态：
-        ├─ ESI = boot_params 地址
-        ├─ ESP = 栈指针
-        └─ EIP = code32_start（内核入口点）
-    ↓
-Linux 内核 Setup 代码（实模式）
-    ├─ 源代码位置：linux/arch/x86/boot/header.S
-    ├─ 内存位置：0x100000（1MB）或内核指定的地址
-    ├─ 运行模式：实模式（初始阶段）
-    ├─ 验证内核签名（boot_flag = 0xAA55）
-    ├─ 初始化基本环境（main.c）
-    ├─ 切换到保护模式（go_to_protected_mode）
-    └─ 跳转到压缩内核解压代码（startup_32，32 位保护模式）
-        ↓
-压缩内核解压代码（startup_32）
-    ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
-    ├─ 运行模式：32 位保护模式 → 64 位长模式
-    ├─ 设置页表（身份映射：物理地址 = 线性地址）
-    ├─ 启用 PAE（CR4.PAE = 1）
-    ├─ 启用长模式（EFER.LME = 1）
-    ├─ 启用分页（CR0.PG = 1）← 此时 CPU 进入 64 位长模式
-    ├─ 解压内核（gzip 解压）
-    └─ 跳转到 startup_64
-        ↓
-startup_64（64 位内核入口点，已切换到长模式）
-    ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
-    ├─ 运行模式：64 位长模式
-    ├─ 保存 boot_params 结构地址（%RSI → %R15）
-    ├─ 设置初始内核栈
-    ├─ 设置 GS 段基址（per-CPU 数据）
-    ├─ 设置 GDT 和早期 IDT
-    ├─ 切换到内核代码段（__KERNEL_CS）
-    ├─ 激活内存加密（SEV/SME，如果支持）
-    ├─ 验证和清理 CPU 配置（verify_cpu）
-    └─ 继续内核初始化流程
-        ↓
-内核继续初始化（x86_64_start_kernel）
-    ├─ 源代码位置：linux/arch/x86/kernel/head64.c
-    ├─ 设置早期中断处理程序（idt_setup_early_handler）
-    ├─ TDX 早期初始化（tdx_early_init，如果支持）
-    ├─ 复制引导数据（copy_bootdata）
-    ├─ 加载微码更新（load_ucode_bsp）
-    ├─ 设置内核高地址映射
-    └─ 启动内核预留区域初始化（x86_64_start_reservations）
-        └─ 最终调用 start_kernel()
-```
+**4. vmlinuz 文件结构说明**
 
-**关键点：**
-- **Setup 代码**：在实模式下执行，负责硬件检测、内存检测、参数处理等
-- **模式切换**：实模式 → 32 位保护模式 → 64 位长模式
-- **解压时机**：由 `startup_32` 代码完成内核解压，不是 GRUB
-- **64 位长模式特征**：使用 64 位寄存器（%RSI, %R15）、%rip 相对寻址、64 位指令（movq, pushq, lretq）
+vmlinuz 文件包含两部分：
+1. **Setup 代码**（未压缩） - GRUB 直接加载到内存，可立即执行
+2. **压缩的内核代码**（gzip） - 由 Setup 代码中的 startup_32 解压
 
-> **详细说明**：关于内核早期启动的详细源代码分析，包括 Setup 代码（header.S、main.c、pm.c、pmjump.S）、模式切换详细步骤、startup_32 和 startup_64 的完整源代码等，请参见 [Linux 内核早期启动详细流程（64 位）](LINUX_KERNEL_EARLY_BOOT.md)。
+> 📖 **详细分析文档**：
+> - [Linux 内核早期启动详细流程（64 位）](LINUX_KERNEL_EARLY_BOOT.md) - Setup 代码、模式切换、startup_32/startup_64 完整源代码分析
+> - [vmlinuz 文件详细结构分析](VMLINUZ_STRUCTURE.md) - bzImage 格式、boot_params 结构
+> - [Linux 内核初始化详解](LINUX_KERNEL_INIT.md) - start_kernel() 之后的初始化流程
 
-### 早期 IDT 设置
 
-**源代码位置：** `linux/arch/x86/kernel/head64.c:276-292`
+### 内核中断系统接管
 
-内核在 `x86_64_start_kernel()` 中设置早期中断处理程序：
+内核通过以下步骤接管 BIOS 的中断系统：
 
-```c
-// 步骤 1: 设置早期中断处理程序
-// 建立内核自己的 IDT，取代 BIOS 的 IVT
-// 此时中断将路由到内核处理程序，而不是 BIOS
-idt_setup_early_handler();
+**1. 早期 IDT 设置 (x86_64_start_kernel)**
+- 源代码：linux/arch/x86/kernel/head64.c
+- 调用 `idt_setup_early_handler()` 建立内核 IDT
+- 建立早期陷阱处理程序（处理 CPU 异常）
+- 此时内核 IDT 替代 BIOS IVT
 
-// 步骤 2: TDX（Trust Domain Extensions）早期初始化
-tdx_early_init();
+**2. 8259A PIC 重新编程**
+- 源代码：linux/arch/x86/kernel/i8259.c
+- 重映射硬件中断向量：
+  - BIOS: IRQ0-7 → 0x08-0x0F, IRQ8-15 → 0x70-0x77
+  - 内核: IRQ0-7 → 0x20-0x27, IRQ8-15 → 0x28-0x2F
+- 避免与 CPU 异常向量 (0-31) 冲突
 
-// 步骤 3: 复制引导数据（从实模式数据区域）
-copy_bootdata(__va(real_mode_data));
+**3. APIC 和中断门设置**
+- 源代码：linux/arch/x86/kernel/idt.c
+- 调用 `idt_setup_apic_and_irq_gates()`：
+  - 设置 Local APIC 中断门
+  - 为所有外部中断 (IRQ) 设置中断门
+  - 调用 `load_idt(&idt_descr)` 加载内核 IDT
 
-// 步骤 4: 在启动 CPU（BSP）上早期加载微码更新
-load_ucode_bsp();
+**4. 接管完成标志**
 
-// 步骤 5: 设置内核高地址映射
-init_top_pgt[511] = early_top_pgt[511];
+从 `load_idt()` 执行后：
+- ✅ 硬件中断路由到内核（PIC 重编程 + IDT 加载）
+- ✅ 软件中断由内核接管（INT 指令触发内核 IDT）
+- ✅ BIOS 代码不再执行（除 UEFI Runtime Services）
 
-// 步骤 6: 启动内核预留区域初始化，最终调用 start_kernel()
-x86_64_start_reservations(real_mode_data);
-```
+> 📖 **详细分析文档**：
+> - [Linux 内核中断系统接管详细流程](LINUX_KERNEL_INTERRUPT_TAKEOVER.md) - 完整源代码分析、PIC 编程、APIC 设置、INT 0x80 系统调用
+> - [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md) - 中断向量表对比
+> - [Linux 内核中断处理机制](LINUX_INTERRUPT_HANDLING.md) - Top Half 和 Bottom Half
 
-**关键点：**
-- **`idt_setup_early_handler()`** 设置早期中断处理程序，建立内核自己的 IDT，取代 BIOS 的 IVT
-- 早期陷阱处理程序用于处理 CPU 异常（如页故障、除零等）
-
-### 中断控制器接管
-
-#### 8259A PIC 重新编程
-
-**源代码位置：** `linux/arch/x86/kernel/i8259.c:349-399`
-
-内核重新编程 8259A PIC，将硬件中断从 BIOS 的向量（0x08-0x0F, 0x70-0x77）重映射到内核的向量（0x20-0x2F），避免与 CPU 异常向量（0-31）冲突。
-
-**关键点：**
-- 将主 PIC 的 IRQ0-7 重映射到 `ISA_IRQ_VECTOR(0)`（通常是 0x20-0x27）
-- 将从 PIC 的 IRQ8-15 重映射到 `ISA_IRQ_VECTOR(8)`（通常是 0x28-0x2F）
-- 这**完全覆盖了 BIOS 的 PIC 配置**，硬件中断不再路由到 BIOS 代码
-
-#### APIC 和中断门设置
-
-**重要说明：APIC vs 8259A PIC**
-
-- **8259A PIC**：外部芯片，用于处理硬件中断（IRQ0-15），已在前面重新编程
-- **Local APIC**：CPU 内部集成的中断控制器，用于多处理器系统中的处理器间中断（IPI）、本地定时器中断等
-- **两者关系**：在现代系统中，Local APIC 可以替代或配合 8259A PIC 工作
-
-**源代码位置：** `linux/arch/x86/kernel/idt.c:281-315`
-
-内核通过 `idt_setup_apic_and_irq_gates()` 完成中断系统的接管：
-
-```c
-/**
- * idt_setup_apic_and_irq_gates - 设置 APIC/SMP 和普通中断门
- * 
- * 这是内核完全接管中断系统的最后一步：
- * 1. 设置 APIC 相关的中断门（Local APIC，CPU 内部集成）
- * 2. 为所有外部中断（IRQ）设置中断门
- * 3. 加载 IDT，此时 BIOS 的 IVT 被完全取代
- */
-void __init idt_setup_apic_and_irq_gates(void)
-{
-	// 步骤 1: 从 apic_idts 表设置 APIC 相关的中断门
-	idt_setup_from_table(idt_table, apic_idts, ARRAY_SIZE(apic_idts), true);
-
-	// 步骤 2: 为所有外部中断（IRQ）设置中断门
-	for_each_clear_bit_from(i, system_vectors, FIRST_SYSTEM_VECTOR) {
-		entry = irq_entries_start + IDT_ALIGN * (i - FIRST_EXTERNAL_VECTOR);
-		set_intr_gate(i, entry);  // 设置中断门
-	}
-
-	// 步骤 3: 将 IDT 映射到 CPU 入口区域并重新加载
-	idt_map_in_cea();
-	load_idt(&idt_descr);  // 加载 IDT：此时 BIOS IVT 被完全取代
-}
-```
-
-**关键点：**
-- **`load_idt(&idt_descr)`** 执行后，CPU 使用内核的 IDT，不再使用 BIOS 的 IVT
-- 所有中断（包括硬件中断和软件中断）都路由到内核的处理程序
-- **INT 0x80 系统调用**：IDT[0x80] 指向 `entry_INT80_32`，实现用户空间到内核空间的系统调用接口
-
-> **详细说明**：关于内核接管中断系统的详细流程，包括早期 IDT 设置、8259A PIC 重新编程、APIC 和中断门设置的完整源代码分析，以及 INT 0x80 系统调用的完整实现路径，请参见 [Linux 内核中断系统接管详细流程](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)。  
-> 关于 BIOS IVT 与 Kernel IDT 的详细对比，请参见 [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md)。  
-> 关于 UEFI 中断处理机制，请参见 [UEFI 中断处理机制](UEFI_INTERRUPT_HANDLING.md)。
-
-### 接管完成标志
-
-从内核加载 IDT 并重新编程 PIC 的那一刻起：
-
-1. **硬件中断不再路由到 BIOS**：PIC 被重新编程，中断向量映射到内核的 IDT
-2. **软件中断被内核接管**：所有 `INT` 指令触发的异常由内核的 IDT 处理
-3. **BIOS 代码不再执行**：除了可能的 UEFI Runtime Services，BIOS 固件代码基本不再被调用
-
----
 
 ## 总结：完整流程时间线
 
