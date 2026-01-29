@@ -66,19 +66,24 @@ grub_install_generate_image (const char *dir, const char *prefix,
 
 #### 方式 1：通过 grub-mkimage 命令行参数
 
-**用户直接指定**：
+**用户直接指定**（模块名作为位置参数）：
 ```bash
-grub-mkimage --modules "ext2 part_msdos biosdisk normal linux search ls" \
-             --output /boot/grub/i386-pc/core.img
+grub-mkimage -O i386-pc -o /boot/grub/i386-pc/core.img -d /usr/lib/grub/i386-pc \
+             ext2 part_msdos biosdisk normal linux search ls
 ```
 
-**源代码位置**：`grub/util/grub-mkimage.c:273`
+**源代码位置**：`grub/util/grub-mkimage.c:272-273`
 ```c
-// 解析 --modules 参数
-if (strcmp(arg, "--modules") == 0)
-{
-    arguments->modules[arguments->nmodules++] = xstrdup(next_arg);
-}
+// 解析位置参数（模块名）
+case ARGP_KEY_ARG:
+    assert (arguments->nmodules < arguments->modules_max);
+    arguments->modules[arguments->nmodules++] = xstrdup(arg);  // 每个模块名作为独立参数
+    break;
+```
+
+**命令行格式**：`grub/util/grub-mkimage.c:283`
+```c
+N_("[OPTION]... [MODULES]"),  // 模块作为位置参数，不是选项
 ```
 
 #### 方式 2：通过 grub-install（自动检测）
@@ -202,7 +207,7 @@ for (p = path_list; p; p = p->next)
 
 ```
 1. 用户或 grub-install 指定模块列表
-   ├─ 方式 1: grub-mkimage --modules "ext2 part_msdos linux"
+   ├─ 方式 1: grub-mkimage [选项] ext2 part_msdos linux
    └─ 方式 2: grub-install（自动检测文件系统、分区表等）
        ├─ probe_mods() 检测文件系统 → 添加 ext2, xfs 等
        ├─ push_partmap_module() 检测分区表 → 添加 part_msdos, part_gpt
@@ -471,8 +476,8 @@ grub_dl_load_core (void *addr, grub_size_t size)
 
 ```bash
 # 构建 core.img 时嵌入 linux 模块
-grub-mkimage --modules "ext2 part_msdos biosdisk normal linux search ls" \
-             --output /boot/grub/i386-pc/core.img
+grub-mkimage -O i386-pc -o /boot/grub/i386-pc/core.img -d /usr/lib/grub/i386-pc \
+             ext2 part_msdos biosdisk normal linux search ls
 
 # grub.cfg 中无需 insmod
 menuentry "Linux" {
@@ -489,8 +494,8 @@ menuentry "Linux" {
 
 ```bash
 # 构建 core.img 时不包含 linux 模块
-grub-mkimage --modules "ext2 part_msdos biosdisk normal search ls" \
-             --output /boot/grub/i386-pc/core.img
+grub-mkimage -O i386-pc -o /boot/grub/i386-pc/core.img -d /usr/lib/grub/i386-pc \
+             ext2 part_msdos biosdisk normal search ls
 
 # grub.cfg 中需要 insmod
 menuentry "Linux" {

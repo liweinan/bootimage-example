@@ -253,7 +253,7 @@ grub_main (void)
     //   - 使用 grub_dl_load_core() 加载每个模块
     //   - 模块包括：文件系统驱动、磁盘驱动、加载器（linux.mod）、命令等
     // ⚠️ 注意：
-    //   - 这一步只加载嵌入在 core.img 中的模块（构建时通过 grub-mkimage --modules 指定）
+    //   - 这一步只加载嵌入在 core.img 中的模块（构建时通过 grub-mkimage 作为位置参数指定）
     //   - insmod 命令加载的动态模块（.mod 文件）不在这一步处理
     //   - linux 命令由 linux.mod 模块提供，如果嵌入则此步骤自动加载
     // 详细说明请参见下方"核心函数详解 > grub_load_modules()"
@@ -374,7 +374,7 @@ grub_main (void)
 | **加载时机** | 启动时自动加载 | 运行时按需加载 |
 | **模块位置** | 嵌入在 core.img 中 | 文件系统中的 .mod 文件 |
 | **加载方式** | 从内存加载（grub_dl_load_core） | 从文件系统加载（grub_dl_load_file） |
-| **配置方式** | grub-mkimage --modules "ext2 linux" | grub.cfg 中 insmod linux |
+| **配置方式** | grub-mkimage [选项] ext2 linux ... | grub.cfg 中 insmod linux |
 | **典型用途** | 启动必需的基础模块 | 可选的扩展模块 |
 
 **完整源代码：**
@@ -409,7 +409,7 @@ grub_load_modules (void)
 `linux` 命令是由 `linux.mod` 模块提供的，该模块可以通过两种方式加载：
 
 1. **嵌入方式**（推荐）：
-   - 构建时：`grub-mkimage --modules "linux" ...`
+   - 构建时：`grub-mkimage [选项] linux ...`
    - 启动时：`grub_load_modules()` 自动加载
    - 无需 grub.cfg 中的 `insmod linux`
 
@@ -2946,16 +2946,14 @@ GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数�
 
 **i386-pc 平台（传统 BIOS）：**
 ```bash
-grub-mkimage --format=i386-pc \
-  --modules "ext2 part_msdos biosdisk normal linux search ls" \
-  --output=core.img
+grub-mkimage -O i386-pc -o core.img -d /usr/lib/grub/i386-pc \
+  ext2 part_msdos biosdisk normal linux search ls
 ```
 
 **x86_64-efi 平台（UEFI）：**
 ```bash
-grub-mkimage --format=x86_64-efi \
-  --modules "ext2 part_gpt efi_gop normal linux search ls" \
-  --output=core.efi
+grub-mkimage -O x86_64-efi -o core.efi -d /usr/lib/grub/x86_64-efi \
+  ext2 part_gpt efi_gop normal linux search ls
 ```
 
 ### 模块定义文件
