@@ -248,251 +248,15 @@ grub_main (void)
 
     // 步骤 8: 加载嵌入的模块
     grub_load_modules ();
-    // ⚠️ 注意：这一步只加载嵌入在 core.img 中的模块
-    // 通过 insmod 命令加载的动态模块（文件系统中的 .mod 文件）不在这一步处理
     // 功能：
     //   - 遍历 core.img 中的所有模块（OBJ_TYPE_ELF 类型）
     //   - 使用 grub_dl_load_core() 加载每个模块
-    //   - 模块包括：文件系统驱动（ext2, fat, iso9660 等）、磁盘驱动、命令等
-    // ⚠️ 关键澄清：加载所有嵌入的模块，不是只加载 grub.cfg 中 insmod 的模块
-    //   - grub_load_modules() 加载所有嵌入在 core.img 中的模块（构建时通过 grub-mkimage 指定）
-    //   - insmod 命令用于运行时从文件系统动态加载额外的模块（不在 core.img 中）
-    //   - 两种加载方式的区别：
-    //     1. grub_load_modules()：加载嵌入模块（core.img 中，启动时自动加载）
-    //        - 使用 grub_dl_load_core() 从内存加载
-    //        - 模块在构建 core.img 时通过 --modules 参数指定
-    //        - 例如：grub-mkimage --modules "ext2 part_msdos linux" ...
-    //     2. insmod 命令：加载文件系统模块（/boot/grub/i386-pc/*.mod，运行时按需加载）
-    //        - 使用 grub_dl_load_file() 或 grub_dl_load() 从文件系统加载
-    //        - 模块在 grub.cfg 中通过 insmod 命令指定
-    //        - 例如：insmod linux（从 /boot/grub/i386-pc/linux.mod 加载）
-    // 实际场景：
-    //   - 如果 linux.mod 嵌入在 core.img 中：grub_load_modules() 会自动加载，无需 insmod
-    //   - 如果 linux.mod 不在 core.img 中：需要在 grub.cfg 中使用 insmod linux 加载
-    //
-    // ⚠️ 重要说明：linux 命令是由 linux.mod 模块提供的
-    //   - linux.mod 是一个独立的 ELF 模块文件（/boot/grub/i386-pc/linux.mod）
-    //   - linux.mod 可以嵌入到 core.img 中，也可以作为独立文件存在
-    //   - 如果嵌入：grub_load_modules() 在步骤 8 自动加载，linux 命令立即可用
-    //   - 如果没有嵌入：需要在 grub.cfg 中使用 insmod linux 加载，然后才能使用 linux 命令
-    //   - 源代码位置：grub/grub-core/loader/i386/linux.c:1171-1178
-    //     ```c
-    //     GRUB_MOD_INIT(linux)
-    //     {
-    //       cmd_linux = grub_register_command ("linux", grub_cmd_linux, ...);
-    //       cmd_initrd = grub_register_command ("initrd", grub_cmd_initrd, ...);
-    //     }
-    //     ```
-    //   - 判断方法：
-    //     * 如果 grub.cfg 中没有 insmod linux，说明 linux.mod 已嵌入到 core.img 中
-    //     * 如果 grub.cfg 中有 insmod linux，说明 linux.mod 没有嵌入，需要从文件系统加载
-    //
-    // 📋 核心模块分类（i386-pc 平台典型配置）：
-    //
-    // 1. 文件系统驱动模块（fs/）：
-    //    - ext2：ext2/ext3/ext4 文件系统支持（最常用）
-    //    - fat：FAT12/FAT16/FAT32 文件系统支持（UEFI ESP 分区）
-    //    - iso9660：ISO 9660 文件系统支持（CD/DVD 镜像）
-    //    - btrfs：Btrfs 文件系统支持
-    //    - xfs：XFS 文件系统支持
-    //    - ntfs：NTFS 文件系统支持（Windows）
-    //    - hfs/hfsplus：HFS/HFS+ 文件系统支持（macOS）
-    //    - minix：Minix 文件系统支持
-    //    - jfs：JFS 文件系统支持
-    //    - f2fs：F2FS 文件系统支持
-    //    - erofs：EROFS 文件系统支持
-    //
-    // 2. 分区表模块（partmap/）：
-    //    - part_msdos：MBR 分区表支持（传统 BIOS）
-    //    - part_gpt：GPT 分区表支持（UEFI）
-    //    - part_apple：Apple 分区表支持（macOS）
-    //    - part_sun：Sun 分区表支持（SPARC）
-    //    - part_plan：Plan 9 分区表支持
-    //
-    // 3. 磁盘驱动模块（disk/）：
-    //    - biosdisk：BIOS 磁盘驱动（传统 BIOS，使用 INT 13h）
-    //    - ahci：AHCI SATA 控制器驱动
-    //    - ata：ATA/IDE 控制器驱动
-    //    - pata：PATA（并行 ATA）驱动
-    //    - scsi：SCSI 磁盘驱动
-    //    - usbms：USB 大容量存储设备驱动
-    //    - lvm：LVM（逻辑卷管理）支持
-    //    - mdraid_linux：Linux 软件 RAID 支持
-    //    - cryptodisk：加密磁盘支持（LUKS）
-    //    - luks/luks2：LUKS 加密支持
-    //    - geli：GELI 加密支持（FreeBSD）
-    //
-    // 4. 加载器模块（loader/）：
-    //    - linux：Linux 内核加载器（grub_cmd_linux, grub_cmd_initrd）
-    //    - multiboot：Multiboot 规范加载器
-    //    - multiboot2：Multiboot2 规范加载器
-    //    - xnu：macOS XNU 内核加载器
-    //    - chain：链式加载器（加载其他引导加载程序）
-    //    - efi：EFI 应用加载器（UEFI 模式）
-    //
-    // 5. 命令模块（commands/）：
-    //    - normal：normal 模式（菜单显示、用户交互）
-    //    - search：search 命令（查找文件系统）
-    //    - ls：ls 命令（列出文件）
-    //    - cat：cat 命令（显示文件内容）
-    //    - set：set 命令（设置环境变量）
-    //    - unset：unset 命令（取消环境变量）
-    //    - configfile：configfile 命令（加载配置文件）
-    //    - menuentry：menuentry 命令（定义菜单项）
-    //    - boot：boot 命令（启动内核）
-    //    - reboot：reboot 命令（重启系统）
-    //    - halt：halt 命令（关机）
-    //
-    // 6. 终端模块（term/）：
-    //    - gfxterm：图形终端支持（VGA、framebuffer）
-    //    - vga_text：VGA 文本模式终端
-    //    - serial：串口终端支持
-    //    - at_keyboard：AT 键盘驱动
-    //    - usb_keyboard：USB 键盘驱动
-    //
-    // 7. 视频模块（video/）：
-    //    - vbe：VBE（VESA BIOS Extensions）支持
-    //    - vga：VGA 视频支持
-    //    - efi_gop：EFI GOP（Graphics Output Protocol）支持（UEFI）
-    //    - efi_uga：EFI UGA（Universal Graphics Adapter）支持（UEFI）
-    //
-    // 8. 其他模块：
-    //    - relocator：代码重定位器（用于内核加载）
-    //    - verifiers：文件签名验证器（Secure Boot）
-    //    - gzio：gzip 压缩/解压支持
-    //    - xzio：xz 压缩/解压支持
-    //    - lzopio：lzop 压缩/解压支持
-    //    - font：字体加载支持
-    //    - gettext：国际化支持
-    //
-    // ⚠️ 注意：实际嵌入的模块取决于构建 core.img 时的配置
-    //   - 典型 i386-pc 配置：ext2, part_msdos, biosdisk, normal, linux, search, ls
-    //   - 典型 x86_64-efi 配置：ext2, part_gpt, efi_gop, normal, linux, search, ls
-    //   - 可以通过 grub-install 或 grub-mkimage 的 --modules 参数自定义
-    //
-    // 📋 分析过程和方法：
-    //
-    // 1. 模块定义文件（Makefile.core.def）：
-    //    源代码位置：grub/grub-core/Makefile.core.def
-    //    这是 GRUB 构建系统的核心配置文件，定义了所有可用的模块
-    //    每个模块通过以下格式定义：
-    //    ```
-    //    module = {
-    //      name = ext2;                    // 模块名称
-    //      common = fs/ext2.c;             // 源代码文件（所有平台通用）
-    //      i386_pc = disk/i386/pc/...;     // 平台特定源文件（可选）
-    //      enable = i386_pc;               // 启用条件（可选）
-    //    };
-    //    ```
-    //    示例模块定义：
-    //    - ext2 模块：grub/grub-core/Makefile.core.def:1491-1494
-    //      ```def
-    //      module = {
-    //        name = ext2;
-    //        common = fs/ext2.c;
-    //      };
-    //      ```
-    //    - biosdisk 模块：grub/grub-core/Makefile.core.def:1356-1360
-    //      ```def
-    //      module = {
-    //        name = biosdisk;
-    //        i386_pc = disk/i386/pc/biosdisk.c;
-    //        enable = i386_pc;
-    //      };
-    //      ```
-    //    - linux 模块：grub/grub-core/Makefile.core.def:1897-1913
-    //      ```def
-    //      module = {
-    //        name = linux;
-    //        x86 = loader/i386/linux.c;
-    //        i386_pc = lib/i386/pc/vesa_modes_table.c;
-    //        ...
-    //      };
-    //      ```
-    //
-    // 2. 目录结构分析：
-    //    通过查看源代码目录结构，可以了解模块的分类：
-    //    ```bash
-    //    # 文件系统模块（42 个）
-    //    ls /Users/weli/works/grub/grub-core/fs/*.c
-    //    # 输出：ext2.c, fat.c, iso9660.c, btrfs.c, xfs.c, ntfs.c, ...
-    //
-    //    # 磁盘驱动模块（24 个）
-    //    ls /Users/weli/works/grub/grub-core/disk/*.c
-    //    # 输出：biosdisk.c, ahci.c, ata.c, scsi.c, lvm.c, cryptodisk.c, ...
-    //
-    //    # 分区表模块（11 个）
-    //    ls /Users/weli/works/grub/grub-core/partmap/*.c
-    //    # 输出：msdos.c, gpt.c, apple.c, sun.c, plan.c, ...
-    //
-    //    # 加载器模块
-    //    ls /Users/weli/works/grub/grub-core/loader/*.c
-    //    # 输出：i386/linux.c, efi/linux.c, i386/pc/linux.c, ...
-    //
-    //    # 命令模块
-    //    ls /Users/weli/works/grub/grub-core/commands/*.c
-    //    # 输出：normal.c, search.c, ls.c, cat.c, set.c, ...
-    //
-    //    # 终端模块
-    //    ls /Users/weli/works/grub/grub-core/term/*.c
-    //    # 输出：gfxterm.c, vga_text.c, serial.c, at_keyboard.c, ...
-    //
-    //    # 视频模块
-    //    ls /Users/weli/works/grub/grub-core/video/*.c
-    //    # 输出：vbe.c, vga.c, efi_gop.c, efi_uga.c, ...
-    //    ```
-    //
-    // 3. 模块加载代码分析：
-    //    源代码位置：grub/grub-core/kern/main.c:58-75
-    //    ```c
-    //    static void
-    //    grub_load_modules (void)
-    //    {
-    //      struct grub_module_header *header;
-    //      FOR_MODULES (header)  // 遍历 core.img 中的所有模块
-    //      {
-    //        if (header->type != OBJ_TYPE_ELF)
-    //          continue;
-    //        // 加载所有 ELF 格式的模块
-    //        grub_dl_load_core (...);
-    //      }
-    //    }
-    //    ```
-    //    关键点：
-    //    - FOR_MODULES 宏遍历 core.img 中嵌入的所有模块
-    //    - 只加载 OBJ_TYPE_ELF 类型的模块（ELF 格式的可执行模块）
-    //    - 使用 grub_dl_load_core() 从内存加载模块（不是从文件系统）
-    //
-    //    ⚠️ 详细分析：关于 FOR_MODULES 宏的工作原理、模块数据结构、内存布局等，
-    //    请参见 [GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)
-    //
-    // 4. 模块注册机制：
-    //    每个模块通过 GRUB_MOD_INIT 宏注册命令和功能
-    //    示例（linux 模块）：
-    //    源代码位置：grub/grub-core/loader/i386/linux.c:1171-1178
-    //    ```c
-    //    GRUB_MOD_INIT(linux)
-    //    {
-    //      cmd_linux = grub_register_command ("linux", grub_cmd_linux, ...);
-    //      cmd_initrd = grub_register_command ("initrd", grub_cmd_initrd, ...);
-    //    }
-    //    ```
-    //
-    // 5. 如何确定默认嵌入的模块：
-    //    - grub-install 会根据平台自动选择默认模块
-    //    - 可以通过 --modules 参数查看或自定义
-    //    - 典型命令：grub-install --modules "ext2 part_msdos biosdisk normal linux search ls"
-    //
-    // ⚠️ 详细分析：关于 FOR_MODULES 宏的读取过程、模块数据结构、内存布局等，
-    // 请参见 [GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)
-    //
-    // 源代码位置：
-    //   - 模块定义：grub/grub-core/Makefile.core.def
-    //   - 模块加载：grub/grub-core/kern/main.c:58-75
-    //   - 模块注册：各模块的 GRUB_MOD_INIT 宏（如 loader/i386/linux.c:1171）
-    //   - FOR_MODULES 宏：grub/include/grub/kernel.h:104-110
-    //   - 数据结构：grub/include/grub/kernel.h:39-69
-    //   - 目录结构：grub/grub-core/{fs,disk,partmap,loader,commands,term,video}/
+    //   - 模块包括：文件系统驱动、磁盘驱动、加载器（linux.mod）、命令等
+    // ⚠️ 注意：
+    //   - 这一步只加载嵌入在 core.img 中的模块（构建时通过 grub-mkimage --modules 指定）
+    //   - insmod 命令加载的动态模块（.mod 文件）不在这一步处理
+    //   - linux 命令由 linux.mod 模块提供，如果嵌入则此步骤自动加载
+    // 详细说明请参见下方"核心函数详解 > grub_load_modules()"
 
     grub_boot_time ("After loading embedded modules.");
 
@@ -596,10 +360,204 @@ grub_main (void)
 
 **3. `grub_load_modules()` - 加载嵌入的模块**
 
+**源代码位置：** `grub/grub-core/kern/main.c:58-75`
+
 **功能：**
-- 遍历 `core.img` 中的所有模块（文件系统驱动、磁盘驱动、命令模块等）
-- 使用 `grub_dl_load_core()` 加载每个模块
-- **注意**：`linux` 和 `initrd` 命令由 `linux.mod` 模块提供，在此步骤加载
+- 遍历 `core.img` 中的所有嵌入模块（OBJ_TYPE_ELF 类型）
+- 使用 `grub_dl_load_core()` 从内存加载每个模块
+- 模块包括：文件系统驱动、磁盘驱动、加载器（linux.mod）、命令等
+
+**⚠️ 关键区别：两种模块加载方式**
+
+| 特性 | grub_load_modules() | insmod 命令 |
+|------|---------------------|-------------|
+| **加载时机** | 启动时自动加载 | 运行时按需加载 |
+| **模块位置** | 嵌入在 core.img 中 | 文件系统中的 .mod 文件 |
+| **加载方式** | 从内存加载（grub_dl_load_core） | 从文件系统加载（grub_dl_load_file） |
+| **配置方式** | grub-mkimage --modules "ext2 linux" | grub.cfg 中 insmod linux |
+| **典型用途** | 启动必需的基础模块 | 可选的扩展模块 |
+
+**完整源代码：**
+
+```c
+// grub/grub-core/kern/main.c:58-75
+static void
+grub_load_modules (void)
+{
+  struct grub_module_header *header;
+  FOR_MODULES (header)  // 遍历 core.img 中的所有模块
+  {
+    if (header->type != OBJ_TYPE_ELF)
+      continue;
+
+    // 加载所有 ELF 格式的模块
+    if (! grub_dl_load_core (
+          (char *) header + sizeof (struct grub_module_header),
+          (header->size - sizeof (struct grub_module_header))))
+      grub_fatal ("%s", grub_errmsg);
+  }
+}
+```
+
+**关键点：**
+- `FOR_MODULES` 宏遍历 core.img 中嵌入的所有模块
+- 只加载 `OBJ_TYPE_ELF` 类型的模块（ELF 格式的可执行模块）
+- 使用 `grub_dl_load_core()` 从内存加载模块（不是从文件系统）
+
+**linux.mod 模块的加载：**
+
+`linux` 命令是由 `linux.mod` 模块提供的，该模块可以通过两种方式加载：
+
+1. **嵌入方式**（推荐）：
+   - 构建时：`grub-mkimage --modules "linux" ...`
+   - 启动时：`grub_load_modules()` 自动加载
+   - 无需 grub.cfg 中的 `insmod linux`
+
+2. **动态加载方式**：
+   - grub.cfg 中：`insmod linux`
+   - 从 `/boot/grub/i386-pc/linux.mod` 加载
+   - 适用于 linux.mod 未嵌入的情况
+
+**判断方法：**
+- 如果 grub.cfg 中**没有** `insmod linux`，说明 linux.mod 已嵌入到 core.img
+- 如果 grub.cfg 中**有** `insmod linux`，说明需要从文件系统动态加载
+
+**典型嵌入模块列表：**
+
+- **i386-pc 平台**：ext2, part_msdos, biosdisk, normal, linux, search, ls
+- **x86_64-efi 平台**：ext2, part_gpt, efi_gop, normal, linux, search, ls
+
+**模块分类参考**：详见本文档附录"GRUB 核心模块分类"
+
+**详细分析**：关于 FOR_MODULES 宏的工作原理、模块数据结构、内存布局等，请参见 [GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)
+
+---
+
+**3.1 `grub_dl_load_core()` - 模块加载核心函数**
+
+**源代码位置：** `grub/grub-core/kern/dl.c:805-821`
+
+**功能：**
+- 解析 ELF 格式的模块文件
+- 执行符号解析和重定位
+- 调用模块初始化函数（`grub_mod_init`）
+- 将模块添加到已加载模块链表
+
+**完整源代码：**
+
+```c
+// grub/grub-core/kern/dl.c:805-821
+grub_dl_t
+grub_dl_load_core (void *addr, grub_size_t size)
+{
+    grub_dl_t mod;
+
+    // 步骤 1: 解析 ELF 文件，但不初始化
+    mod = grub_dl_load_core_noinit (addr, size);
+    if (! mod)
+        return 0;
+
+    // 步骤 2: 调用模块初始化函数
+    grub_dl_init (mod);  // ⚠️ 关键：这里调用 mod->init
+
+    return mod;
+}
+```
+
+**符号解析（查找初始化函数）：**
+
+```c
+// grub/grub-core/kern/dl.c:437-440
+// 在解析 ELF 符号表时，查找特殊函数名
+if (grub_strcmp (name, "grub_mod_init") == 0)
+    mod->init = (void (*) (grub_dl_t)) sym->st_value;  // 保存初始化函数地址
+else if (grub_strcmp (name, "grub_mod_fini") == 0)
+    mod->fini = (void (*) (void)) sym->st_value;       // 保存清理函数地址
+```
+
+**模块初始化（调用 grub_mod_init）：**
+
+```c
+// grub/include/grub/dl.h:224-231
+static inline void
+grub_dl_init (grub_dl_t mod)
+{
+    if (mod->init)
+        (mod->init) (mod);  // ⚠️ 调用 grub_mod_init()，注册命令
+
+    mod->next = grub_dl_head;  // 添加到已加载模块链表
+    grub_dl_head = mod;
+}
+```
+
+**linux.mod 模块注册示例：**
+
+```c
+// grub/grub-core/loader/i386/linux.c:1171-1178
+GRUB_MOD_INIT(linux)
+{
+    cmd_linux = grub_register_command ("linux", grub_cmd_linux, ...);
+    cmd_initrd = grub_register_command ("initrd", grub_cmd_initrd, ...);
+}
+```
+
+**完整调用链（insmod linux 命令）：**
+
+```
+insmod linux
+    ↓
+grub_core_cmd_insmod("linux")
+    ↓
+grub_dl_load("linux")           [kern/dl.c:874]
+    ↓
+grub_dl_load_file("/boot/grub/i386-pc/linux.mod")
+    ↓
+grub_dl_load_core(addr, size)   [kern/dl.c:805]
+    ├─ grub_dl_load_core_noinit()
+    │   ├─ 解析 ELF 头部
+    │   ├─ grub_dl_resolve_symbols()
+    │   │   └─ 找到 "grub_mod_init" 符号 → mod->init = 函数地址
+    │   └─ 重定位符号
+    │
+    └─ grub_dl_init(mod)        [dl.h:224]
+        └─ (mod->init)(mod)     // 调用 grub_mod_init()
+            ↓
+grub_mod_init(mod)              [linux.c:1171-1178]
+    ├─ grub_register_command("linux", grub_cmd_linux, ...)
+    └─ grub_register_command("initrd", grub_cmd_initrd, ...)
+            ↓
+命令 "linux" 和 "initrd" 被添加到 grub_command_list
+```
+
+**关键机制：**
+- **ELF 符号表**：模块是 ELF 格式文件，包含符号表
+- **约定的函数名**：GRUB 通过查找固定的函数名 `grub_mod_init` 和 `grub_mod_fini` 来识别初始化/清理函数
+- **自动调用**：模块加载完成后，自动调用初始化函数，初始化函数内部调用 `grub_register_command()` 注册命令
+
+**`GRUB_MOD_INIT(name)` 宏展开：**
+
+```c
+// grub/include/grub/dl.h:43-46
+// 动态加载模块时（insmod）：
+#define GRUB_MOD_INIT(name)  \
+static void grub_mod_init (grub_dl_t mod __attribute__ ((unused)))
+                ↑
+        参数 name 被忽略！生成的函数名始终是 grub_mod_init
+```
+
+不同模块展开后都生成同名函数（但在不同的 .mod 文件中）：
+
+```c
+// linux.mod 中：
+GRUB_MOD_INIT(linux) { ... }
+// 展开后 → static void grub_mod_init(grub_dl_t mod) { ... }
+
+// ext2.mod 中：
+GRUB_MOD_INIT(ext2) { ... }
+// 展开后 → static void grub_mod_init(grub_dl_t mod) { ... }
+```
+
+---
 
 **4. `grub_register_core_commands()` - 注册核心命令**
 
@@ -755,135 +713,42 @@ grub_core_cmd_insmod (struct grub_command *cmd, int argc, char *argv[])
 
 当执行 `insmod linux` 时，GRUB 如何知道该模块提供了哪些命令？
 
-**1. 模块初始化宏（`GRUB_MOD_INIT`）：**
+**关键机制：**
+
+1. **模块初始化宏**：每个模块通过 `GRUB_MOD_INIT(name)` 宏定义初始化函数 `grub_mod_init()`
+2. **自动调用**：`grub_dl_load_core()` 加载模块后，自动调用其 `grub_mod_init()` 函数
+3. **命令注册**：初始化函数内部调用 `grub_register_command()` 注册命令
+
+**示例（linux.mod）：**
 
 ```c
-// grub/include/grub/dl.h:43-46
-#define GRUB_MOD_INIT(name)  \
-static void grub_mod_init (grub_dl_t mod __attribute__ ((unused))) __attribute__ ((used)); \
-static void \
-grub_mod_init (grub_dl_t mod __attribute__ ((unused)))
-
-// 展开后，linux.mod 中的代码：
-static void grub_mod_init (grub_dl_t mod)
+// grub/grub-core/loader/i386/linux.c:1171-1178
+GRUB_MOD_INIT(linux)
 {
     cmd_linux = grub_register_command ("linux", grub_cmd_linux, ...);
     cmd_initrd = grub_register_command ("initrd", grub_cmd_initrd, ...);
 }
 ```
 
-**2. 模块加载流程（`grub_dl_load_core`）：**
-
-```c
-// grub/grub-core/kern/dl.c:805-821
-grub_dl_t
-grub_dl_load_core (void *addr, grub_size_t size)
-{
-    // 步骤 1: 解析 ELF 文件，但不初始化
-    mod = grub_dl_load_core_noinit (addr, size);
-    
-    // 步骤 2: 调用模块初始化函数
-    grub_dl_init (mod);  // ⚠️ 关键：这里调用 mod->init
-    
-    return mod;
-}
-```
-
-**3. 符号解析（`grub_dl_resolve_symbols`）：**
-
-```c
-// grub/grub-core/kern/dl.c:437-440
-// 在解析 ELF 符号表时，查找特殊函数名
-if (grub_strcmp (name, "grub_mod_init") == 0)
-    mod->init = (void (*) (grub_dl_t)) sym->st_value;  // 保存初始化函数地址
-else if (grub_strcmp (name, "grub_mod_fini") == 0)
-    mod->fini = (void (*) (void)) sym->st_value;       // 保存清理函数地址
-```
-
-**4. 模块初始化（`grub_dl_init`）：**
-
-```c
-// grub/include/grub/dl.h:224-231
-static inline void
-grub_dl_init (grub_dl_t mod)
-{
-    if (mod->init)
-        (mod->init) (mod);  // ⚠️ 调用 grub_mod_init()，注册命令
-    
-    mod->next = grub_dl_head;  // 添加到已加载模块链表
-    grub_dl_head = mod;
-}
-```
-
-**完整调用链：**
+**完整调用链（insmod linux）：**
 
 ```
 insmod linux
     ↓
 grub_core_cmd_insmod("linux")
     ↓
-grub_dl_load("linux")           [kern/dl.c:874]
-    ↓
 grub_dl_load_file("/boot/grub/i386-pc/linux.mod")
     ↓
-grub_dl_load_core(addr, size)   [kern/dl.c:805]
-    ├─ grub_dl_load_core_noinit()
-    │   ├─ 解析 ELF 头部
-    │   ├─ grub_dl_resolve_symbols()
-    │   │   └─ 找到 "grub_mod_init" 符号 → mod->init = 函数地址
-    │   └─ 重定位符号
-    │
-    └─ grub_dl_init(mod)        [dl.h:224]
-        └─ (mod->init)(mod)     // 调用 grub_mod_init()
+grub_dl_load_core(addr, size)
+    └─ grub_dl_init(mod)
+        └─ (mod->init)(mod)  // 调用 grub_mod_init()
             ↓
-grub_mod_init(mod)              [linux.c:1171-1178]
+grub_mod_init(mod)
     ├─ grub_register_command("linux", grub_cmd_linux, ...)
     └─ grub_register_command("initrd", grub_cmd_initrd, ...)
-            ↓
-命令 "linux" 和 "initrd" 被添加到 grub_command_list
 ```
 
-**关键点：**
-- **ELF 符号表**：模块是 ELF 格式文件，包含符号表
-- **约定的函数名**：GRUB 通过查找固定的函数名 `grub_mod_init` 和 `grub_mod_fini` 来识别初始化/清理函数
-- **自动调用**：模块加载完成后，自动调用初始化函数，初始化函数内部调用 `grub_register_command()` 注册命令
-
-**`GRUB_MOD_INIT(name)` 的 `name` 参数说明：**
-
-```c
-// grub/include/grub/dl.h:43-46
-// 动态加载模块时（insmod）：
-#define GRUB_MOD_INIT(name)  \
-static void grub_mod_init (grub_dl_t mod ...) ...
-                ↑
-        参数 name 被忽略！生成的函数名始终是 grub_mod_init
-```
-
-不同模块展开后都生成同名函数：
-
-```c
-// linux.mod 中：
-GRUB_MOD_INIT(linux) { ... }
-// 展开后 → static void grub_mod_init(grub_dl_t mod) { ... }
-
-// ext2.mod 中：
-GRUB_MOD_INIT(ext2) { ... }
-// 展开后 → static void grub_mod_init(grub_dl_t mod) { ... }
-```
-
-每个 `.mod` 文件是独立编译的 ELF 文件，都有自己的 `grub_mod_init` 符号，互不冲突。
-
-**`name` 参数的用途（仅静态链接时）：**
-
-```c
-// 当模块静态链接到 GRUB 内核时（#elif defined GRUB_KERNEL）：
-#define GRUB_MOD_INIT(name)  \
-void grub_##name##_init (void) { grub_mod_init (0); } \
-static void grub_mod_init (...)
-
-// 此时 GRUB_MOD_INIT(linux) 展开为：
-void grub_linux_init (void) { grub_mod_init(0); }  // ← 用于内核显式调用
-static void grub_mod_init (...) { ... }
+> **详细说明**：关于 `grub_dl_load_core()` 的详细实现、ELF 符号解析、模块初始化流程等，请参见上方"核心函数详解 > grub_dl_load_core()"
 ```
 
 **没有 `GRUB_MOD_INIT` 的库模块：**
@@ -2969,4 +2834,193 @@ GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数�
 - 加载驱动模块，初始化硬件，最后切换到真正的根文件系统
 
 > **详细说明**：关于 vmlinuz 文件结构的完整分析，请参见 [附录：vmlinuz 文件详细结构分析](#附录vmlinuz-文件详细结构分析)。
+
+---
+
+## 附录：GRUB 核心模块分类
+
+本附录详细列出 GRUB 支持的各类模块，帮助理解 `grub_load_modules()` 加载的模块类型。
+
+### 模块分类（i386-pc 平台典型配置）
+
+#### 1. 文件系统驱动模块（fs/）
+
+| 模块名 | 功能 | 使用场景 |
+|--------|------|----------|
+| `ext2` | ext2/ext3/ext4 文件系统支持 | Linux 系统分区（最常用） |
+| `fat` | FAT12/FAT16/FAT32 文件系统支持 | UEFI ESP 分区、Windows 兼容 |
+| `iso9660` | ISO 9660 文件系统支持 | CD/DVD 镜像引导 |
+| `btrfs` | Btrfs 文件系统支持 | Linux 高级文件系统 |
+| `xfs` | XFS 文件系统支持 | RHEL/CentOS 默认文件系统 |
+| `ntfs` | NTFS 文件系统支持 | Windows 系统分区 |
+| `hfs/hfsplus` | HFS/HFS+ 文件系统支持 | macOS 系统分区 |
+| `minix` | Minix 文件系统支持 | Minix 操作系统 |
+| `jfs` | JFS 文件系统支持 | AIX/Linux 文件系统 |
+| `f2fs` | F2FS 文件系统支持 | 闪存优化文件系统 |
+| `erofs` | EROFS 文件系统支持 | 只读压缩文件系统 |
+
+#### 2. 分区表模块（partmap/）
+
+| 模块名 | 功能 | 使用场景 |
+|--------|------|----------|
+| `part_msdos` | MBR 分区表支持 | 传统 BIOS 启动（最常用） |
+| `part_gpt` | GPT 分区表支持 | UEFI 启动（推荐） |
+| `part_apple` | Apple 分区表支持 | macOS 系统 |
+| `part_sun` | Sun 分区表支持 | SPARC 架构 |
+| `part_plan` | Plan 9 分区表支持 | Plan 9 操作系统 |
+
+#### 3. 磁盘驱动模块（disk/）
+
+| 模块名 | 功能 | 使用场景 |
+|--------|------|----------|
+| `biosdisk` | BIOS 磁盘驱动（INT 13h） | 传统 BIOS 模式（必需） |
+| `ahci` | AHCI SATA 控制器驱动 | 现代 SATA 硬盘 |
+| `ata` | ATA/IDE 控制器驱动 | IDE 硬盘 |
+| `pata` | PATA（并行 ATA）驱动 | 老式 IDE 硬盘 |
+| `scsi` | SCSI 磁盘驱动 | SCSI 硬盘 |
+| `usbms` | USB 大容量存储设备驱动 | U 盘、移动硬盘 |
+| `lvm` | LVM（逻辑卷管理）支持 | Linux LVM 分区 |
+| `mdraid_linux` | Linux 软件 RAID 支持 | Linux RAID 阵列 |
+| `cryptodisk` | 加密磁盘支持（LUKS） | 加密分区 |
+| `luks/luks2` | LUKS 加密支持 | Linux 加密分区 |
+| `geli` | GELI 加密支持 | FreeBSD 加密分区 |
+
+#### 4. 加载器模块（loader/）
+
+| 模块名 | 功能 | 使用场景 |
+|--------|------|----------|
+| `linux` | Linux 内核加载器 | 启动 Linux 系统（提供 `linux` 和 `initrd` 命令） |
+| `multiboot` | Multiboot 规范加载器 | 启动 Multiboot 兼容内核（如 Xen） |
+| `multiboot2` | Multiboot2 规范加载器 | Multiboot 规范第二版 |
+| `xnu` | macOS XNU 内核加载器 | 启动 macOS 系统 |
+| `chain` | 链式加载器 | 加载其他引导加载程序（如 Windows bootmgr） |
+| `efi` | EFI 应用加载器 | UEFI 模式下加载 EFI 应用 |
+
+#### 5. 命令模块（commands/）
+
+| 模块名 | 提供命令 | 功能 |
+|--------|----------|------|
+| `normal` | `menuentry`, `submenu` 等 | normal 模式（菜单显示、用户交互） |
+| `search` | `search` | 查找文件系统、设备 |
+| `ls` | `ls` | 列出文件（注：也有核心 ls 命令） |
+| `cat` | `cat` | 显示文件内容 |
+| `configfile` | `configfile` | 加载配置文件 |
+| `boot` | `boot` | 启动已加载的内核 |
+| `reboot` | `reboot` | 重启系统 |
+| `halt` | `halt` | 关机 |
+
+**⚠️ 注意**：`set`、`unset`、`ls`、`insmod` 是核心命令（由 `grub_register_core_commands()` 注册），不需要加载模块。
+
+#### 6. 终端模块（term/）
+
+| 模块名 | 功能 | 使用场景 |
+|--------|------|----------|
+| `gfxterm` | 图形终端支持 | VGA、framebuffer 图形显示 |
+| `vga_text` | VGA 文本模式终端 | 传统 VGA 文本模式 |
+| `serial` | 串口终端支持 | 串口调试、远程控制 |
+| `at_keyboard` | AT 键盘驱动 | PS/2 键盘 |
+| `usb_keyboard` | USB 键盘驱动 | USB 键盘 |
+
+#### 7. 视频模块（video/）
+
+| 模块名 | 功能 | 使用场景 |
+|--------|------|----------|
+| `vbe` | VBE（VESA BIOS Extensions）支持 | BIOS 模式图形显示 |
+| `vga` | VGA 视频支持 | 基本 VGA 图形 |
+| `efi_gop` | EFI GOP（Graphics Output Protocol）支持 | UEFI 模式图形显示 |
+| `efi_uga` | EFI UGA（Universal Graphics Adapter）支持 | 老式 UEFI 图形支持 |
+
+#### 8. 其他模块
+
+| 模块名 | 功能 | 使用场景 |
+|--------|------|----------|
+| `relocator` | 代码重定位器 | 内核加载时的内存重定位 |
+| `verifiers` | 文件签名验证器 | Secure Boot 签名验证 |
+| `gzio` | gzip 压缩/解压支持 | 处理 gzip 压缩文件 |
+| `xzio` | xz 压缩/解压支持 | 处理 xz 压缩文件 |
+| `lzopio` | lzop 压缩/解压支持 | 处理 lzop 压缩文件 |
+| `font` | 字体加载支持 | 加载图形终端字体 |
+| `gettext` | 国际化支持 | 多语言界面 |
+
+### 典型平台配置
+
+**i386-pc 平台（传统 BIOS）：**
+```bash
+grub-mkimage --format=i386-pc \
+  --modules "ext2 part_msdos biosdisk normal linux search ls" \
+  --output=core.img
+```
+
+**x86_64-efi 平台（UEFI）：**
+```bash
+grub-mkimage --format=x86_64-efi \
+  --modules "ext2 part_gpt efi_gop normal linux search ls" \
+  --output=core.efi
+```
+
+### 模块定义文件
+
+所有模块的定义位于构建系统配置文件中：
+
+**源代码位置：** `grub/grub-core/Makefile.core.def`
+
+**示例模块定义：**
+
+```def
+# ext2 模块
+module = {
+  name = ext2;
+  common = fs/ext2.c;
+};
+
+# biosdisk 模块（仅 i386-pc 平台）
+module = {
+  name = biosdisk;
+  i386_pc = disk/i386/pc/biosdisk.c;
+  enable = i386_pc;
+};
+
+# linux 模块（x86 平台）
+module = {
+  name = linux;
+  x86 = loader/i386/linux.c;
+  i386_pc = lib/i386/pc/vesa_modes_table.c;
+  ...
+};
+```
+
+### 如何查看可用模块
+
+**查看源代码目录：**
+
+```bash
+# 文件系统模块（42 个）
+ls /path/to/grub/grub-core/fs/*.c
+
+# 磁盘驱动模块（24 个）
+ls /path/to/grub/grub-core/disk/*.c
+
+# 分区表模块（11 个）
+ls /path/to/grub/grub-core/partmap/*.c
+
+# 加载器模块
+ls /path/to/grub/grub-core/loader/*.c
+
+# 命令模块
+ls /path/to/grub/grub-core/commands/*.c
+```
+
+**查看已安装模块：**
+
+```bash
+ls /boot/grub/i386-pc/*.mod
+```
+
+### 相关文档
+
+- **模块加载机制详解**：[GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)
+- **模块定义文件**：`grub/grub-core/Makefile.core.def`
+- **模块加载代码**：`grub/grub-core/kern/main.c:58-75`
+- **FOR_MODULES 宏**：`grub/include/grub/kernel.h:104-110`
+- **数据结构**：`grub/include/grub/kernel.h:39-69`
 
