@@ -22,45 +22,67 @@ GRUB 的 `grub_load_modules()` 函数通过 `FOR_MODULES` 宏遍历 `core.img` �
 
 ### 1. 模块列表的构建过程
 
-**源代码位置**：`grub/util/mkimage.c:883-910`
+**源代码位置**：`grub/util/mkimage.c:883-1065`
+
+> ⚠️ **注意**：以下是简化版本，省略了32位/64位区分、字节序转换、对齐处理等实现细节，便于理解整体流程。
 
 ```c
 void
 grub_install_generate_image (const char *dir, const char *prefix,
                              FILE *out, const char *outname, char *mods[],
-                             ...)
+                             ...)  // 省略了大量其他参数
 {
     // mods[] 是模块名称数组（如 ["ext2", "part_msdos", "linux", NULL]）
-    
-    // 步骤 1: 解析模块依赖关系
+
+    // 步骤 1: 解析模块依赖关系（第910行）
     path_list = grub_util_resolve_dependencies (dir, "moddep.lst", mods);
     // 读取 moddep.lst 文件，解析每个模块的依赖关系
     // 返回完整的模块文件路径列表（包括依赖模块）
-    
-    // 步骤 2: 计算总大小
-    total_module_size = sizeof(struct grub_module_info);
+
+    // 步骤 2: 计算总大小（第914-992行）
+    // 根据平台选择 grub_module_info32 或 grub_module_info64
+    total_module_size = sizeof(struct grub_module_info);  // 简化表示
     for (p = path_list; p; p = p->next)
         total_module_size += grub_util_get_image_size(p->name) + sizeof(struct grub_module_header);
-    
-    // 步骤 3: 构建模块信息头部
+    // 实际代码使用 ALIGN_ADDR() 进行对齐
+
+    // 步骤 3: 构建模块信息头部（第1020-1049行）
     modinfo->magic = GRUB_MODULE_MAGIC;
     modinfo->offset = sizeof(struct grub_module_info);
     modinfo->size = total_module_size;
-    
-    // 步骤 4: 追加每个模块
+    // 实际代码区分32位/64位，并使用 grub_host_to_target32/addr() 转换字节序
+
+    // 步骤 4: 追加每个模块（第1051-1065行）
     for (p = path_list; p; p = p->next)
     {
         struct grub_module_header *header = (kernel_img + offset);
         header->type = OBJ_TYPE_ELF;
         header->size = mod_size + sizeof(*header);
         offset += sizeof(*header);
-        
+
         // 复制模块文件内容
         grub_util_load_image(p->name, kernel_img + offset);
         offset += mod_size;
     }
 }
 ```
+
+**实际实现细节：**
+
+1. **32位/64位平台区分**（第997-1049行）：
+   - 64位平台：使用 `struct grub_module_info64`
+   - 32位平台：使用 `struct grub_module_info32`
+
+2. **对齐处理**（第991行）：
+   ```c
+   total_module_size += ALIGN_ADDR (grub_util_get_image_size (p->name))
+   ```
+
+3. **字节序转换**（第1059-1060行）：
+   ```c
+   header->type = grub_host_to_target32 (OBJ_TYPE_ELF);
+   header->size = grub_host_to_target32 (mod_size + sizeof (*header));
+   ```
 
 ### 2. 模块列表的来源
 
