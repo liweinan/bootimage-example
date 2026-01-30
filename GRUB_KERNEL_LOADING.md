@@ -490,6 +490,20 @@ grub_dl_init (grub_dl_t mod)
 }
 ```
 
+**为何可知这里调用的是 `grub_mod_init`（分析依据）：**
+
+1. **`mod->init` 的赋值来源**  
+   在 `grub_dl_load_core_noinit()` 里会做 ELF 符号解析（`grub/grub-core/kern/dl.c` 中，通常在 `grub_dl_resolve_symbols()` 或遍历符号表的逻辑里）。当解析到符号名为 `"grub_mod_init"` 时，会把该符号的值（函数地址）赋给 `mod->init`，例如：
+   `if (grub_strcmp (name, "grub_mod_init") == 0) mod->init = (void (*) (grub_dl_t)) sym->st_value;`  
+   因此 **`mod->init` 指向的，就是该模块 ELF 里导出的名为 `grub_mod_init` 的函数的地址**。
+
+2. **模块里谁叫 `grub_mod_init`**  
+   各模块用宏 `GRUB_MOD_INIT(name)` 定义自己的初始化函数（`grub/include/grub/dl.h`）。该宏展开后定义的函数名固定为 `grub_mod_init`（宏参数 `name` 只用于别处，不改变此函数名）。因此每个 `.mod` 的 ELF 中都会有一个符号 `grub_mod_init`，对应本模块的初始化函数。
+
+3. **结论**  
+   `grub_dl_init(mod)` 里执行 `(mod->init)(mod)` 时，调用的就是上一步赋给 `mod->init` 的地址；该地址来自当前加载模块的 `grub_mod_init` 符号，故 **这里调用的就是该模块的 `grub_mod_init(mod)`**。  
+   追踪路径：`(mod->init)(mod)` → `mod->init` 在符号解析时被设为模块的 `grub_mod_init` 地址 → 故调用的是 `grub_mod_init`。
+
 **linux.mod 模块注册示例：**
 
 ```c
