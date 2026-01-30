@@ -2370,6 +2370,12 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
     //   2. forward/backward 复制代码：将内核从临时缓冲区（src = 16MB+）复制到目标（target = 0x100000）
     //   3. jumper：切换到实模式并跳转到内核入口点的代码
     // 这些代码是在 grub_relocator_prepare_relocs() 中动态生成的
+    //
+    // relocator32.S 与“完整 relocator 代码”的关系：
+    // - relocator32.S 是源码；安全区里执行的是其编译后代码的副本（步骤 3 拷贝进去），
+    //   该段只负责关分页、重载 GDT、设段与寄存器、ljmp 到内核，不负责复制。
+    // - 完整 relocator = movers_chunk（步骤 4 生成）+ 安全区里 relocator32 的副本。
+    // - 复制内核/initrd 在 movers_chunk 里完成：由 preamble 后的多段 forward/backward 代码执行。
     err = grub_relocator_prepare_relocs (rel, 
                                          get_physical_target_address (ch),  // 安全区域的物理地址
                                          &relst,  // 输出：构建好的 relocator 代码地址
@@ -2580,10 +2586,266 @@ relocator 代码 = preamble（初始化）
               + jumper（跳转到内核入口点）
 ```
 
+**为什么要动态生成？**
+
+1. **src/target 每次启动都不同**：内核、initrd 的临时缓冲区（src）由本次启动的内存分配决定（例如 0x1000000 或 0x2000000）；目标（target）固定为 0x100000 等，但“要不要搬、从哪搬到哪”是运行时才知道的。
+2. **chunk 数量和顺序不固定**：有内核 chunk、可能有 initrd chunk 等；每个 chunk 的 src/target/size 不同，需要为每个“src ≠ target”的 chunk 生成一段复制代码。
+3. **必须选 forward 或 backward**：若 src < target 只能从高向低复制（backward），否则会覆盖未复制区域；若 src > target 用从低向高（forward）。选哪种、以及多段复制的顺序（按 src 排序后依次执行）都要在运行时根据当前 rel 里的 chunk 决定。
+4. **无法用一段静态代码写死**：若用静态代码，无法在编译期填入“本次启动”的 src/target/size，也无法在编译期决定要几段、每段是 forward 还是 backward。因此必须在运行时把“模板代码 + 本次的 src/target/size”组合成实际要执行的指令序列。
+
+**`grub_relocator_prepare_relocs()` 具体实现**（源码：本地 `grub/`，如 `grub/` 或 `/Users/weli/works/grub`）：
+
+**1. 入口：分配 movers 缓冲区并对 chunk 按 src 排序**
+
+```c
+// grub-core/lib/relocator.c:1529-1605
+grub_err_t
+grub_relocator_prepare_relocs (struct grub_relocator *rel, grub_addr_t addr,
+			       void **relstart, grub_size_t *relsize)
+{
+  grub_uint8_t *rels;
+  grub_uint8_t *rels0;
+  struct grub_relocator_chunk *sorted;
+  grub_size_t nchunks = 0;
+  unsigned j;
+  struct grub_relocator_chunk movers_chunk;
+
+  // 步骤 1: 按 relocators_size 分配一块内存，用于存放“preamble + 复制代码 + jumper”
+  if (!malloc_in_range (rel, 0, ~(grub_addr_t)0 - rel->relocators_size + 1,
+			grub_relocator_align,
+			rel->relocators_size, &movers_chunk, 1, 1))
+    return grub_error (GRUB_ERR_OUT_OF_MEMORY, N_("out of memory"));
+  movers_chunk.srcv = rels = rels0
+    = grub_map_memory (movers_chunk.src, movers_chunk.size);
+
+  // 步骤 2: 按 chunk->src 对 rel->chunks 做基数排序，得到 sorted[]
+  // 目的：复制时按源地址顺序执行，避免重叠区被先覆盖
+  {
+    unsigned i;
+    grub_size_t count[257];
+    struct grub_relocator_chunk *from, *to, *tmp;
+    // ... 基数排序：先按 src 低 8 位，再按下一字节，共 GRUB_CPU_SIZEOF_VOID_P 轮
+    for (chunk = rel->chunks; chunk; chunk = chunk->next)
+      from[count[chunk->src & 0xff]++] = *chunk;
+    for (i = 1; i < GRUB_CPU_SIZEOF_VOID_P; i++) { ... }
+    sorted = from;
+  }
+```
+
+**分析**：`addr` 为安全区物理地址（relocator32 被复制到的位置），最终由 jumper 写回；`relstart` 输出 movers 缓冲区起始（即 `rels0`）。排序保证先搬的块不会覆盖未搬的数据（src 小则可能用 backward，src 大则用 forward）。
+
+**2. 写入 preamble，再按 sorted 顺序写入 forward/backward 与 jumper**
+
+```c
+// grub-core/lib/relocator.c:1606-1627
+  grub_cpu_relocator_preamble (rels);
+  rels += grub_relocator_preamble_size;
+
+  for (j = 0; j < nchunks; j++)
+    {
+      if (sorted[j].src < sorted[j].target)
+	{
+	  grub_cpu_relocator_backward ((void *) rels,
+				       sorted[j].srcv,
+				       grub_map_memory (sorted[j].target,
+							sorted[j].size),
+				       sorted[j].size);
+	  rels += grub_relocator_backward_size;
+	}
+      if (sorted[j].src > sorted[j].target)
+	{
+	  grub_cpu_relocator_forward ((void *) rels,
+				      sorted[j].srcv,
+				      grub_map_memory (sorted[j].target,
+						       sorted[j].size),
+				      sorted[j].size);
+	  rels += grub_relocator_forward_size;
+	}
+      if (sorted[j].src == sorted[j].target)
+	grub_arch_sync_caches (sorted[j].srcv, sorted[j].size);
+    }
+  grub_cpu_relocator_jumper ((void *) rels, (grub_addr_t) addr);
+  *relstart = rels0;
+  return GRUB_ERR_NONE;
+}
+```
+
+**分析**：先写 preamble（i386-pc 下为空），再对每个 chunk：`src < target` 写一段 backward 复制代码，`src > target` 写一段 forward 复制代码，`src == target` 只做 cache 同步。最后在 `rels` 处写 jumper，跳转到 `addr`（安全区），即 relocator32 的入口。
+
+**3. Preamble：i386-pc 为空，x86_64-efi 为页表恒等映射**
+
+```c
+// grub-core/lib/i386/relocator_common_c.c:147-152（i386 非 EFI）
+#else
+void
+grub_cpu_relocator_preamble (void *rels __attribute__((unused)))
+{
+}
+#endif
+```
+
+**分析**：i386-pc 不启用分页，preamble 不写入任何指令；`grub_relocator_preamble_size` 为 0。x86_64-efi 下该函数会向 `rels` 写入建立恒等映射的页表代码并设置 `grub_relocator_preamble_size`。
+
+**4. Forward/Backward 模板：汇编中的固定指令序列**
+
+```asm
+// grub-core/lib/i386/relocator_asm.S:24-79
+VARIABLE(grub_relocator_backward_start)
+	/* mov imm32, %eax */
+	.byte	0xb8
+VARIABLE(grub_relocator_backward_dest)
+	.long	0
+	movl	%eax, %edi
+
+	/* mov imm32, %eax */
+	.byte	0xb8
+VARIABLE(grub_relocator_backward_src)
+	.long	0
+	movl	%eax, %esi
+
+	/* mov imm32, %ecx */
+	.byte	0xb9
+VARIABLE(grub_relocator_backward_chunk_size)
+	.long	0
+	add	%ecx, %esi
+	add	%ecx, %edi
+	sub	$1, %esi
+	sub	$1, %edi
+	std
+	rep
+	movsb
+VARIABLE(grub_relocator_backward_end)
+
+VARIABLE(grub_relocator_forward_start)
+	.byte	0xb8
+VARIABLE(grub_relocator_forward_dest)
+	.long	0
+	movl	%eax, %edi
+	.byte	0xb8
+VARIABLE(grub_relocator_forward_src)
+	.long	0
+	movl	%eax, %esi
+	.byte	0xb9
+VARIABLE(grub_relocator_forward_chunk_size)
+	.long	0
+	cld
+	rep
+	movsb
+VARIABLE(grub_relocator_forward_end)
+```
+
+**分析**：`VARIABLE(grub_relocator_*_dest/src/chunk_size)` 在链接后对应 GRUB 数据段中的全局变量；指令中的 `.long 0` 会被重定位成“从该全局变量地址取数”。Backward 模板：把 dest/src/size 从全局变量装入 edi/esi/ecx，将 esi/edi 加到块末尾再减 1（`rep movsb` 从高往低），然后 `std; rep movsb`。Forward 模板：装入后直接 `cld; rep movsb`。运行时这些全局变量在 C 里被赋值为本次 chunk 的 dest/src/size，复制到 movers 的只是模板的机器码，执行时仍从 GRUB 数据段读当前值。
+
+**5. C 侧：设置全局变量并拷贝模板到 rels**
+
+```c
+// grub-core/lib/i386/relocator_common_c.c:192-211
+void
+grub_cpu_relocator_backward (void *ptr, void *src, void *dest,
+			     grub_size_t size)
+{
+  grub_relocator_backward_dest = dest;
+  grub_relocator_backward_src = src;
+  grub_relocator_backward_chunk_size = size;
+
+  grub_memmove (ptr,
+		&grub_relocator_backward_start, RELOCATOR_SIZEOF (_backward));
+}
+
+void
+grub_cpu_relocator_forward (void *ptr, void *src, void *dest,
+			    grub_size_t size)
+{
+  grub_relocator_forward_dest = dest;
+  grub_relocator_forward_src = src;
+  grub_relocator_forward_chunk_size = size;
+
+  grub_memmove (ptr,
+		&grub_relocator_forward_start, RELOCATOR_SIZEOF (_forward));
+}
+```
+
+**分析**：先给 GRUB 数据段中的 `*_dest`/`*_src`/`*_chunk_size` 赋成本次 chunk 的 dest/src/size，再把对应汇编模板（`grub_relocator_*_start`～`_end`）整段拷贝到 `ptr`（即 movers 中的当前 `rels`）。模板里的指令是“从符号地址加载”，执行时仍在 GRUB 地址空间，因此读到的是刚设置的值。动态性体现在：每次循环用不同的 (src, dest, size) 设置全局变量并拷贝同一段模板，得到多段“复制代码”。
+
+**6. Jumper：写入“mov addr, %eax; jmp *%eax”**
+
+```c
+// grub-core/lib/i386/relocator_common_c.c:164-188
+void
+grub_cpu_relocator_jumper (void *rels, grub_addr_t addr)
+{
+  grub_uint8_t *ptr;
+  ptr = rels;
+#ifdef __x86_64__
+  /* movq imm64, %rax (for relocator) */
+  *(grub_uint8_t *) ptr = 0x48;
+  ptr++;
+  *(grub_uint8_t *) ptr = 0xb8;
+  ptr++;
+  *(grub_uint64_t *) ptr = addr;
+  ptr += sizeof (grub_uint64_t);
+#else
+  /* movl imm32, %eax (for relocator) */
+  *(grub_uint8_t *) ptr = 0xb8;
+  ptr++;
+  *(grub_uint32_t *) ptr = addr;
+  ptr += sizeof (grub_uint32_t);
+#endif
+  /* jmp *%eax / jmp *%rax */
+  *(grub_uint8_t *) ptr = 0xff;
+  ptr++;
+  *(grub_uint8_t *) ptr = 0xe0;
+  ptr++;
+}
+```
+
+**分析**：向 `rels` 写入 `movl addr, %eax`（0xb8 + 4 字节）和 `jmp *%eax`（0xff 0xe0）。`addr` 即 `get_physical_target_address(ch)`，为安全区物理地址（relocator32.S 被复制到的位置）。执行完所有 forward/backward 后，跳转到安全区，从 relocator32 的 PREAMBLE 继续执行（关分页、重载 GDT、设段与寄存器、`ljmp` 到内核）。
+
+**7. 执行顺序小结**
+
+- GRUB 调用 `((void (*)(void)) relst)()` 时，`relst` 指向 **movers_chunk** 起始（preamble）。
+- 实际顺序：**preamble**（i386-pc 为空）→ 多段 **forward/backward**（按 sorted 顺序，每段从 GRUB 全局变量读本段 src/dest/size）→ **jumper** 跳到安全区 → **relocator32.S**（关分页、设段、设寄存器、`ljmp` 到内核）。
+
+**生成的 relocator 代码工作总览：**
+
+```
+((void (*)(void)) relst)()         // GRUB 跳转到 movers_chunk 起始（非安全区）
+    ↓
+preamble                           [relocator_common_c.c]
+    ├─ i386-pc：空（无指令）
+    └─ x86_64-efi：建立恒等映射页表、mov 页表基址到 CR3 等
+    ↓
+第 1 段 forward/backward 复制     [relocator_asm.S 编译出的模板代码，运行时被拷贝进 movers_chunk]
+    ├─ 工作：将内核/initrd 从 src（临时缓冲区，如 16MB+）复制到 target（如 0x100000）
+    ├─ 从 GRUB 数据段读本段 dest、src、size（由 C 在生成时已写入）
+    ├─ src < target：backward（std; rep movsb，从高地址向低地址）
+    └─ src > target：forward（cld; rep movsb，从低地址向高地址）
+    ↓
+第 2 段 forward/backward 复制      // 若有多个 chunk 且 src≠target，重复（如 initrd 另一块）
+    ├─ 工作：同上，按 sorted 顺序搬下一块（内核或 initrd）
+    …
+    ↓
+jumper                             [relocator_common_c.c 写入的机器码]
+    ├─ movl addr, %eax             // addr = 安全区物理地址（relocator32 所在）
+    └─ jmp *%eax                   // 跳转到安全区（此时内核已复制到 0x100000）
+    ↓
+relocator32.S（安全区 0x1000-0x9a000，不负责复制，只负责模式切换与跳转）
+    ├─ PREAMBLE：%eax 为当前基址，计算相对地址
+    ├─ RELOAD_GDT：重载 GDT、更新 CS
+    ├─ DISABLE_PAGING：CR0.PG = 0
+    ├─ 设置 DS/ES/FS/GS/SS、ESP、EBP、ESI、EDI、EAX/EBX/ECX/EDX
+    └─ ljmp 到 grub_relocator32_eip（即内核 code32_start @ 0x100000）
+    ↓
+内核入口点（code32_start @ 0x100000）
+```
+
 **关键点**：
 - **relocator 代码本身**被复制到安全区域（0x1000-0x9a000）
 - **relocator 代码中包含复制内核的逻辑**（forward/backward 复制代码）
 - **内核**被复制到 0x100000（由 relocator 代码中的复制逻辑执行）
+
+**为何说“relocator_asm.S 在 movers_chunk 中”？**  
+`relocator_asm.S` 是**源码文件**，定义 forward/backward 的**汇编模板**；编译后对应 `grub_relocator_forward_start`～`_end`、`grub_relocator_backward_start`～`_end`，机器码在 GRUB 镜像里（如 0x100000+）。运行时 `grub_relocator_prepare_relocs()` 会：先分配 **movers_chunk**，再对每个需要复制的 chunk 调用 `grub_cpu_relocator_forward/backward(rels, ...)`，把上述**模板的机器码**从 GRUB 镜像里 **拷贝一段到 movers_chunk 的当前 rels**。因此**真正执行**的 forward/backward 代码是 **movers_chunk 里的那份拷贝**，而不是 GRUB 镜像里的原样。说“在 movers_chunk 中”指的是：**这段复制逻辑的代码被写进并运行于 movers_chunk**，不是指源码文件本身在 movers_chunk。
 
 **⚠️ 为什么必须复制内核？不能直接跳转到临时缓冲区吗？**
 
