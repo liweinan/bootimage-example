@@ -184,7 +184,7 @@
    根据SeaBIOS的文档，BIOS代码分为两部分：
    
    - **运行时代码（Runtime Code）**：
-     - 位置：`0x0F0000 - 0x100000`（映射的128KB）
+     - 位置：`0x0F0000 - 0x100000 (1MB)`（映射的128KB）
      - 可以在实模式下访问
      - 包含：中断处理程序、BIOS服务函数
      - 标记：`VAR16`、`VARFSEG` 等
@@ -290,7 +290,7 @@
            direction TB
            
            subgraph Low640KB["常规RAM区域"]
-               LowRAM["0x000000 - 0x09FFFF (640KB 常规RAM区域)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>系统数据结构：<br/>• IVT (0x0000-0x03FF, 1KB)<br/>  └─ 中断向量表，256个中断入口<br/>• BDA (0x0400-0x04FF, 256B)<br/>  └─ BIOS数据区，系统配置信息<br/>• DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>DOS系统组件：<br/>• DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>• COMMAND.COM (0x7E00+, 50-60KB)<br/>• 用户程序 (0x7E00-0x9FFFF)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>引导加载程序：<br/>• 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载的第一个扇区<br/>  └─ DOS系统：包含DOS引导代码，加载IO.SYS<br/>  └─ GRUB系统：包含GRUB boot.S代码，加载GRUB Core<br/>• GRUB Core 压缩状态 (0x8000-0xCFFF, 约28KB, 已验证)<br/>  └─ 前约4.1KB未压缩（实模式代码）：<br/>     • diskboot.S 代码 (0x8000-0x81F3, 约0.5KB)<br/>     • 块列表数据 (0x81F4-0x81FF, 12B, 文件偏移0x1F4)<br/>     • startup_raw.S (0x8200-0x9063, 约3.6KB)<br/>  └─ 后24KB压缩（C代码）：<br/>     • C代码压缩 (0x9000-0xCFFF, 约24KB, LZMA压缩, 已验证)<br/>  └─ 混合格式：前约4.1KB未压缩（diskboot.S + startup_raw.S），后约24KB压缩（C代码）<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 实模式加载，压缩状态<br/>  └─ 由 startup_raw.S 解压到 0x100000<br/>  └─ 临时缓冲区：0x7000:0x0000 (读取时使用)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>Relocator 安全区 (0x1000-0x9a000)：<br/>  └─ 来源：仅 relocator32.S 编译后的代码（grub_relocator32_start～_end）<br/>  └─ 源码：grub-core/lib/i386/relocator32.S；由 relocator.c 中 grub_relocator32_boot() 里 grub_memmove(..., &grub_relocator32_start, RELOCATOR_SIZEOF(32)) 拷贝到此<br/>  └─ 职责：不负责复制；负责关分页、重载 GDT、设段与寄存器、ljmp 到 code32_start<br/>  └─ 执行顺序：movers_chunk（复制）→ jumper 跳入此处 → ljmp 到内核<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>访问方式：实模式可访问，真正的物理RAM"]
+               LowRAM["0x000000 - 0x09FFFF (640KB 常规RAM区域)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>系统数据结构：<br/>• IVT (0x0000-0x03FF, 1KB)<br/>  └─ 中断向量表，256个中断入口<br/>• BDA (0x0400-0x04FF, 256B)<br/>  └─ BIOS数据区，系统配置信息<br/>• DOS通信区 (0x0500-0x05FF, 256B)<br/>  └─ 引导扇区与DOS内核数据传递<br/>  └─ 临时缓冲区、启动参数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>DOS系统组件：<br/>• DOS内核 (0x0600-0x07BFF, 30KB)<br/>  └─ IO.SYS + MSDOS.SYS<br/>• COMMAND.COM (0x7E00+, 50-60KB)<br/>• 用户程序 (0x7E00-0x9FFFF)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>引导加载程序：<br/>• 引导扇区 (0x7C00-0x7DFF, 512B)<br/>  └─ BIOS加载的第一个扇区<br/>  └─ DOS系统：包含DOS引导代码，加载IO.SYS<br/>  └─ GRUB系统：包含GRUB boot.S代码，加载GRUB Core<br/>• GRUB Core 压缩状态 (0x8000-0xCFFF, 约28KB, 已验证)<br/>  └─ 前约4.1KB未压缩（实模式代码）：<br/>     • diskboot.S 代码 (0x8000-0x81F3, 约0.5KB)<br/>     • 块列表数据 (0x81F4-0x81FF, 12B, 文件偏移0x1F4)<br/>     • startup_raw.S (0x8200-0x9063, 约3.6KB)<br/>  └─ 后24KB压缩（C代码）：<br/>     • C代码压缩 (0x9000-0xCFFF, 约24KB, LZMA压缩, 已验证)<br/>  └─ 混合格式：前约4.1KB未压缩（diskboot.S + startup_raw.S），后约24KB压缩（C代码）<br/>  └─ 引导扇区加载的第二阶段bootloader<br/>  └─ 实模式加载，压缩状态<br/>  └─ 由 startup_raw.S 解压到 0x100000 (1MB)<br/>  └─ 临时缓冲区：0x7000:0x0000 (读取时使用)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>Relocator 安全区 (0x1000-0x9a000)：<br/>  └─ 来源：仅 relocator32.S 编译后的代码（grub_relocator32_start～_end）<br/>  └─ 源码：grub-core/lib/i386/relocator32.S；由 relocator.c 中 grub_relocator32_boot() 里 grub_memmove(..., &grub_relocator32_start, RELOCATOR_SIZEOF(32)) 拷贝到此<br/>  └─ 职责：不负责复制；负责关分页、重载 GDT、设段与寄存器、ljmp 到 code32_start<br/>  └─ 执行顺序：movers_chunk（复制）→ jumper 跳入此处 → ljmp 到内核<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>访问方式：实模式可访问，真正的物理RAM"]
            end
            
            subgraph VGARAM["VGA显存区域"]
@@ -306,12 +306,12 @@
            end
            
            subgraph Above1MB["1MB-4GB RAM区域"]
-               RAM4GB["0x100000 - 0xFFFFFFFF (前4GB RAM，统一区域)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址范围：1MB - 4GB<br/>访问模式：保护模式可访问<br/>内存类型：真正的物理RAM<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>此区域包含以下组件："]
-               GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000+ (1MB+)<br/>GRUB 代码：约 20-50 KB（解压后）<br/>GRUB 模块：约 64 KB（内置模块）<br/>modend 结束地址：约 0x118000（1.1-1.5 MB）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>GRUB 空闲内存池：<br/>• 起始：modend（约 0x118000）<br/>• 结束：BIOS E820 报告的可用内存上限<br/>• 大小：几百 MB 到几 GB（取决于系统内存）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：解析 grub.cfg、显示菜单、加载内核<br/>生命周期：解压后 → 内核加载前（会被覆盖）<br/>访问方式：保护模式，需要 A20 地址线"]
-               KernelLoad["Linux 内核镜像（压缩，bzImage 格式）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000 (1MB)<br/>大小：几 MB - 几十 MB（取决于内核配置）<br/>加载时机：GRUB 解析 grub.cfg 后<br/>加载方式：GRUB 通过文件系统读取<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>镜像结构：<br/>• 头部：setup 代码（实模式，约 32KB）<br/>• 主体：压缩的内核代码（vmlinux 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>关键点：<br/>• 会覆盖解压后的 GRUB Core<br/>• 包含自己的解压代码（setup）<br/>• 解压目标：0x1000000+ (16MB+)"]
-               KernelDecomp["Linux 内核解压后（vmlinux）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x1000000+ (16MB+)<br/>大小：几十 MB - 几百 MB（取决于内核配置）<br/>解压时机：内核 setup 代码执行后<br/>解压方式：内核 setup 代码调用解压函数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>包含内容：<br/>• 内核核心代码（kernel/）<br/>• 设备驱动（drivers/）<br/>• 文件系统（fs/）<br/>• 网络栈（net/）<br/>• 内存管理（mm/）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：内核接管系统，GRUB 不再需要<br/>运行模式：长模式（64位）或保护模式（32位）"]
-               RelocatorMovers["Relocator movers_chunk（动态生成/写入的代码，非 relocator32.S）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：GRUB 空闲内存池动态分配（常在 16MB+ 或 modend 以上）<br/>内容：preamble + forward/backward 复制代码 + jumper<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>来源与文件：<br/>• preamble：grub_cpu_relocator_preamble() 写入，grub-core/lib/i386/relocator_common_c.c（i386-pc 为空）<br/>• forward/backward：relocator_asm.S 编译出的模板（grub_relocator_forward_start～_end、_backward_start～_end），由 grub_cpu_relocator_forward/backward() 拷贝进 movers_chunk，源码 grub-core/lib/i386/relocator_asm.S<br/>• jumper：grub_cpu_relocator_jumper() 写入机器码（mov+jmp），relocator_common_c.c<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>职责：<br/>• 将内核/initrd 从临时缓冲区 (src, 16MB+) 复制到 0x100000 (target)<br/>• 执行完后 jumper 跳转到安全区 (0x1000-0x9a000)，即 relocator32 编译后代码副本的入口<br/>生命周期：grub_relocator_prepare_relocs() 分配并写入 → boot 时执行一次"]
-               KernelTempBuf["内核/initrd 临时缓冲区 (src)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x1000000+ (16MB+)，relocator 分配<br/>内容：bzImage 与 initrd 加载时的临时存放<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>由 movers_chunk 内 forward/backward 代码复制到：<br/>• 内核 → 0x100000<br/>• initrd → 由 boot_params 指定<br/>复制完成后 GRUB 跳转至安全区 relocator32.S，再 ljmp 到内核"]
+               RAM4GB["0x100000 (1MB) - 0xFFFFFFFF (前4GB RAM，统一区域)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址范围：1MB - 4GB<br/>访问模式：保护模式可访问<br/>内存类型：真正的物理RAM<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>此区域包含以下组件："]
+               GRUBDecomp["GRUB Core 解压后（默认 LZMA 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000 (1MB)+ (1MB+)<br/>GRUB 代码：约 20-50 KB（解压后）<br/>GRUB 模块：约 64 KB（内置模块）<br/>modend 结束地址：约 0x118000（1.1-1.5 MB）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>GRUB 空闲内存池：<br/>• 起始：modend（约 0x118000）<br/>• 结束：BIOS E820 报告的可用内存上限<br/>• 大小：几百 MB 到几 GB（取决于系统内存）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：解析 grub.cfg、显示菜单、加载内核<br/>生命周期：解压后 → 内核加载前（会被覆盖）<br/>访问方式：保护模式，需要 A20 地址线"]
+               KernelLoad["Linux 内核镜像（压缩，bzImage 格式）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x100000 (1MB)<br/>大小：几 MB - 几十 MB（取决于内核配置）<br/>加载时机：GRUB 解析 grub.cfg 后<br/>加载方式：GRUB 通过文件系统读取<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>镜像结构：<br/>• 头部：setup 代码（实模式，约 32KB）<br/>• 主体：压缩的内核代码（vmlinux 压缩）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>关键点：<br/>• 会覆盖解压后的 GRUB Core<br/>• 包含自己的解压代码（setup）<br/>• 解压目标：0x1000000 (16MB)+"]
+               KernelDecomp["Linux 内核解压后（vmlinux）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x1000000 (16MB)+<br/>大小：几十 MB - 几百 MB（取决于内核配置）<br/>解压时机：内核 setup 代码执行后<br/>解压方式：内核 setup 代码调用解压函数<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>包含内容：<br/>• 内核核心代码（kernel/）<br/>• 设备驱动（drivers/）<br/>• 文件系统（fs/）<br/>• 网络栈（net/）<br/>• 内存管理（mm/）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>功能：内核接管系统，GRUB 不再需要<br/>运行模式：长模式（64位）或保护模式（32位）"]
+               RelocatorMovers["Relocator movers_chunk（动态生成/写入的代码，非 relocator32.S）<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：GRUB 空闲内存池动态分配（常在 16MB+ 或 modend 以上），与 0x100000 (1MB) 为不同块（movers_chunk 不在 1MB 处）<br/>与复制目标 0x100000 (1MB) 为不同区域，复制只写入 0x100000 (1MB)，不覆盖 movers_chunk 自身，故 jumper 可正常执行<br/>内容：preamble + forward/backward 复制代码 + jumper<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>来源与文件：<br/>• preamble：grub_cpu_relocator_preamble() 写入，grub-core/lib/i386/relocator_common_c.c（i386-pc 为空）<br/>• forward/backward：relocator_asm.S 编译出的模板（grub_relocator_forward_start～_end、_backward_start～_end），由 grub_cpu_relocator_forward/backward() 拷贝进 movers_chunk，源码 grub-core/lib/i386/relocator_asm.S<br/>• jumper：grub_cpu_relocator_jumper() 写入机器码（mov+jmp），relocator_common_c.c<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>职责：<br/>• 将内核/initrd 从临时缓冲区 (src, 16MB+) 复制到 0x100000 (1MB) (target)<br/>• 执行完后 jumper 跳转到安全区 (0x1000-0x9a000)，即 relocator32 编译后代码副本的入口<br/>生命周期：grub_relocator_prepare_relocs() 分配并写入 → boot 时执行一次"]
+               KernelTempBuf["内核/initrd 临时缓冲区 (src)<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>地址：0x1000000 (16MB)+，relocator 分配<br/>内容：bzImage 与 initrd 加载时的临时存放<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>由 movers_chunk 内 forward/backward 代码复制到：<br/>• 内核 → 0x100000 (1MB)<br/>• initrd → 由 boot_params 指定<br/>复制完成后 GRUB 跳转至安全区 relocator32.S，再 ljmp 到内核"]
            end
            
            subgraph Above4GB["4GB+ RAM区域(Long Mode)"]
@@ -350,14 +350,14 @@
 
 这个区域是系统启动过程中最重要的内存区域之一，承载了从 GRUB 到 Linux 内核的完整启动流程。以下是各个组件的详细说明：
 
-**1. GRUB Core 解压后（0x100000+）**
+**1. GRUB Core 解压后（0x100000 (1MB)+）**
 
 - **加载时机**：在 `startup_raw.S` 切换到保护模式并启用 A20 地址线后
    - **解压过程**（已验证）：
   1. `startup_raw.S` 切换到保护模式并启用 A20 地址线
   2. `startup_raw.S` 调用 `_LzmaDecodeA` 函数
   3. 从 `0x9000+`（压缩状态，约 24KB LZMA 压缩）读取压缩数据
-  4. 解压到 `0x100000`（1MB）开始的内存区域
+  4. 解压到 `0x100000 (1MB)`（1MB）开始的内存区域
   5. 解压后大小：约 20-50 KB（取决于 GRUB 配置）
    - **混合格式说明**（已验证）：
      - 只有 C 代码部分被 LZMA 压缩（后 24KB）
@@ -365,11 +365,11 @@
 
 - **GRUB 内存布局详细说明**：
   ```
-  0x100000 ─────────────────────────────────┐
+  0x100000 (1MB) ─────────────────────────────────┐
   │ GRUB 代码（_start 到 _edata）            │ ← GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR
   │ （解压后约 20-50 KB）                    │
-  ├─ grub_modbase ─────────────────────────┤ ← 0x100000 + (_edata - _start)
-  │ GRUB 内置模块数据                        │   例如：0x100000 + 0x8000 = 0x108000
+  ├─ grub_modbase ─────────────────────────┤ ← 0x100000 (1MB) + (_edata - _start)
+  │ GRUB 内置模块数据                        │   例如：0x100000 (1MB) + 0x8000 = 0x108000
   │ （大小取决于加载的模块数量）              │
   ├─ modend ───────────────────────────────┤ ← grub_modbase + modinfo->size
   │                                         │   例如：0x108000 + 0x10000 = 0x118000（约 1.1MB）
@@ -381,7 +381,7 @@
   典型值：几百 MB 到几 GB（取决于系统内存）
   ```
 
-  > **详细分析**：关于 GRUB 内存池初始化的完整源代码分析，请参见 [GRUB 内核加载机制](GRUB_KERNEL_LOADING.md#为什么-0x100000-区域不可分配)。
+  > **详细分析**：关于 GRUB 内存池初始化的完整源代码分析，请参见 [GRUB 内核加载机制](GRUB_KERNEL_LOADING.md#为什么-0x100000 (1MB)-区域不可分配)。
 
 - **包含内容**：
   - `_start`（`startup.S`，解压后的代码入口点，32位保护模式）
@@ -395,31 +395,31 @@
   - 准备内核启动参数
 - **生命周期**：
   - 从解压完成到内核加载前一直存在
-  - 内核加载时会覆盖此区域（因为内核也加载到 `0x100000`）
+  - 内核加载时会覆盖此区域（因为内核也加载到 `0x100000 (1MB)`）
 
-**2. Linux 内核镜像（压缩，0x100000）**
+**2. Linux 内核镜像（压缩，0x100000 (1MB)）**
 
 - **加载时机**：GRUB 解析 `grub.cfg` 后，用户选择启动项时
 - **加载过程**：
   1. GRUB 读取内核镜像文件（通常是 `vmlinuz` 或 `bzImage`）
-  2. 将压缩的内核镜像加载到 `0x100000`（1MB）
+  2. 将压缩的内核镜像加载到 `0x100000 (1MB)`（1MB）
   3. **注意**：这会覆盖之前解压的 GRUB Core
 - **镜像结构**（bzImage 格式）：
   - **头部**：setup 代码（实模式，约 32KB）
   - **主体**：压缩的内核代码（vmlinux 压缩后）
   - **总大小**：通常几 MB 到几十 MB（取决于内核配置）
 - **关键点**：
-  - 内核镜像加载到 `0x100000` 会覆盖 GRUB Core
+  - 内核镜像加载到 `0x100000 (1MB)` 会覆盖 GRUB Core
   - 这是设计上的选择：GRUB 完成使命后不再需要
   - 内核镜像包含自己的解压代码（setup 代码）
 
-**3. Linux 内核解压后（0x1000000+，16MB+）**
+**3. Linux 内核解压后（0x1000000 (16MB)+，16MB+）**
 
 - **解压时机**：内核 setup 代码执行后
 - **解压过程**：
-  1. 内核 setup 代码（在 `0x100000`）执行
+  1. 内核 setup 代码（在 `0x100000 (1MB)`）执行
   2. 检测可用内存（通过 BIOS E820）
-  3. 选择解压目标地址（通常 `0x1000000`，16MB，或更高）
+  3. 选择解压目标地址（通常 `0x1000000 (16MB)`，16MB，或更高）
   4. 解压内核代码到目标地址
   5. 跳转到解压后的内核入口点（`startup_64`）
 - **解压后大小**：通常几十 MB 到几百 MB（取决于内核配置）
@@ -427,9 +427,9 @@
   ```
   时间线：
   
-  T1: 0x100000+ → GRUB Core 解压后（代码约 20-50 KB，加模块到 modend 约 0x118000）
-  T2: 0x100000  → Linux 内核镜像加载（覆盖 GRUB Core）
-  T3: 0x1000000+ → Linux 内核解压后（内核接管系统）
+  T1: 0x100000 (1MB)+ → GRUB Core 解压后（代码约 20-50 KB，加模块到 modend 约 0x118000）
+  T2: 0x100000 (1MB)  → Linux 内核镜像加载（覆盖 GRUB Core）
+  T3: 0x1000000 (16MB)+ → Linux 内核解压后（内核接管系统）
   ```
 
 **4. 内存区域关系和时间线**
@@ -438,17 +438,17 @@
 
 ```
 阶段 1：GRUB Core 解压（保护模式）
-├─ 0x100000 - 0x118000：GRUB Core + 模块（代码约 20-50 KB，加模块到 modend）
+├─ 0x100000 (1MB) - 0x118000：GRUB Core + 模块（代码约 20-50 KB，加模块到 modend）
 └─ 功能：解析配置、显示菜单、准备加载内核
 
 阶段 2：Linux 内核加载（保护模式）
-├─ 0x100000：Linux 内核镜像（压缩，几 MB - 几十 MB）
+├─ 0x100000 (1MB)：Linux 内核镜像（压缩，几 MB - 几十 MB）
 │  └─ 覆盖 GRUB Core（GRUB 完成使命）
 └─ 功能：内核 setup 代码执行
 
 阶段 3：Linux 内核解压（保护模式 → 长模式）
-├─ 0x100000：内核 setup 代码（仍在执行）
-└─ 0x1000000+：Linux 内核解压后（几十 MB - 几百 MB）
+├─ 0x100000 (1MB)：内核 setup 代码（仍在执行）
+└─ 0x1000000 (16MB)+：Linux 内核解压后（几十 MB - 几百 MB）
    └─ 功能：内核接管系统，GRUB 和 setup 代码不再需要
 ```
 
@@ -465,18 +465,18 @@
    - 可以加载更大的内核镜像
 
 3. **设计选择**：
-   - GRUB Core 解压到 `0x100000`（1MB）
-   - 内核也加载到 `0x100000`（覆盖 GRUB Core）
-   - 内核解压到 `0x1000000`（16MB）或更高
+   - GRUB Core 解压到 `0x100000 (1MB)`（1MB）
+   - 内核也加载到 `0x100000 (1MB)`（覆盖 GRUB Core）
+   - 内核解压到 `0x1000000 (16MB)`（16MB）或更高
    - 这样设计可以最大化利用内存空间
 
 **关键地址总结**：
 
 | 地址 | 用途 | 大小 | 时机 |
 |------|------|------|------|
-| `0x100000` | GRUB Core + 模块 | 到 modend 约 0x118000（约 96-192 KB） | `startup_raw.S` 解压后 |
-| `0x100000` | Linux 内核镜像（压缩） | 几 MB - 几十 MB | GRUB 加载内核时 |
-| `0x1000000+` | Linux 内核解压后 | 几十 MB - 几百 MB | 内核 setup 代码解压后 |
+| `0x100000 (1MB)` | GRUB Core + 模块 | 到 modend 约 0x118000（约 96-192 KB） | `startup_raw.S` 解压后 |
+| `0x100000 (1MB)` | Linux 内核镜像（压缩） | 几 MB - 几十 MB | GRUB 加载内核时 |
+| `0x1000000 (16MB)+` | Linux 内核解压后 | 几十 MB - 几百 MB | 内核 setup 代码解压后 |
 
 **DOS 通信区（0x0500-0x05FF）说明：**
 
@@ -531,7 +531,7 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
      - **前约 4.1KB 未压缩**：diskboot.S + startup_raw.S（实模式代码，在 `0x8000 - 0x9063`）
        - diskboot.S：约 0.5KB（0x8000-0x81F3）+ 块列表 12 字节（0x81F4-0x81FF）
        - startup_raw.S：从 0x8200 开始，约 3.6KB
-     - **后 24KB LZMA 压缩**：C 代码（在 `0x9000+`，需要解压到 `0x100000`）
+     - **后 24KB LZMA 压缩**：C 代码（在 `0x9000+`，需要解压到 `0x100000 (1MB)`）
    - **大小**：通常 8KB - 32KB（压缩状态，取决于 GRUB 配置）
    - **对应物理内存**：`0x8000 - 0xCFFF`（物理地址，示例范围）
    - **位置**：位于前1MB的常规RAM区域，紧接引导扇区之后
@@ -547,14 +547,14 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
    **阶段 2：解压后的 GRUB Core（保护模式，默认使用 LZMA 压缩）**
 
    **默认情况：使用 LZMA 压缩**
-   - **解压位置**：`GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000`（1MB）
-   - **内存范围**：`0x100000` - `modend`（约 0x118000，代码约 20-50 KB + 模块约 64 KB）
-   - **关键点**：**不在前 1MB 内存空间内**（`0x100000` 是 1MB 边界，`0x100000+` 是 1MB 以上）
+   - **解压位置**：`GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000 (1MB)`（1MB）
+   - **内存范围**：`0x100000 (1MB)` - `modend`（约 0x118000，代码约 20-50 KB + 模块约 64 KB）
+   - **关键点**：**不在前 1MB 内存空间内**（`0x100000 (1MB)` 是 1MB 边界，`0x100000 (1MB)+` 是 1MB 以上）
    - **解压时机**：`startup_raw.S` 切换到保护模式后
    - **解压函数**：`_LzmaDecodeA`（在 `startup_raw.S:346` 调用）
    - **访问方式**：保护模式下访问（需要 A20 地址线启用）
    - **关键点**：
-     - **解压位置**：`0x100000`（1MB），与内核加载地址相同
+     - **解压位置**：`0x100000 (1MB)`（1MB），与内核加载地址相同
      - **解压后大小**：代码约 20-50 KB，加模块到 modend（约 0x118000），不在前 1MB 内存空间内
      - **解压时机**：在 `startup_raw.S` 中，**此时还没有加载任何模块**
      - **模块加载**：模块是在 `grub_main()` 之后才动态加载的，不在解压流程中
@@ -604,12 +604,12 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
    - 定义文件：`grub/grub-core/Makefile.core.def`（`kernel = { ... }` 部分）
    - 编译后：这些文件被编译并链接到 `core.img` 中
    - 压缩状态：在 `core.img` 中，C 代码部分被 LZMA 压缩（约 24KB）
-   - 解压后：在内存 `0x100000` - `modend`（代码约 20-50 KB + 模块，到约 0x118000）
+   - 解压后：在内存 `0x100000 (1MB)` - `modend`（代码约 20-50 KB + 模块，到约 0x118000）
 
    **关键函数入口点**：
    - `_start`（`startup.S`，解压后的代码入口点，32位保护模式）
      - 源代码位置：`grub/grub-core/kern/i386/pc/startup.S`
-     - 由 `startup_raw.S` 的 `jmp *%esi` 跳转到这里（`0x100000`）
+     - 由 `startup_raw.S` 的 `jmp *%esi` 跳转到这里（`0x100000 (1MB)`）
      - 保存模式切换函数地址、清理 BSS 段、保存启动设备号
      - 调用 `grub_main()`
    - `grub_main()`：GRUB 主入口函数（在 `kern/main.c` 中）
@@ -640,41 +640,41 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
      - **实际部署中几乎总是使用压缩**，未压缩情况仅用于特殊场景（调试、嵌入式系统等）
 
    **Linux 内核加载和解压位置**：
-   - **GRUB 加载地址**：`0x100000`（1MB）
+   - **GRUB 加载地址**：`0x100000 (1MB)`（1MB）
      - GRUB 将压缩的内核镜像（bzImage）加载到此地址
-     - **注意**：这会覆盖解压后的 GRUB Core（如果之前解压到 0x100000）
-   - **内核解压目标地址**：通常 `0x1000000`（16MB）或更高
+     - **注意**：这会覆盖解压后的 GRUB Core（如果之前解压到 0x100000 (1MB)）
+   - **内核解压目标地址**：通常 `0x1000000 (16MB)`（16MB）或更高
      - 内核镜像（bzImage）包含压缩的内核代码
      - 内核的 setup 代码会解压内核到更高地址
-     - 解压后的内核代码（vmlinux）通常加载到 `0x1000000`（16MB）或内核指定的地址
+     - 解压后的内核代码（vmlinux）通常加载到 `0x1000000 (16MB)`（16MB）或内核指定的地址
    - **内存布局**：
      ```
      0x100000 (1MB)：压缩的内核镜像（bzImage，由 GRUB 加载）
      ↓
-     内核 setup 代码执行（在 0x100000）
+     内核 setup 代码执行（在 0x100000 (1MB)）
      ↓
-     解压内核到更高地址（通常 0x1000000，16MB）
+     解压内核到更高地址（通常 0x1000000 (16MB)，16MB）
      ↓
-     0x1000000+：解压后的内核代码（vmlinux）
+     0x1000000 (16MB)+：解压后的内核代码（vmlinux）
      ```
 
    **功能**：
      - 解析 GRUB 配置文件
-     - 加载 Linux 内核镜像到 `0x100000`（1MB）
+     - 加载 Linux 内核镜像到 `0x100000 (1MB)`（1MB）
      - 加载 initramfs 到更高地址
      - 切换到保护模式/长模式
      - 跳转到内核入口点
 
    **关键地址**：
      - `GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000`：GRUB Core 压缩状态加载地址（起始地址）
-     - `GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000`：GRUB Core 解压地址（1MB）
+     - `GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR = 0x100000 (1MB)`：GRUB Core 解压地址（1MB）
      - `GRUB_BOOT_MACHINE_BUFFER_SEG = 0x7000`：临时缓冲区段（读取扇区时使用）
      - `GRUB_BOOT_MACHINE_STACK_SEG = 0x2000`：栈段地址
 
    **对应文件**：
      - `diskboot.S`：grub/grub-core/boot/i386/pc/diskboot.S（加载到 0x8000，不解压）
-     - `startup_raw.S`：grub/grub-core/boot/i386/pc/startup_raw.S（加载到 0x8200，解压后跳转到 0x100000）
-     - C代码：grub/grub-core/kern/main.c 等（压缩状态在 0x9000+，解压后在 0x100000+）
+     - `startup_raw.S`：grub/grub-core/boot/i386/pc/startup_raw.S（加载到 0x8200，解压后跳转到 0x100000 (1MB)）
+     - C代码：grub/grub-core/kern/main.c 等（压缩状态在 0x9000+，解压后在 0x100000 (1MB)+）
 
    **内存布局对比**：
    ```
@@ -682,7 +682,7 @@ DOS 通信区是 DOS 系统启动过程中用于数据传递的临时缓冲区�
    0x8000 - 0xCFFF：压缩的 GRUB Core（约 20KB）
    
    解压后（保护模式，1MB 以上）：
-   0x100000+：解压后的 GRUB Core（约 20KB - 50KB）
+   0x100000 (1MB)+：解压后的 GRUB Core（约 20KB - 50KB）
    ```
 
 > **详细说明**：关于实模式地址与物理内存的映射关系，请参见 [X86 CPU 运行模式详解](X86_CPU_MODES.md)。
@@ -1605,12 +1605,12 @@ IBM PC/AT（1984）：
 ├─ 0x0C0000 - 0x0DFFFF：扩展 ROM（128KB）
 └─ 0x0E0000 - 0xFFFFF：BIOS ROM 映射（128KB）← 实模式可访问
 
-0x100000 - 0xFFFFFF (1MB - 16MB)
+0x100000 (1MB) - 0xFFFFFF (1MB - 16MB)
 └─ 扩展内存（保护模式可访问）
 
    如果 BIOS 是 256KB（80286 系统）：
    - 完整 BIOS：0xFC0000 - 0xFFFFFF（256KB，16MB 地址空间顶部）
-     - 计算：0x1000000 - 0x40000 = 0xFC0000
+     - 计算：0x1000000 (16MB) - 0x40000 = 0xFC0000
    - 前 128KB：0xFC0000 - 0xFDFFFF（实模式无法访问，保护模式可访问）
    - 后 128KB：0xFE0000 - 0xFFFFFF（映射到实模式的 0xE0000-0xFFFFF）
    
@@ -1681,7 +1681,7 @@ IBM PC/AT（1984）：
 
 2. **BIOS 存储位置（8086/8088，20 位地址总线）**
    ```
-   20 位地址空间（1MB = 0x100000）：
+   20 位地址空间（1MB = 0x100000 (1MB)）：
    
    0x00000 - 0x9FFFF：常规 RAM（640KB）
    0xA0000 - 0xBFFFF：视频 RAM（128KB）
@@ -1691,12 +1691,12 @@ IBM PC/AT（1984）：
    
    如果 BIOS 是 64KB：
    - 完整 BIOS：0xF0000 - 0xFFFFF（64KB，1MB 地址空间顶部）
-   - 计算：0x100000 - 0x10000 = 0xF0000
+   - 计算：0x100000 (1MB) - 0x10000 = 0xF0000
    - 复位向量：0xFFFF0（在 BIOS 的最后 16 字节）
    
    如果 BIOS 是 32KB：
    - 完整 BIOS：0xF8000 - 0xFFFFF（32KB，1MB 地址空间顶部）
-   - 计算：0x100000 - 0x8000 = 0xF8000
+   - 计算：0x100000 (1MB) - 0x8000 = 0xF8000
    - 复位向量：0xFFFF0（在 BIOS 的最后 16 字节）
    ```
 
@@ -1779,17 +1779,17 @@ IBM PC/AT（1984）：
    ```
    24 位地址空间（16MB）：
    
-   0x000000 - 0xFFFFFF（16MB = 0x1000000）
+   0x000000 - 0xFFFFFF（16MB = 0x1000000 (16MB)）
    
    如果 BIOS 是 256KB：
    - 完整 BIOS：0xFC0000 - 0xFFFFFF（256KB，16MB 地址空间顶部）
-     - 计算：0x1000000 - 0x40000 = 0xFC0000
+     - 计算：0x1000000 (16MB) - 0x40000 = 0xFC0000
    - 前 128KB：0xFC0000 - 0xFDFFFF（实模式无法访问，保护模式可访问）
    - 后 128KB：0xFE0000 - 0xFFFFFF（映射到实模式的 0xE0000-0xFFFFF）
    
    如果 BIOS 是 128KB：
    - 完整 BIOS：0xFE0000 - 0xFFFFFF（128KB，16MB 地址空间顶部）
-     - 计算：0x1000000 - 0x20000 = 0xFE0000
+     - 计算：0x1000000 (16MB) - 0x20000 = 0xFE0000
    - 全部映射到实模式的 0xE0000-0xFFFFF
    ```
 

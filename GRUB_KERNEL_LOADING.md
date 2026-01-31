@@ -18,9 +18,9 @@ grub_main()（grub/grub-core/kern/main.c）
         ↓
 grub_cmd_linux()（执行 linux 命令）
     ├─ 源代码位置：grub/grub-core/loader/i386/linux.c:680-1062
-    ├─ 加载内核镜像到临时缓冲区（通常在 16MB+，不是 0x100000）
+    ├─ 加载内核镜像到临时缓冲区（通常在 16MB+，不是 0x100000 (1MB)）
     ├─ 设置内核启动参数（boot_params）
-    ├─ 最终目标地址：0x100000（boot 时 relocator 代码会将内核复制到此）
+    ├─ 最终目标地址：0x100000 (1MB)（boot 时 relocator 代码会将内核复制到此）
     └─ 注册启动函数 grub_linux_boot()
         ↓
 grub_cmd_initrd()（执行 initrd 命令，可选）
@@ -38,7 +38,7 @@ grub_linux_boot() → grub_relocator32_boot()
         ↓
 grub_relocator32_boot() 跳转到内核入口点（code32_start）
     ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
-    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 的偏移）
+    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 (1MB) 的偏移）
     └─ 寄存器状态：
         ├─ ESI = boot_params 地址
         ├─ ESP = 栈指针
@@ -46,7 +46,7 @@ grub_relocator32_boot() 跳转到内核入口点（code32_start）
     ↓
 Linux 内核 Setup 代码（实模式）
     ├─ 源代码位置：linux/arch/x86/boot/header.S
-    ├─ 内存位置：0x100000（1MB）或内核指定的地址
+    ├─ 内存位置：0x100000 (1MB)或内核指定的地址
     ├─ 运行模式：实模式（初始阶段）
     ├─ 验证内核签名（boot_flag = 0xAA55）
     ├─ 初始化基本环境
@@ -838,7 +838,7 @@ menuentry "Linux 5.x.x" {
 
 # 用户按 Enter 选择 "Linux 5.x.x" 后，GRUB 执行 menuentry 中的命令：
 # 1. 执行 linux 命令 → 调用 grub_cmd_linux()
-#    - 加载内核到临时缓冲区（通常在 16MB+），boot 时复制到 0x100000
+#    - 加载内核到临时缓冲区（通常在 16MB+），boot 时复制到 0x100000 (1MB)
 #    - 注册 grub_linux_boot() 作为启动函数
 # 2. 执行 initrd 命令 → 调用 grub_cmd_initrd()
 #    - 加载 initramfs 到高地址
@@ -1043,18 +1043,17 @@ grub_parser_execute("grub.cfg 内容")
    - boot 命令调用 `grub_linux_boot()` → `grub_relocator32_boot()` 跳转到内核
 
 3. **内存布局与 Relocator 机制**：
-   - GRUB 解压后也在 0x100000（1MB），与内核目标地址相同
-   - 内核**先被加载到 relocator 管理的临时缓冲区**（通常在 0x1000000 = 16MB 以上）
+   - GRUB 解压后也在 0x100000 (1MB)，与内核目标地址相同
+   - 内核**先被加载到 relocator 管理的临时缓冲区 (src)**（通常在 0x1000000 (16MB) = 16MB 以上）
    - `boot` 命令执行时：
-     - 构建 relocator 代码（包含复制内核的代码 + 跳转代码）
-     - 将 relocator 代码复制到**低内存**（0x1000-0x9a000）
-     - 执行 relocator 代码：
-       1. 将内核从临时缓冲区（16MB+）复制到 0x100000
-       2. 切换到实模式
-       3. 跳转到内核入口点（code32_start @ 0x100000）
+     - 构建 relocator 代码：**movers_chunk**（复制代码 + jumper）在 1MB 之上的另一块分配（如 16MB+），**安全区** (0x1000-0x9a000) 存放 relocator32 副本
+     - 将 relocator32.S 副本复制到**安全区**（0x1000-0x9a000）
+     - 跳转到 movers_chunk 执行：
+       1. movers_chunk 将内核从临时缓冲区 (src, 16MB+) 复制到 **0x100000 (1MB) (target)**（movers_chunk 与 0x100000 为不同区域，复制不覆盖 movers_chunk）
+       2. jumper 跳到安全区；安全区 relocator32 切换到实模式并 ljmp 到内核入口点（code32_start @ 0x100000 (1MB)）
    - 此时 GRUB 代码被覆盖，但已不需要
 
-**Relocator 概要**：内核先加载到 relocator 管理的临时缓冲区（通常 16MB 以上），boot 时由 relocator 代码复制到 0x100000 并跳转。数据结构、分配逻辑、为何 0x100000 分配失败、内存布局等详见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
+**Relocator 概要**：内核先加载到 relocator 管理的临时缓冲区 (src，通常 16MB 以上)，boot 时由 **movers_chunk**（在 1MB 之上单独分配，与 0x100000 为不同块）内的复制代码从 src 复制到 0x100000 (1MB) (target)，再 jumper 到安全区、relocator32 跳入内核。数据结构、分配逻辑、为何 0x100000 (1MB) 分配失败、内存布局等详见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
 
 ### grub_cmd_linux() 函数
 
@@ -1065,7 +1064,7 @@ grub_parser_execute("grub.cfg 内容")
 - 解析内核头部，验证内核签名
 - 通过 relocator 分配临时缓冲区（通常在 16MB 以上），加载内核到临时位置
 - 设置内核启动参数（`boot_params`）
-- 注册启动函数 `grub_linux_boot()`（boot 时将内核从临时位置复制到 0x100000）
+- 注册启动函数 `grub_linux_boot()`（boot 时将内核从临时位置复制到 0x100000 (1MB)）
 
 **内核镜像结构概述：**
 
@@ -1079,7 +1078,7 @@ Linux 内核镜像（bzImage/vmlinuz）包含两部分：
 2. **压缩的内核代码**：
    - 位置：setup 代码之后
    - 格式：gzip 压缩的 vmlinux
-   - 加载地址：`0x100000`（1MB）或内核指定的地址
+   - 加载地址：`0x100000 (1MB)`（1MB）或内核指定的地址
 
 **完整源代码分析：**
 
@@ -1120,24 +1119,24 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
     kernel_size = len - setup_size;
     
     // 步骤 7: 计算加载地址
-    preferred_address = GRUB_LINUX_BZIMAGE_ADDR;  // 0x100000
+    preferred_address = GRUB_LINUX_BZIMAGE_ADDR;  // 0x100000 (1MB)
     if (lh.pref_address && relocatable)
         preferred_address = grub_le_to_cpu64 (lh.pref_address);
     
     // 步骤 8: 通过 relocator 分配内存
-    // ⚠️ 关键：内核不是直接加载到 0x100000，而是加载到临时缓冲区
-    // 因为 GRUB 代码也在 0x100000，需要避免覆盖
+    // ⚠️ 关键：内核不是直接加载到 0x100000 (1MB)，而是加载到临时缓冲区
+    // 因为 GRUB 代码也在 0x100000 (1MB)，需要避免覆盖
     allocate_pages (prot_size, &align, min_align, relocatable, preferred_address);
     // allocate_pages 内部调用 grub_relocator_alloc_chunk_align()：
-    //   1. 首先尝试在 preferred_address (0x100000) 分配
+    //   1. 首先尝试在 preferred_address (0x100000 (1MB)) 分配
     //      - 对于可重定位内核：这个尝试几乎总是失败（GRUB 代码占用）
     //      - 但代码仍会尝试，保持逻辑统一和兼容性
     //   2. 如果失败，则在 0x1000000 (16MB) 以上分配
-    //      - 0x1000000 = 16 * 1024 * 1024 = 16 MB（硬编码在源代码中）
+    //      - 0x1000000 (16MB) = 16 * 1024 * 1024 = 16 MB（硬编码在源代码中）
     //      - 选择 16MB 的原因：避开 GRUB 区域，避开系统保留区域，历史原因
     // 返回两个地址：
    //   - prot_mode_mem：临时缓冲区地址（GRUB 用于写入数据，通常在 16MB+）
-   //   - prot_mode_target：最终目标地址（0x100000，boot 时 relocator 代码会将内核复制到此）
+   //   - prot_mode_target：最终目标地址（0x100000 (1MB)，boot 时 relocator 代码会将内核复制到此）
     
     // 步骤 9: 复制内核到临时缓冲区（不是最终位置！）
     // 注意：这里只是复制文件内容到内存，不解压
@@ -1300,7 +1299,7 @@ fail:
 ```
 内存地址                  内容
 ─────────────────────────────────────────
-0x100000 - 0x1FFFFF      内核镜像（vmlinuz）
+0x100000 (1MB) - 0x1FFFFF      内核镜像（vmlinuz）
 0x200000 - ...           内核解压区域
 ...
 0x2F000000 - 0x2FFFFFFF  initrd（尽量在高地址）
@@ -1385,7 +1384,7 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
 
 2. **内存分配**：
    - 使用 `grub_efi_allocate_any_pages()`（EFI `AllocatePages` 服务）
-   - 不需要指定固定地址（如 0x100000），EFI 会自动分配
+   - 不需要指定固定地址（如 0x100000 (1MB)），EFI 会自动分配
 
 3. **命令行参数**：
    - 转换为 UTF-16 格式（EFI 使用 UTF-16 字符串）
@@ -1745,10 +1744,10 @@ grub_loader_set (grub_err_t (*boot) (void),
 4. **内存布局（加载多个内核时）**：
    ```
    第一次加载内核：
-   0x1000000+ (16MB+) → 内核 1 临时缓冲区（prot_mode_mem）
+   0x1000000 (16MB)+ → 内核 1 临时缓冲区（prot_mode_mem）
    
    第二次加载内核（第一个被卸载）：
-   0x1000000+ (16MB+) → 内核 2 临时缓冲区（prot_mode_mem）
+   0x1000000 (16MB)+ → 内核 2 临时缓冲区（prot_mode_mem）
    （内核 1 的内存已被释放）
    
    boot 时：
@@ -1777,7 +1776,7 @@ grub_loader_set (grub_err_t (*boot) (void),
      4. 为新内核分配新的临时缓冲区
    
    - **boot 时**：
-     1. 只有**最后一个加载的内核**会被复制到 0x100000
+     1. 只有**最后一个加载的内核**会被复制到 0x100000 (1MB)
      2. 之前的内核已经被卸载，不会参与启动过程
      3. relocator 代码只复制最后一个内核
    
@@ -1792,9 +1791,9 @@ grub_loader_set (grub_err_t (*boot) (void),
    grub_linux_boot() → grub_relocator32_boot()
      ↓
    relocator 代码执行：
-     1. 复制内核 2 从临时缓冲区（16MB+）→ 0x100000
+     1. 复制内核 2 从临时缓冲区（16MB+）→ 0x100000 (1MB)
      2. 切换到实模式
-     3. 跳转到内核 2 的 code32_start @ 0x100000
+     3. 跳转到内核 2 的 code32_start @ 0x100000 (1MB)
    
    # 内核 1 不会被复制，因为它已经被卸载
    ```
@@ -1835,10 +1834,10 @@ grub_loader_set (grub_err_t (*boot) (void),
    **⚠️ 关键澄清**：你的理解部分正确，但不完全正确。
    
    **内存布局分析**：
-   - **临时缓冲区位置**：`prot_mode_mem` 通常在 **16MB+**（0x1000000+）
+   - **临时缓冲区位置**：`prot_mode_mem` 通常在 **16MB+**（0x1000000 (16MB)+）
    - **内核最终位置**：
-     - 内核被复制到 **0x100000**（1MB）← 这会覆盖 GRUB 代码
-     - 内核解压后的代码通常在 **0x1000000+**（16MB+）← 与临时缓冲区在同一区域
+     - 内核被复制到 **0x100000 (1MB)**（1MB）← 这会覆盖 GRUB 代码
+     - 内核解压后的代码通常在 **0x1000000 (16MB)+**（16MB+）← 与临时缓冲区在同一区域
    
    **两种情况**：
    
@@ -2058,9 +2057,9 @@ menuentry "Linux 5.x.x" {
 #    - 构建 relocator 代码（包含复制内核的代码 + 跳转代码）
 #    - 将 relocator 代码复制到安全区域（0x1000-0x9a000）
 #    - 执行 relocator 代码：
-#      a. 将内核从临时缓冲区（16MB+）复制到 0x100000
+#      a. 将内核从临时缓冲区（16MB+）复制到 0x100000 (1MB)
 #      b. 切换到实模式
-#      c. 跳转到内核入口点（code32_start @ 0x100000）
+#      c. 跳转到内核入口点（code32_start @ 0x100000 (1MB)）
 ```
 
 ### grub_linux_boot() 函数
@@ -2096,7 +2095,7 @@ grub_linux_boot (void)
 
 **概要**：在安全区 (0x1000-0x9a000) 分配 chunk，拷贝 relocator32 副本，调用 `grub_relocator_prepare_relocs()` 生成 movers_chunk（复制内核 + jumper），再跳转到 movers_chunk；执行顺序、两处代码来源、为何动态生成、为何必须复制等详见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
 
-**⚠️ 关键问题解答（简要）**：relocator 代码对应 relocator32.S（安全区）与 relocator_asm.S/relocator_common_c.c（movers_chunk）；复制到安全区是因 GRUB 在 0x100000+ 会被内核覆盖；不能直接跳 code32_start 因需先切实模式、设段与寄存器。详述见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
+**⚠️ 关键问题解答（简要）**：relocator 代码对应 relocator32.S（安全区）与 relocator_asm.S/relocator_common_c.c（movers_chunk）；复制到安全区是因 GRUB 在 0x100000 (1MB)+ 会被内核覆盖；不能直接跳 code32_start 因需先切实模式、设段与寄存器。详述见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
 
 ### code32_start 地址的来源和传递过程
 
@@ -2111,9 +2110,9 @@ linux_params.code32_start = prot_mode_target +
                             grub_le_to_cpu32 (lh.code32_start) - 
                             GRUB_LINUX_BZIMAGE_ADDR;
 // 其中：
-// - prot_mode_target: 内核实际加载地址（通常是 0x100000）
-// - lh.code32_start: 内核头部中的字段，表示相对于 0x100000 的偏移
-// - GRUB_LINUX_BZIMAGE_ADDR: 0x100000（1MB）
+// - prot_mode_target: 内核实际加载地址（通常是 0x100000 (1MB)）
+// - lh.code32_start: 内核头部中的字段，表示相对于 0x100000 (1MB) 的偏移
+// - GRUB_LINUX_BZIMAGE_ADDR: 0x100000 (1MB)
 ```
 
 **2. `state.eip` 的设置：**
@@ -2160,18 +2159,18 @@ relocator32_start:
 内存地址范围              内容
 ─────────────────────────────────────────
 0x100000 (1MB) - ...     vmlinuz 镜像
-├─ 0x100000 - 0x1001FF   内核头部（boot_params，512 字节）
+├─ 0x100000 (1MB) - 0x1001FF   内核头部（boot_params，512 字节）
 ├─ 0x100200 - ...        Setup 代码（setup_sects * 512 字节）
 └─ Setup 之后           压缩的内核代码（gzip 压缩）
     ↓（解压后）
-0x100000+               解压后的内核代码
+0x100000 (1MB)+               解压后的内核代码
 ├─ startup_32           32 位保护模式入口点
 └─ startup_64           64 位长模式入口点
 ```
 
 **⚠️ 关键问题：内核覆盖 GRUB 代码后如何完成跳转？**
 
-内核被加载到 0x100000+，这与 GRUB 解压后的代码区域重叠。GRUB 通过 **relocator 机制** 解决这个问题：
+内核被加载到 0x100000 (1MB)+，这与 GRUB 解压后的代码区域重叠。GRUB 通过 **relocator 机制** 解决这个问题：
 
 **Relocator 机制（`grub/grub-core/lib/i386/relocator.c`）：**
 
@@ -2227,7 +2226,7 @@ grub_relocator32_boot()
     ├─ 6. 禁用分页，准备 32 位保护模式环境
     └─ 7. 执行 ljmp 跳转到内核 code32_start
             ↓
-内核入口点（code32_start @ 0x100000）
+内核入口点（code32_start @ 0x100000 (1MB)）
 ```
 
 **内存布局关键点：**
@@ -2238,13 +2237,13 @@ grub_relocator32_boot()
 0x1000 - 0x9A000     ⚠️ 安全区域（relocator 代码在此执行）
 0x7C00 - 0x7DFF      引导扇区
 0x8000 - 0xFFFF      GRUB 实模式代码（startup_raw.S 等）
-0x100000+            GRUB 保护模式代码（会被内核覆盖）
-0x100000+            内核镜像（覆盖 GRUB 代码）
+0x100000 (1MB)+            GRUB 保护模式代码（会被内核覆盖）
+0x100000 (1MB)+            内核镜像（覆盖 GRUB 代码）
 ```
 
 **为什么这个机制有效：**
 
-1. **安全区域选择**：0x1000-0x9a000 是 1MB 以下的常规内存，不会被加载到 0x100000+ 的内核覆盖
+1. **安全区域选择**：0x1000-0x9a000 是 1MB 以下的常规内存，不会被加载到 0x100000 (1MB)+ 的内核覆盖
 2. **代码复制**：跳转代码被复制到安全区域，原始代码被覆盖不影响执行
 3. **单向跳转**：一旦跳转到内核，GRUB 代码不再需要，被覆盖无关紧要
 4. **自包含代码**：relocator 代码包含完整的 GDT 和跳转指令，不依赖外部代码

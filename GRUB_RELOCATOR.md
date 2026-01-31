@@ -4,6 +4,150 @@
 
 ---
 
+## Relocator 执行总览
+
+内存位置与 [BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md) 一致：**安全区** 0x1000–0x9a000（1MB 以下）、**movers_chunk** 与 **内核/initrd 临时缓冲区 (src)** 由 GRUB 空闲内存池动态分配（常在 16MB+ 或 modend 以上）、**复制目标** 0x100000 (1MB)。**重要**：movers_chunk 与 0x100000 (1MB) 是两块不同内存——movers_chunk 在 1MB 之上的某处（如 16MB+）单独分配，0x100000 仅为复制写入目标，故复制不会覆盖 movers_chunk。以下为从 boot 到内核的完整执行过程，并标明每步所在内存、源码文件与函数。
+
+**从 boot 到内核的完整执行流程：**
+
+```
+grub_relocator32_boot(rel, state, ...)     [grub-core/lib/i386/relocator.c]
+    ↓
+步骤 1：在安全区 (0x1000-0x9a000) 分配 chunk
+    └─ grub_relocator_alloc_chunk_align_safe()，alloc 逻辑在 grub-core/lib/relocator.c
+    ↓
+步骤 2：设置 grub_relocator32_eip、grub_relocator32_esi 等（供安全区 relocator32 使用）
+    ↓
+步骤 3：将 relocator32.S 编译结果拷贝到安全区
+    └─ grub_memmove(..., &grub_relocator32_start, ...)，源：grub-core/lib/i386/relocator32.S
+    ↓
+步骤 4：grub_relocator_prepare_relocs() 生成 movers_chunk
+    ├─ 分配 movers_chunk [grub-core/lib/relocator.c]
+    ├─ grub_cpu_relocator_preamble(rels)           → preamble   [relocator_common_c.c]
+    ├─ grub_cpu_relocator_forward/backward(rels,…) → 复制代码   [模板 relocator_asm.S，由 relocator_common_c.c 拷贝]
+    ├─ grub_cpu_relocator_jumper(rels, addr)       → jumper     [relocator_common_c.c]
+    └─ relst = movers_chunk 起始
+    ↓
+步骤 5：((void (*)(void)) relst)()   // 跳转到 movers_chunk（非安全区）
+    ↓
+┌── movers_chunk 内执行 ──────────────────────────────────────────────────────┐
+│ preamble         [relocator_common_c.c]  i386-pc：空；x86_64-efi：页表等      │
+│     ↓                                                                        │
+│ 第 1 段 forward/backward  [relocator_asm.S 模板，已拷入 movers_chunk]        │
+│     ├─ 将内核/initrd 从 src（如 16MB+）复制到 target（0x100000 (1MB)）       │
+│     └─ src<target→backward；src>target→forward                              │
+│     ↓  若有更多 chunk，重复…                                                 │
+│ jumper           [relocator_common_c.c 写入的 mov+jmp]                        │
+│     └─ jmp 到安全区物理地址（relocator32 副本入口）                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+    ↓
+┌── 安全区 (0x1000-0x9a000) 内 relocator32 副本执行 ──────────────────────────┐
+│ 源码：grub-core/lib/i386/relocator32.S（不负责复制，只负责模式切换与跳转）    │
+│     PREAMBLE → RELOAD_GDT → DISABLE_PAGING → 设段与寄存器                    │
+│     → ljmp 到 grub_relocator32_eip（即 code32_start @ 0x100000 (1MB)）      │
+└─────────────────────────────────────────────────────────────────────────────┘
+    ↓
+┌── 0x100000 (1MB) 处与 relocator 的关系（与 BIOS_MEMORY_LAYOUT 一致）───────┐
+│ 地址：0x100000 (1MB)，复制目标 (target)，非 relocator 代码执行位置。        │
+│ 职责：movers_chunk 内 forward/backward 代码将内核/initrd 从临时缓冲区       │
+│       (src, 16MB+) 复制到此；与 movers_chunk 为不同区域，复制只写入此处，   │
+│       不覆盖 movers_chunk 自身。                                            │
+│ 复制完成后：此处为内核镜像，code32_start 指向此处，relocator32 的 ljmp 跳入。│
+└─────────────────────────────────────────────────────────────────────────────┘
+    ↓
+内核入口点（code32_start @ 0x100000 (1MB)）
+```
+
+**两处 relocator 代码来源对照（与 BIOS_MEMORY_LAYOUT 一致）：**
+
+| 内存位置 | 来源 | 源码文件 | 符号/函数 |
+|----------|------|----------|-----------|
+| **安全区 (0x1000-0x9a000)** | relocator32 编译后代码的副本 | `grub-core/lib/i386/relocator32.S` | `grub_relocator32_start`～`_end`；由 `grub_relocator32_boot()` 里 `grub_memmove(..., &grub_relocator32_start, RELOCATOR_SIZEOF(32))` 拷贝到此 |
+| **movers_chunk**（动态分配） | preamble + forward/backward + jumper | 见下 | 见下 |
+| ↳ preamble | C 写入 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_preamble(rels)`（i386-pc 为空） |
+| ↳ forward/backward | relocator_asm.S 模板拷贝进 movers_chunk | `grub-core/lib/i386/relocator_asm.S` | `grub_relocator_forward_start`～`_end`、`grub_relocator_backward_start`～`_end`；由 `grub_cpu_relocator_forward/backward(rels, ...)` 拷贝 |
+| ↳ jumper | C 写入机器码 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_jumper(rels, addr)` |
+
+下文按：入口函数 `grub_relocator32_boot()`、数据结构与分配、`grub_relocator_prepare_relocs()` 与动态生成、关键问题解答与为何必须复制内核，展开实现细节。
+
+---
+
+### grub_relocator32_boot() 函数
+
+**源代码位置：** `grub/grub-core/lib/i386/relocator.c:75-117`
+
+**功能：**
+- 设置寄存器值（`grub_relocator32_eip`、`grub_relocator32_esi`）
+- 准备 relocator 代码（切换到实模式并跳转）
+- 执行跳转到内核入口点（`code32_start`）
+
+**完整源代码分析：**
+
+```c
+// grub/grub-core/lib/i386/relocator.c
+grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state state, ...)
+{
+    // 步骤 1: 在安全区域（0x1000-0x9a000）分配内存
+    // 这个区域在 1MB 以下，不会被加载到 0x100000 (1MB)+ 的内核覆盖
+    err = grub_relocator_alloc_chunk_align_safe (rel, &ch,
+        0x1000,   // 最小地址
+        0x9a000,  // 最大地址（1MB 以下的安全区域）
+        RELOCATOR_SIZEOF (32),  // relocator 代码大小
+        16,       // 对齐
+        GRUB_RELOCATOR_PREFERENCE_LOW,
+        avoid_efi_bootservices);
+    
+    relocator_mem = get_virtual_current_address (ch);  // 获取安全区域的虚拟地址
+    
+    // 步骤 2: 设置寄存器值
+    // grub_relocator32_eip 是 relocator 代码中的一个全局变量
+    // 用于存储目标跳转地址，relocator 代码执行时会读取这个变量并加载到 EIP
+    grub_relocator32_eip = state.eip;  // 内核入口点地址（code32_start）
+    grub_relocator32_esi = state.esi;  // boot_params 地址
+    
+    // 步骤 3: 将 relocator32.S 的基础代码复制到安全区域
+    // 这是 relocator 的基础框架代码（relocator32.S）
+    grub_memmove (get_virtual_current_address (ch), &grub_relocator32_start,
+                  RELOCATOR_SIZEOF (32));
+    
+    // 步骤 4: 构建完整的 relocator 代码（包含复制内核的代码）
+    // ⚠️ 关键：relocator 代码不是简单的跳转代码，而是包含：
+    //   1. preamble：初始化代码
+    //   2. forward/backward 复制代码：将内核从临时缓冲区（src = 16MB+）复制到目标（target = 0x100000 (1MB)）
+    //   3. jumper：切换到实模式并跳转到内核入口点的代码
+    // 这些代码是在 grub_relocator_prepare_relocs() 中动态生成的
+    //
+    // relocator32.S 与“完整 relocator 代码”的关系：
+    // - relocator32.S 是源码；安全区里执行的是其编译后代码的副本（步骤 3 拷贝进去），
+    //   该段只负责关分页、重载 GDT、设段与寄存器、ljmp 到内核，不负责复制。
+    // - 完整 relocator = movers_chunk（步骤 4 生成）+ 安全区里 relocator32 的副本。
+    // - 复制内核/initrd 在 movers_chunk 里完成：由 preamble 后的多段 forward/backward 代码执行。
+    err = grub_relocator_prepare_relocs (rel, 
+                                         get_physical_target_address (ch),  // 安全区域的物理地址
+                                         &relst,  // 输出：构建好的 relocator 代码地址
+                                         NULL);
+    
+    // 步骤 5: 执行跳转（关闭中断，跳转到构建好的 relocator 代码）
+    asm volatile ("cli");
+    ((void (*) (void)) relst) ();  // 跳转到构建好的 relocator 代码
+    // relocator 代码执行顺序：
+    //   1. preamble：初始化
+    //   2. forward/backward 复制代码：将内核从临时缓冲区（16MB+）复制到 0x100000 (1MB)
+    //      - 如果 src < target：使用 backward 复制（从高地址向低地址复制）
+    //      - 如果 src > target：使用 forward 复制（从低地址向高地址复制）
+    //   3. 切换到实模式（从保护模式切换回来）
+    //   4. 设置段寄存器（CS、DS、ES、SS）
+    //   5. 设置栈指针（ESP）
+    //   6. 从 grub_relocator32_eip 读取地址并加载到 EIP 寄存器
+    //   7. 执行远跳转（ljmp）到内核入口点（code32_start @ 0x100000 (1MB)）
+    //   8. 此时 ESI 寄存器包含 boot_params 的地址
+}
+```
+
+---
+
+### Relocator 数据结构与分配
+
 **Relocator 数据结构（`grub-core/lib/relocator.c:56-65`）：**
 
 ```c
@@ -21,25 +165,25 @@ struct grub_relocator_chunk {
 ```c
 if (relocatable)
 {
-    // ⚠️ 问题 1：为什么还要尝试 preferred_address (0x100000)？
-    // 虽然 GRUB 代码在 0x100000，但尝试这个地址有以下原因：
-    // 1. 代码路径统一：可重定位内核可能不需要精确在 0x100000
-    // 2. 兼容性：某些特殊系统配置可能允许在 0x100000 分配
+    // ⚠️ 问题 1：为什么还要尝试 preferred_address (0x100000 (1MB))？
+    // 虽然 GRUB 代码在 0x100000 (1MB)，但尝试这个地址有以下原因：
+    // 1. 代码路径统一：可重定位内核可能不需要精确在 0x100000 (1MB)
+    // 2. 兼容性：某些特殊系统配置可能允许在 0x100000 (1MB) 分配
     // 3. 理论上，如果 GRUB 代码已被清理或系统内存布局特殊，可能成功
     // 4. 实际运行中，这个尝试几乎总是失败，但代码逻辑保持统一
-    // 第一次尝试：在 preferred_address (0x100000) 分配
-    // min_addr = max_addr = 0x100000，表示只接受这个精确地址
+    // 第一次尝试：在 preferred_address (0x100000 (1MB)) 分配
+    // min_addr = max_addr = 0x100000 (1MB)，表示只接受这个精确地址
     err = grub_relocator_alloc_chunk_align(relocator, &ch,
-                                            preferred_address,  // min_addr = 0x100000
-                                            preferred_address,  // max_addr = 0x100000
+                                            preferred_address,  // min_addr = 0x100000 (1MB)
+                                            preferred_address,  // max_addr = 0x100000 (1MB)
                                             prot_size, 1,
                                             GRUB_RELOCATOR_PREFERENCE_LOW, 1);
     
     // ⚠️ 问题 2：如何分析代码得出 16MB？
-    // 代码中直接写的是 0x1000000，这就是 16MB：
-    //   0x1000000 = 16 * 1024 * 1024 = 16,777,216 字节 = 16 MB
+    // 代码中直接写的是 0x1000000 (16MB)，这就是 16MB：
+    //   0x1000000 (16MB) = 16 * 1024 * 1024 = 16,777,216 字节 = 16 MB
     // 选择 16MB 的原因：
-    // 1. 避开 GRUB 代码区域（0x100000 到约 0x118000，约 1.1MB）
+    // 1. 避开 GRUB 代码区域（0x100000 (1MB) 到约 0x118000，约 1.1MB）
     // 2. 避开可能的系统保留区域（如 ACPI、BIOS 数据等）
     // 3. 16MB 是一个常见的"安全边界"，确保有足够空间
     // 4. 历史原因：早期 Linux 内核解压目标地址通常是 16MB
@@ -48,7 +192,7 @@ if (relocatable)
     {
         grub_errno = GRUB_ERR_NONE;
         err = grub_relocator_alloc_chunk_align(relocator, &ch,
-                                                0x1000000,           // min_addr = 16MB (硬编码)
+                                                0x1000000 (16MB),           // min_addr = 16MB (硬编码)
                                                 UP_TO_TOP32(prot_size), // max_addr = 4GB - size
                                                 prot_size, 1 << *align,
                                                 GRUB_RELOCATOR_PREFERENCE_LOW, 1);
@@ -56,18 +200,18 @@ if (relocatable)
 }
 else
 {
-    // 非可重定位内核：必须精确在 preferred_address (0x100000)
-    // 这种情况下，如果 0x100000 被占用，分配会直接失败
+    // 非可重定位内核：必须精确在 preferred_address (0x100000 (1MB))
+    // 这种情况下，如果 0x100000 (1MB) 被占用，分配会直接失败
     err = grub_relocator_alloc_chunk_align(relocator, &ch,
-                                            preferred_address,  // min_addr = 0x100000
-                                            preferred_address,  // max_addr = 0x100000
+                                            preferred_address,  // min_addr = 0x100000 (1MB)
+                                            preferred_address,  // max_addr = 0x100000 (1MB)
                                             prot_size, 1,
                                             GRUB_RELOCATOR_PREFERENCE_LOW, 1);
     // 如果失败，内核无法加载（非可重定位内核必须在这个地址）
 }
 
 prot_mode_mem = get_virtual_current_address(ch);    // 临时位置（src）
-prot_mode_target = get_physical_target_address(ch); // 最终位置（target = 0x100000）
+prot_mode_target = get_physical_target_address(ch); // 最终位置（target = 0x100000 (1MB)）
 ```
 
 **`grub_relocator_alloc_chunk_align()` 内部逻辑（`grub-core/lib/relocator.c:1375-1508`）：**
@@ -102,25 +246,25 @@ grub_relocator_alloc_chunk_align(rel, out, min_addr, max_addr, size, align, ...)
 }
 ```
 
-**为什么在 0x100000 分配会失败？**
+**为什么在 0x100000 (1MB) 分配会失败？**
 
-关键在于 GRUB 内存初始化时**根本不会将 0x100000 区域添加到空闲内存池**。
+关键在于 GRUB 内存初始化时**根本不会将 0x100000 (1MB) 区域添加到空闲内存池**。
 
 **GRUB 内存布局（`grub-core/kern/i386/pc/init.c`）：**
 
 ```
-0x100000 ─────────────────────────────────┐
+0x100000 (1MB) ─────────────────────────────────┐
 │ GRUB 代码（_start 到 _edata）            │ ← GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR
 │ （解压后约 20-50 KB）                    │
-├─ grub_modbase ─────────────────────────┤ ← 0x100000 + (_edata - _start)
-│ GRUB 内置模块数据                        │   例如：0x100000 + 0x8000 = 0x108000
+├─ grub_modbase ─────────────────────────┤ ← 0x100000 (1MB) + (_edata - _start)
+│ GRUB 内置模块数据                        │   例如：0x100000 (1MB) + 0x8000 = 0x108000
 │ （大小取决于加载的模块数量）              │
 ├─ modend ───────────────────────────────┤ ← grub_modbase + modinfo->size
 │                                         │   例如：0x108000 + 0x10000 = 0x118000（约 1.1MB）
 │ 空闲内存（由 grub_mm_init_region 管理）  │ ← 只有这部分被添加到内存池！
 └─────────────────────────────────────────┘
 
-注意：modend 通常在 0x100000 + 几百 KB 范围内（约 1.1-1.5 MB），
+注意：modend 通常在 0x100000 (1MB) + 几百 KB 范围内（约 1.1-1.5 MB），
       而不是 16MB。16MB 是 relocator 分配临时缓冲区时的最小地址。
 ```
 
@@ -149,9 +293,9 @@ for (i = 0; i < num_regions; i++)
 
 **两个关键问题的详细解答：**
 
-**问题 1：既然 GRUB 代码在 0x100000，为什么还要尝试 preferred_address？**
+**问题 1：既然 GRUB 代码在 0x100000 (1MB)，为什么还要尝试 preferred_address？**
 
-虽然 GRUB 代码确实在 0x100000，但代码仍会尝试在这个地址分配，原因如下：
+虽然 GRUB 代码确实在 0x100000 (1MB)，但代码仍会尝试在这个地址分配，原因如下：
 
 1. **代码路径统一**：
    - 可重定位内核（`relocatable = true`）理论上可以在不同地址加载
@@ -159,7 +303,7 @@ for (i = 0; i < num_regions; i++)
    - 这样代码更简洁，不需要特殊判断
 
 2. **兼容性考虑**：
-   - 某些特殊系统配置可能允许在 0x100000 分配（例如 GRUB 代码已被清理）
+   - 某些特殊系统配置可能允许在 0x100000 (1MB) 分配（例如 GRUB 代码已被清理）
    - 某些嵌入式系统或特殊引导场景可能有不同的内存布局
    - 保持代码的通用性，不假设所有情况都会失败
 
@@ -169,8 +313,8 @@ for (i = 0; i < num_regions; i++)
    - 性能影响可忽略（只是一次内存分配尝试）
 
 4. **非可重定位内核的情况**：
-   - 如果内核不可重定位（`relocatable = false`），必须精确在 0x100000
-   - 这种情况下，如果 0x100000 被占用，分配会直接失败，内核无法加载
+   - 如果内核不可重定位（`relocatable = false`），必须精确在 0x100000 (1MB)
+   - 这种情况下，如果 0x100000 (1MB) 被占用，分配会直接失败，内核无法加载
    - 可重定位内核的优势就是可以回退到其他地址
 
 **问题 2：如何分析代码得出 16MB？**
@@ -181,28 +325,28 @@ for (i = 0; i < num_regions; i++)
    ```c
    // grub-core/loader/i386/linux.c:805
    err = grub_relocator_alloc_chunk_align(relocator, &ch,
-                                           0x1000000,  // ← 这里就是 16MB
+                                           0x1000000 (16MB),  // ← 这里就是 16MB
                                            UP_TO_TOP32(prot_size),
                                            ...);
    ```
 
 2. **数值计算**：
    ```
-   0x1000000 = 16 * 1024 * 1024 = 16,777,216 字节 = 16 MB
+   0x1000000 (16MB) = 16 * 1024 * 1024 = 16,777,216 字节 = 16 MB
    ```
 
 3. **为什么选择 16MB？**
-   - **避开 GRUB 区域**：GRUB 代码在 0x100000 到约 0x118000（约 1.1MB），16MB 远高于此
+   - **避开 GRUB 区域**：GRUB 代码在 0x100000 (1MB) 到约 0x118000（约 1.1MB），16MB 远高于此
    - **避开系统保留区域**：BIOS 可能在某些低地址区域保留内存（如 ACPI、BIOS 数据等）
    - **安全边界**：16MB 是一个常见的"安全边界"，确保有足够的连续内存空间
    - **历史原因**：早期 Linux 内核解压目标地址通常是 16MB（`CONFIG_PHYSICAL_START` 默认值）
    - **对齐考虑**：16MB 是 2^24，便于内存对齐和地址计算
 
 4. **代码分析步骤**：
-   - 在 GRUB 源代码中搜索 `0x1000000`
+   - 在 GRUB 源代码中搜索 `0x1000000 (16MB)`
    - 找到 `grub-core/loader/i386/linux.c` 中的分配逻辑
    - 查看上下文，理解这是 fallback 地址
-   - 计算 `0x1000000` 的十进制值：16 * 1024 * 1024 = 16 MB
+   - 计算 `0x1000000 (16MB)` 的十进制值：16 * 1024 * 1024 = 16 MB
 
 5. **实际验证**：
    - 可以通过调试 GRUB 或查看内存映射来验证
@@ -226,98 +370,24 @@ grub_modules_get_end (void)
 
 ```c
 grub_modbase = GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR + (_edata - _start);
-// = 0x100000 + GRUB 代码大小
+// = 0x100000 (1MB) + GRUB 代码大小
 ```
 
-**总结**：0x100000 到 `modend` 之间的区域**从未被 `grub_mm_init_region()` 添加到空闲内存池**，
+**总结**：0x100000 (1MB) 到 `modend` 之间的区域**从未被 `grub_mm_init_region()` 添加到空闲内存池**，
 所以 `malloc_in_range()` 在扫描空闲块列表时找不到这个区域，分配自然失败。
 
 **Relocator 内存布局总结：**
 
 | 项目 | 位置 | 说明 |
 |------|------|------|
-| **临时缓冲区** | 通常 0x1000000 (16MB) 以上 | 因为 GRUB 占用 0x100000 |
+| **临时缓冲区** | 通常 0x1000000 (16MB) 以上 | 因为 GRUB 占用 0x100000 (1MB) |
 | **最终目标** | 0x100000 (1MB) | `GRUB_LINUX_BZIMAGE_ADDR` |
 | **大小** | `prot_size`（内核压缩大小） | 由内核头部 `init_size` 字段决定 |
 
 
 ---
 
-### grub_relocator32_boot() 函数
-
-**源代码位置：** `grub/grub-core/lib/i386/relocator.c:75-117`
-
-**功能：**
-- 设置寄存器值（`grub_relocator32_eip`、`grub_relocator32_esi`）
-- 准备 relocator 代码（切换到实模式并跳转）
-- 执行跳转到内核入口点（`code32_start`）
-
-**完整源代码分析：**
-
-```c
-// grub/grub-core/lib/i386/relocator.c
-grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state state, ...)
-{
-    // 步骤 1: 在安全区域（0x1000-0x9a000）分配内存
-    // 这个区域在 1MB 以下，不会被加载到 0x100000+ 的内核覆盖
-    err = grub_relocator_alloc_chunk_align_safe (rel, &ch,
-        0x1000,   // 最小地址
-        0x9a000,  // 最大地址（1MB 以下的安全区域）
-        RELOCATOR_SIZEOF (32),  // relocator 代码大小
-        16,       // 对齐
-        GRUB_RELOCATOR_PREFERENCE_LOW,
-        avoid_efi_bootservices);
-    
-    relocator_mem = get_virtual_current_address (ch);  // 获取安全区域的虚拟地址
-    
-    // 步骤 2: 设置寄存器值
-    // grub_relocator32_eip 是 relocator 代码中的一个全局变量
-    // 用于存储目标跳转地址，relocator 代码执行时会读取这个变量并加载到 EIP
-    grub_relocator32_eip = state.eip;  // 内核入口点地址（code32_start）
-    grub_relocator32_esi = state.esi;  // boot_params 地址
-    
-    // 步骤 3: 将 relocator32.S 的基础代码复制到安全区域
-    // 这是 relocator 的基础框架代码（relocator32.S）
-    grub_memmove (get_virtual_current_address (ch), &grub_relocator32_start,
-                  RELOCATOR_SIZEOF (32));
-    
-    // 步骤 4: 构建完整的 relocator 代码（包含复制内核的代码）
-    // ⚠️ 关键：relocator 代码不是简单的跳转代码，而是包含：
-    //   1. preamble：初始化代码
-    //   2. forward/backward 复制代码：将内核从临时缓冲区（src = 16MB+）复制到目标（target = 0x100000）
-    //   3. jumper：切换到实模式并跳转到内核入口点的代码
-    // 这些代码是在 grub_relocator_prepare_relocs() 中动态生成的
-    //
-    // relocator32.S 与“完整 relocator 代码”的关系：
-    // - relocator32.S 是源码；安全区里执行的是其编译后代码的副本（步骤 3 拷贝进去），
-    //   该段只负责关分页、重载 GDT、设段与寄存器、ljmp 到内核，不负责复制。
-    // - 完整 relocator = movers_chunk（步骤 4 生成）+ 安全区里 relocator32 的副本。
-    // - 复制内核/initrd 在 movers_chunk 里完成：由 preamble 后的多段 forward/backward 代码执行。
-    err = grub_relocator_prepare_relocs (rel, 
-                                         get_physical_target_address (ch),  // 安全区域的物理地址
-                                         &relst,  // 输出：构建好的 relocator 代码地址
-                                         NULL);
-    
-    // 步骤 5: 执行跳转（关闭中断，跳转到构建好的 relocator 代码）
-    asm volatile ("cli");
-    ((void (*) (void)) relst) ();  // 跳转到构建好的 relocator 代码
-    // relocator 代码执行顺序：
-    //   1. preamble：初始化
-    //   2. forward/backward 复制代码：将内核从临时缓冲区（16MB+）复制到 0x100000
-    //      - 如果 src < target：使用 backward 复制（从高地址向低地址复制）
-    //      - 如果 src > target：使用 forward 复制（从低地址向高地址复制）
-    //   3. 切换到实模式（从保护模式切换回来）
-    //   4. 设置段寄存器（CS、DS、ES、SS）
-    //   5. 设置栈指针（ESP）
-    //   6. 从 grub_relocator32_eip 读取地址并加载到 EIP 寄存器
-    //   7. 执行远跳转（ljmp）到内核入口点（code32_start @ 0x100000）
-    //   8. 此时 ESI 寄存器包含 boot_params 的地址
-}
-```
-
-**Relocator 总览（阅读顺序建议）**：下文「两处 relocator 代码来源对照」与「与 grub_relocator32_boot() 的执行关系」给出两处内存（安全区 vs movers_chunk）的来源、预先加载与运行时生成、以及执行顺序的图示与表格；「relocator 代码的作用」概括职责；「为什么要动态生成」与「grub_relocator_prepare_relocs() 具体实现」为细节实现。
-
-**⚠️ 关键问题解答：**
+### 关键问题解答
 
 **问题 1：relocator 代码具体对应哪个文件？**
 
@@ -334,22 +404,22 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
 
 **问题 2：为什么要复制？**
 
-**答案：** 因为 GRUB 的代码在 0x100000+，会被内核覆盖，必须复制到安全区域。
+**答案：** 因为 GRUB 的代码在 0x100000 (1MB)+，会被内核覆盖，必须复制到安全区域。
 
 **详细原因：**
 
 1. **GRUB 代码位置问题**：
-   - GRUB 解压后的代码在 `0x100000+`（1MB 以上）
-   - 内核的**最终目标地址**是 `0x100000`（1MB）
-   - **但内核不是直接加载到 0x100000**，而是：
+   - GRUB 解压后的代码在 `0x100000 (1MB)+`（1MB 以上）
+   - 内核的**最终目标地址**是 `0x100000 (1MB)`（1MB）
+   - **但内核不是直接加载到 0x100000 (1MB)**，而是：
      - **临时缓冲区**：先加载到 `prot_mode_mem`（通常在 16MB+）
-     - **最终目标**：`prot_mode_target = 0x100000`（boot 时 relocator 复制到此）
+     - **最终目标**：`prot_mode_target = 0x100000 (1MB)`（boot 时 relocator 复制到此）
    - **内核最终会覆盖 GRUB 的代码区域**（在 boot 时复制后）
 
 2. **执行时机问题**：
    - `grub_relocator32_boot()` 在保护模式下执行（GRUB 的 C 代码）
    - 需要切换到实模式才能跳转到内核（内核入口点是实模式代码）
-   - 切换代码本身也在 `0x100000+`，如果直接执行，执行过程中可能被覆盖
+   - 切换代码本身也在 `0x100000 (1MB)+`，如果直接执行，执行过程中可能被覆盖
 
 **⚠️ UEFI 启动方式完全不同：**
 
@@ -431,12 +501,12 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
    
    **关键区别**：
    - **BIOS**：
-     - 内核入口点是 setup 代码（`header.S`），期望在 0x100000
-     - `code32_start` 是相对于 0x100000 的偏移
-     - 必须复制到 0x100000，因为地址计算基于这个固定地址
+     - 内核入口点是 setup 代码（`header.S`），期望在 0x100000 (1MB)
+     - `code32_start` 是相对于 0x100000 (1MB) 的偏移
+     - 必须复制到 0x100000 (1MB)，因为地址计算基于这个固定地址
    - **UEFI**：
      - 内核入口点是 EFI stub（`efi32_stub_entry`/`efi64_stub_entry`），是位置无关的
-     - EFI stub 可以加载到任意地址，不需要在 0x100000
+     - EFI stub 可以加载到任意地址，不需要在 0x100000 (1MB)
      - EFI 固件通过 `LoadImage` 和 `StartImage` 服务处理地址重定位
      - 解压代码会处理后续的地址重定位（如果是可重定位内核）
 
@@ -454,7 +524,7 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
 
 3. **安全区域选择**：
    - 安全区域：`0x1000-0x9a000`（1MB 以下的常规内存）
-   - 这个区域不会被加载到 `0x100000+` 的内核覆盖
+   - 这个区域不会被加载到 `0x100000 (1MB)+` 的内核覆盖
    - 复制 relocator 代码到这里，确保执行时不会被覆盖
 
 4. **自包含代码**：
@@ -489,7 +559,7 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
 **relocator 代码的作用：**
 
 relocator 代码是一个"桥梁"，整体负责：
-1. **复制内核**：将内核从临时缓冲区（16MB+）复制到最终目标（0x100000）
+1. **复制内核**：将内核从临时缓冲区（16MB+）复制到最终目标（0x100000 (1MB)）
    - 如果 `src < target`：使用 backward 复制（从高地址向低地址复制）
    - 如果 `src > target`：使用 forward 复制（从低地址向高地址复制）
 2. **模式切换**：从保护模式切换到实模式
@@ -509,7 +579,7 @@ movers_chunk = preamble（初始化）
 
 **为什么要动态生成？**
 
-1. **src/target 每次启动都不同**：内核、initrd 的临时缓冲区（src）由本次启动的内存分配决定（例如 0x1000000 或 0x2000000）；目标（target）固定为 0x100000 等，但“要不要搬、从哪搬到哪”是运行时才知道的。
+1. **src/target 每次启动都不同**：内核、initrd 的临时缓冲区（src）由本次启动的内存分配决定（例如 0x1000000 (16MB) 或 0x2000000）；目标（target）固定为 0x100000 (1MB) 等，但“要不要搬、从哪搬到哪”是运行时才知道的。
 2. **chunk 数量和顺序不固定**：有内核 chunk、可能有 initrd chunk 等；每个 chunk 的 src/target/size 不同，需要为每个“src ≠ target”的 chunk 生成一段复制代码。
 3. **必须选 forward 或 backward**：若 src < target 只能从高向低复制（backward），否则会覆盖未复制区域；若 src > target 用从低向高（forward）。选哪种、以及多段复制的顺序（按 src 排序后依次执行）都要在运行时根据当前 rel 里的 chunk 决定。
 4. **无法用一段静态代码写死**：若用静态代码，无法在编译期填入“本次启动”的 src/target/size，也无法在编译期决定要几段、每段是 forward 还是 backward。因此必须在运行时把“模板代码 + 本次的 src/target/size”组合成实际要执行的指令序列。
@@ -727,151 +797,44 @@ grub_cpu_relocator_jumper (void *rels, grub_addr_t addr)
 - GRUB 调用 `((void (*)(void)) relst)()` 时，`relst` 指向 **movers_chunk** 起始（preamble）。
 - 实际顺序：**preamble**（i386-pc 为空）→ 多段 **forward/backward**（按 sorted 顺序，每段从 GRUB 全局变量读本段 src/dest/size）→ **jumper** 跳到安全区 → **安全区中的 relocator32 副本**（关分页、设段、设寄存器、`ljmp` 到内核）。
 
-**生成的 relocator 代码工作总览：**
-
-```
-((void (*)(void)) relst)()         // GRUB 跳转到 movers_chunk 起始（非安全区）
-    ↓
-preamble                           [relocator_common_c.c]
-    ├─ i386-pc：空（无指令）
-    └─ x86_64-efi：建立恒等映射页表、mov 页表基址到 CR3 等
-    ↓
-第 1 段 forward/backward 复制     [relocator_asm.S 编译出的模板代码，运行时被拷贝进 movers_chunk]
-    ├─ 工作：将内核/initrd 从 src（临时缓冲区，如 16MB+）复制到 target（如 0x100000）
-    ├─ 从 GRUB 数据段读本段 dest、src、size（由 C 在生成时已写入）
-    ├─ src < target：backward（std; rep movsb，从高地址向低地址）
-    └─ src > target：forward（cld; rep movsb，从低地址向高地址）
-    ↓
-第 2 段 forward/backward 复制      // 若有多个 chunk 且 src≠target，重复（如 initrd 另一块）
-    ├─ 工作：同上，按 sorted 顺序搬下一块（内核或 initrd）
-    …
-    ↓
-jumper                             [relocator_common_c.c 写入的机器码]
-    ├─ movl addr, %eax             // addr = 安全区物理地址（relocator32 所在）
-    └─ jmp *%eax                   // 跳转到安全区（此时内核已复制到 0x100000）
-    ↓
-安全区中的 relocator32 副本（0x1000-0x9a000，不负责复制，只负责模式切换与跳转）
-    ├─ PREAMBLE：%eax 为当前基址，计算相对地址
-    ├─ RELOAD_GDT：重载 GDT、更新 CS
-    ├─ DISABLE_PAGING：CR0.PG = 0
-    ├─ 设置 DS/ES/FS/GS/SS、ESP、EBP、ESI、EDI、EAX/EBX/ECX/EDX
-    └─ ljmp 到 grub_relocator32_eip（即内核 code32_start @ 0x100000）
-    ↓
-内核入口点（code32_start @ 0x100000）
-```
-
-**关键点**：以上图示与「两处 relocator 代码来源对照」一致；安全区与 movers_chunk 的职责见上文「relocator 代码的作用」；内核由 movers_chunk 中的 forward/backward 复制到 0x100000。
-
-**两处 relocator 代码来源对照（与 BIOS_MEMORY_LAYOUT 一致）：**
-
-| 内存位置 | 来源 | 源码文件 | 符号/函数 |
-|----------|------|----------|-----------|
-| **安全区 (0x1000-0x9a000)** | 仅 relocator32 编译后代码的副本 | `grub-core/lib/i386/relocator32.S` | `grub_relocator32_start`～`grub_relocator32_end`；由 `grub_relocator32_boot()` 里 `grub_memmove(..., &grub_relocator32_start, RELOCATOR_SIZEOF(32))` 拷贝到此 |
-| **movers_chunk**（动态分配） | 非 relocator32.S，由三部分拼成 | 见下 | 见下 |
-| ↳ preamble | C 函数写入的字节 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_preamble(rels)`（i386-pc 为空） |
-| ↳ forward/backward | relocator_asm.S 编译出的模板，运行时拷贝进 movers_chunk | `grub-core/lib/i386/relocator_asm.S` | `grub_relocator_forward_start`～`_end`、`grub_relocator_backward_start`～`_end`；由 `grub_cpu_relocator_forward/backward(rels, ...)` 拷贝 |
-| ↳ jumper | C 函数写入的机器码 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_jumper(rels, addr)` |
-
-**与 `grub_relocator32_boot()` 的执行关系、预先加载与运行时生成：**
-
-**预先加载（GRUB 镜像内 0x100000+，编译时已存在）：**
-
-```
-GRUB 镜像 (.text 等)
-    ├─ relocator.c 中的引导入口（boot 时执行，调用下面各项）
-    │   └─ grub_relocator32_boot(rel, state, ...)        [grub-core/lib/i386/relocator.c]
-    ├─ relocator32.S 编译结果
-    │   └─ grub_relocator32_start～grub_relocator32_end  [grub-core/lib/i386/relocator32.S]
-    ├─ relocator_asm.S 编译结果
-    │   ├─ grub_relocator_forward_start～_end
-    │   └─ grub_relocator_backward_start～_end          [grub-core/lib/i386/relocator_asm.S]
-    └─ relocator_common_c.c 中的 C 函数（供 i386/relocator.c、lib/relocator.c 调用）
-        ├─ grub_cpu_relocator_preamble(rels)
-        ├─ grub_cpu_relocator_forward(rels, src, dest, size)
-        ├─ grub_cpu_relocator_backward(rels, src, dest, size)
-        └─ grub_cpu_relocator_jumper(rels, addr)        [grub-core/lib/i386/relocator_common_c.c]
-```
-
-**grub_relocator32_boot() 执行流程（用户 boot 时，relocator.c）：**
-
-```
-grub_relocator32_boot(rel, state, ...)                  [grub-core/lib/i386/relocator.c]
-    ↓
-步骤 1：grub_relocator_alloc_chunk_align(rel, &ch, 0x1000, 0x9a000-..., ...)
-    └─ 在安全区 (0x1000-0x9a000) 分配 chunk ch         [relocator.c 调用；alloc 逻辑在 grub-core/lib/relocator.c]
-    ↓
-步骤 2：grub_relocator32_eip = state.eip; grub_relocator32_esi = state.esi; ...
-    └─ 设置供安全区 relocator32 使用的全局变量         [relocator.c；符号在 relocator32.S 中定义]
-    ↓
-步骤 3：grub_memmove(get_virtual_current_address(ch), &grub_relocator32_start, RELOCATOR_SIZEOF(32))
-    └─ 从镜像内“预先加载”的 relocator32 拷贝到安全区 ch → 安全区 = relocator32 副本  [relocator.c；源为 relocator32.S 编译结果]
-    ↓
-步骤 4：grub_relocator_prepare_relocs(rel, get_physical_target_address(ch), &relst, NULL)
-    ├─ 分配 movers_chunk（运行时分配，非常驻镜像）     [grub-core/lib/relocator.c]
-    ├─ grub_cpu_relocator_preamble(rels)                → 写入 preamble             [relocator_common_c.c]
-    ├─ 对每个 chunk：grub_cpu_relocator_forward/backward(rels, ...) → 拷贝模板进 movers_chunk  [relocator.c 调用；模板来自 relocator_asm.S，函数在 relocator_common_c.c]
-    ├─ grub_cpu_relocator_jumper(rels, addr)           → 写入 jumper，addr = 安全区物理地址   [relocator_common_c.c]
-    └─ relst = movers_chunk 起始
-    ↓
-步骤 5：((void (*)(void)) relst)()
-    └─ 跳转到 movers_chunk 执行（此后先执行复制，再 jumper 跳到安全区）  [relocator.c]
-```
-
-**运行时执行顺序（步骤 5 之后）：**
-
-```
-movers_chunk（步骤 4 生成）
-    ├─ preamble → forward/backward（复制内核/initrd）→ jumper
-    └─ jumper：jmp 到安全区物理地址
-    ↓
-安全区 (0x1000-0x9a000)（步骤 3 拷贝进去的 relocator32 副本）
-    ├─ PREAMBLE、RELOAD_GDT、DISABLE_PAGING、设段与寄存器
-    └─ ljmp 到 grub_relocator32_eip（内核 code32_start）
-    ↓
-内核入口点（code32_start @ 0x100000）
-```
-
-- **安全区代码** = 预先加载的 relocator32 的**副本**（步骤 3 拷贝）；**movers_chunk 代码** = 运行时用预先加载的模板与 C 函数**拼出来的**（步骤 4 生成）。
-
-**为何说“relocator_asm.S 在 movers_chunk 中”？**  
-`relocator_asm.S` 是**源码文件**，定义 forward/backward 的**汇编模板**；编译后对应 `grub_relocator_forward_start`～`_end`、`grub_relocator_backward_start`～`_end`，机器码在 GRUB 镜像里（如 0x100000+）。运行时 `grub_relocator_prepare_relocs()` 会：先分配 **movers_chunk**，再对每个需要复制的 chunk 调用 `grub_cpu_relocator_forward/backward(rels, ...)`，把上述**模板的机器码**从 GRUB 镜像里 **拷贝一段到 movers_chunk 的当前 rels**。因此**真正执行**的 forward/backward 代码是 **movers_chunk 里的那份拷贝**，而不是 GRUB 镜像里的原样。说“在 movers_chunk 中”指的是：**这段复制逻辑的代码被写进并运行于 movers_chunk**，不是指源码文件本身在 movers_chunk。
+（执行顺序、代码来源与 grub_relocator32_boot() 执行关系详见上文「Relocator 执行总览」。）
 
 **⚠️ 为什么必须复制内核？不能直接跳转到临时缓冲区吗？**
 
 **答案：** 理论上，如果内核是可重定位的（`relocatable = true`），可以跳转到临时缓冲区，但**实际实现中仍然需要复制**，原因如下：
 
-1. **地址计算基于 0x100000**：
+1. **地址计算基于 0x100000 (1MB)**：
    ```c
    // grub/grub-core/loader/i386/linux.c:1178-1180
    linux_params.code32_start = prot_mode_target + 
                                grub_le_to_cpu32 (lh.code32_start) - 
                                GRUB_LINUX_BZIMAGE_ADDR;
    // 其中：
-   // - prot_mode_target = 0x100000（最终目标地址）
-   // - lh.code32_start：内核头部中的字段，相对于 0x100000 的偏移
-   // - GRUB_LINUX_BZIMAGE_ADDR = 0x100000
+   // - prot_mode_target = 0x100000 (1MB)（最终目标地址）
+   // - lh.code32_start：内核头部中的字段，相对于 0x100000 (1MB) 的偏移
+   // - GRUB_LINUX_BZIMAGE_ADDR = 0x100000 (1MB)
    ```
-   - `code32_start` 的计算假设内核在 `prot_mode_target`（0x100000）
+   - `code32_start` 的计算假设内核在 `prot_mode_target`（0x100000 (1MB)）
    - 如果跳转到临时缓冲区（16MB+），`code32_start` 的地址会错误
 
-2. **boot_params 中的地址都是相对于 0x100000 的**：
+2. **boot_params 中的地址都是相对于 0x100000 (1MB) 的**：
    - `boot_params.cmd_line_ptr`：命令行参数地址
    - `boot_params.ramdisk_image`：initramfs 地址
    - `boot_params.code32_start`：内核入口点地址
-   - 这些地址都是基于内核在 0x100000 的假设计算的
+   - 这些地址都是基于内核在 0x100000 (1MB) 的假设计算的
 
-3. **内核 setup 代码期望在 0x100000（仅 BIOS 模式）**：
+3. **内核 setup 代码期望在 0x100000 (1MB)（仅 BIOS 模式）**：
    - **BIOS 模式**：内核入口点是 setup 代码（`arch/x86/boot/header.S`）
-     - setup 代码期望在 0x100000 位置
-     - `code32_start` 是相对于 0x100000 的偏移
-     - 即使内核是可重定位的，setup 代码仍然期望在 0x100000 位置
+     - setup 代码期望在 0x100000 (1MB) 位置
+     - `code32_start` 是相对于 0x100000 (1MB) 的偏移
+     - 即使内核是可重定位的，setup 代码仍然期望在 0x100000 (1MB) 位置
    - **UEFI 模式**：内核入口点是 EFI stub（`arch/x86/boot/startup/efi-mixed.S`）
      - EFI stub 是**位置无关的**（使用相对地址，如 `call 1f; popl %ecx`）
-     - EFI stub 可以加载到任意地址，不需要在 0x100000
+     - EFI stub 可以加载到任意地址，不需要在 0x100000 (1MB)
      - EFI stub 会调用 `efi32_startup`，然后跳转到 `efi_stub_entry`
      - 解压代码（`head_64.S`）会处理地址重定位：
        - 如果是可重定位内核：计算实际加载地址
-       - 如果不是：使用 `LOAD_PHYSICAL_ADDR`（通常是 0x100000）
+       - 如果不是：使用 `LOAD_PHYSICAL_ADDR`（通常是 0x100000 (1MB)）
 
 4. **如果跳转到临时缓冲区需要大量调整**：
    - 需要重新计算所有 `boot_params` 中的地址
@@ -885,11 +848,11 @@ movers_chunk（步骤 4 生成）
    - 复制后，所有地址计算都是正确的，不需要额外调整
 
 **结论**：
-- **BIOS 模式**：即使内核是可重定位的，GRUB 仍然选择复制内核到 0x100000，因为：
-  1. setup 代码期望在 0x100000
-  2. `code32_start` 和 `boot_params` 中的地址都是相对于 0x100000 计算的
+- **BIOS 模式**：即使内核是可重定位的，GRUB 仍然选择复制内核到 0x100000 (1MB)，因为：
+  1. setup 代码期望在 0x100000 (1MB)
+  2. `code32_start` 和 `boot_params` 中的地址都是相对于 0x100000 (1MB) 计算的
   3. 这是最简单、最安全、最兼容的方式
-- **UEFI 模式**：不需要复制到 0x100000，因为：
+- **UEFI 模式**：不需要复制到 0x100000 (1MB)，因为：
   1. EFI stub 是位置无关的，可以加载到任意地址
   2. EFI 固件通过 `LoadImage` 和 `StartImage` 服务处理地址重定位
   3. 解压代码会处理后续的地址重定位（如果是可重定位内核）
@@ -911,7 +874,7 @@ asm volatile ("jmp *%0" : : "r" (code32_start));
 **正确的流程：**
 
 ```
-GRUB 保护模式代码（0x100000+）
+GRUB 保护模式代码（0x100000 (1MB)+）
     ↓
 复制 relocator 代码到安全区域（0x1000-0x9a000）
     ↓
@@ -924,6 +887,6 @@ relocator 代码执行：
     4. 设置 ESI = boot_params 地址
     5. 执行 ljmp 跳转到 code32_start
     ↓
-内核入口点（code32_start @ 0x100000，实模式）
+内核入口点（code32_start @ 0x100000 (1MB)，实模式）
 ```
 
