@@ -2139,29 +2139,69 @@ menuentry "Linux 5.x.x" {
 
 ### grub_linux_boot() 函数
 
-**源代码位置：** `grub/grub-core/loader/i386/linux.c:446-667`
+**源代码位置：** `grub/grub-core/loader/i386/linux.c`（约 417–667 行）
 
-**功能：**
-- 准备 `boot_params` 结构（包含 `code32_start`）
-- 设置寄存器状态（ESI、ESP、EIP）
-- 通过 `grub_relocator32_boot()` 跳转到内核入口点
+**功能概要：**
+- 设置视频模式（gfxpayload、setup_video、屏幕信息）
+- 在 0x10000–0x90000 内分配 real_mode 区域，构建 boot_params 副本（含 cmdline、e820）
+- 设置 relocator32 的 state（esi、esp、eip=code32_start），调用 `grub_relocator32_boot()` 完成复制到 0x100000 并跳转内核
 
-**完整源代码分析：**
+**grub_linux_boot() 完整执行过程（展开分析，对应源码顺序）：**
+
+| 步骤 | 源码位置（约） | 动作 |
+|------|----------------|------|
+| 1 | IEEE1275 分支 | 若 `GRUB_MACHINE_IEEE1275`：从 `root` 取 bootpath 写入 chosen，设置 olpc_ofw_header。 |
+| 2 | 448–477 | 读 `gfxpayload`，调用 `grub_video_set_mode()` 设置图形/文本模式；失败则打印 "Booting in blind mode"。 |
+| 3 | 486–497 | 调用 `grub_linux_setup_video (&linux_params)` 填 `screen_info`（lfb、VGA 等）；若失败则用文本模式（orig_video_isVGA=TEXT, mode=0x3）。 |
+| 4 | 501–526 | 若为 VGA 文本：遍历终端，取 `vga_text`/`console`/`ofconsole` 的坐标与行列，写入 `linux_params.screen_info.orig_x/y`、`orig_video_cols/lines`。 |
+| 5 | 528–530 | 若 `GRUB_KERNEL_USE_RSDP_ADDR`：设置 `linux_params.acpi_rsdp_addr`。 |
+| 6 | 532–538 | `mmap_size = find_mmap_size()`；`cl_offset = ALIGN_UP(mmap_size + sizeof(linux_params), 4096)`，且不小于 setup 区；`ctx.real_size = ALIGN_UP(cl_offset + maximal_cmdline_size, 4096)`，即 real_mode 区总大小。 |
+| 7 | 549–562 | `grub_mmap_iterate (grub_linux_boot_mmap_find, &ctx)` 在 0x10000–0x90000 内找一块 ≥ `ctx.real_size + efi_mmap_size` 的可用区，得到 **`ctx.real_mode_target`**（物理地址）；若无则返回 "cannot allocate real mode pages"。 |
+| 8 | 564–577 | 用 **同一个 relocator** 在 `ctx.real_mode_target` 分配一块：`grub_relocator_alloc_chunk_addr (relocator, &ch, ctx.real_mode_target, sz)`，得到 **`real_mode_mem`**（虚拟地址）；EFI 时 `efi_mmap_buf` 紧接在 real_mode 区之后。 |
+| 9 | 581–586 | **`ctx.params = real_mode_mem`**；**`*ctx.params = linux_params`**（整块 boot_params 拷入 real_mode 区）；`ctx.params->hdr.cmd_line_ptr = ctx.real_mode_target + cl_offset`；`grub_memcpy ((char *)ctx.params + cl_offset, linux_cmdline, maximal_cmdline_size)` 写入命令行。 |
+| 10 | 591–596 | `grub_mmap_iterate (grub_linux_boot_mmap_fill, &ctx)` 填 **e820 表** 到 `ctx.params->e820_table`，并设 `ctx.params->e820_entries`。 |
+| 11 | EFI 分支 598–640 | 若 EFI：`grub_efi_finish_boot_services()`；根据内核版本填 `efi_info.v0204/v0206/v0208`（efi_memmap 等）。 |
+| 12 | 642–652 | 若 x86_64 EFI 且内核支持 64 位：`state64.rsi = ctx.real_mode_target`，`state64.rip = code32_start + LINUX_X86_STARTUP64_OFFSET`，**`return grub_relocator64_efi_boot (relocator, state64)`**（不走到 relocator32）。 |
+| 13 | 655–661 | **BIOS/非 EFI 或 32 位路径**：`state.ebp = state.edi = state.ebx = 0`；`state.esi = ctx.real_mode_target`（boot_params 物理地址）；`state.esp = ctx.real_mode_target`；**`state.eip = ctx.params->hdr.code32_start`**（内核入口）；**`return grub_relocator32_boot (relocator, state, 0)`**。 |
+
+**要点：**
+
+- **real_mode 区**：boot 时在 0x10000–0x90000 内分配，用于放置 **boot_params 的副本**（含 cmdline、e820、screen_info 等），**不是**内核镜像；内核仍在 `prot_mode_mem`（临时缓冲区），由 relocator 复制到 0x100000。
+- **relocator 复用**：`grub_cmd_linux()` 创建的 **同一个 relocator** 在 `grub_linux_boot()` 里再次使用：先 `grub_relocator_alloc_chunk_addr` 在 real_mode_target 分配 boot_params 区，再 `grub_relocator32_boot(relocator, state, 0)` 时 relocator 内部会复制内核到 0x100000 并跳转 `state.eip`。
+- **code32_start**：在 `grub_cmd_linux()` 里已根据 `prot_mode_target` 算好并写入 `linux_params.hdr.code32_start`；`grub_linux_boot()` 只是把整块 `linux_params` 拷到 `ctx.params`，故 **`state.eip = ctx.params->hdr.code32_start`**。
+
+**精简代码示意（与源码一致）：**
 
 ```c
 // grub/grub-core/loader/i386/linux.c
-grub_linux_boot (void)
+static grub_err_t grub_linux_boot (void)
 {
-    // 准备 boot_params 结构（包含 code32_start）
-    *ctx.params = linux_params;
-    
-    // 设置寄存器状态
     struct grub_relocator32_state state;
-    state.esi = ctx.real_mode_target;        // ESI = boot_params 地址
-    state.esp = ctx.real_mode_target;        // ESP = 栈指针
-    state.eip = ctx.params->code32_start;    // EIP = 内核入口点（code32_start）
-    
-    // 跳转到内核（通过 relocator 切换到保护模式并跳转）
+    void *real_mode_mem;
+    struct grub_linux_boot_ctx ctx = { .real_mode_target = 0 };
+
+    // 视频模式、screen_info、real_size、cl_offset 等（见上表步骤 1–6）
+    mmap_size = find_mmap_size ();
+    cl_offset = ALIGN_UP (mmap_size + sizeof (linux_params), 4096);
+    ctx.real_size = ALIGN_UP (cl_offset + maximal_cmdline_size, 4096);
+
+    // 在 0x10000–0x90000 找 real_mode_target，用 relocator 分配 real_mode_mem
+    grub_mmap_iterate (grub_linux_boot_mmap_find, &ctx);
+    err = grub_relocator_alloc_chunk_addr (relocator, &ch, ctx.real_mode_target, sz);
+    real_mode_mem = get_virtual_current_address (ch);
+
+    // boot_params 副本 + cmdline + e820
+    ctx.params = real_mode_mem;
+    *ctx.params = linux_params;
+    ctx.params->hdr.cmd_line_ptr = ctx.real_mode_target + cl_offset;
+    grub_memcpy ((char *) ctx.params + cl_offset, linux_cmdline, maximal_cmdline_size);
+    grub_mmap_iterate (grub_linux_boot_mmap_fill, &ctx);
+
+    // 设置 state，调用 relocator32 跳转内核
+    state.ebp = state.edi = state.ebx = 0;
+    state.esi = ctx.real_mode_target;
+    state.esp = ctx.real_mode_target;
+    state.eip = ctx.params->hdr.code32_start;
     return grub_relocator32_boot (relocator, state, 0);
 }
 ```
@@ -2192,10 +2232,10 @@ linux_params.code32_start = prot_mode_target +
 
 **2. `state.eip` 的设置：**
 
-在 `grub_linux_boot()` 中设置（步骤 12）：
+在 `grub_linux_boot()` 中设置（见上表步骤 13）：
 
 ```c
-state.eip = ctx.params->code32_start;  // 从 boot_params 中读取 code32_start
+state.eip = ctx.params->hdr.code32_start;  // 从 boot_params 副本中读取 code32_start
 ```
 
 **3. `grub_relocator32_eip` 的存储：**
