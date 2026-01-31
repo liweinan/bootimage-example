@@ -13,57 +13,37 @@
 **从 boot 到内核的完整执行流程：**
 
 ```
-grub_relocator32_boot(rel, state, ...)     [grub-core/lib/i386/relocator.c]
-    执行位置：GRUB 保护模式代码，0x100000 (1MB)+
+执行顺序：GRUB → movers_chunk → 安全区 relocator32 副本 → 内核（relocator32 不跳去 movers_chunk，而是 movers_chunk 执行完后跳回 relocator32 副本）
+
+grub_relocator32_boot(...)     [relocator.c]，执行于 GRUB 0x100000 (1MB)+
     ↓
-步骤 1：在安全区分配 chunk
-    内存：安全区 0x1000-0x9a000（1MB 以下）
-    └─ grub_relocator_alloc_chunk_align_safe()，alloc 逻辑在 grub-core/lib/relocator.c
+步骤 1：在安全区 0x1000-0x9a000 分配 chunk
+    └─ grub_relocator_alloc_chunk_align_safe()  [relocator.c]
     ↓
-步骤 2：设置 grub_relocator32_eip、grub_relocator32_esi 等（供安全区 relocator32 使用）
-    执行位置：仍在上方 GRUB 代码区 0x100000 (1MB)+
+步骤 2：设置 grub_relocator32_eip、grub_relocator32_esi 等
     ↓
-步骤 3：将 relocator32.S 编译结果拷贝到安全区
-    目标内存：安全区 0x1000-0x9a000（1MB 以下）
-    └─ grub_memmove(..., &grub_relocator32_start, ...)，源：grub-core/lib/i386/relocator32.S
+步骤 3：将 relocator32.S 编译结果拷贝到安全区 0x1000-0x9a000
+    └─ grub_memmove(..., &grub_relocator32_start, ...)  源：relocator32.S
     ↓
 步骤 4：grub_relocator_prepare_relocs() 生成 movers_chunk
-    movers_chunk 内存位置：16MB+ 或 modend 以上，GRUB 空闲内存池动态分配（与 0x100000 (1MB) 为不同块）
-    ├─ 分配 movers_chunk [grub-core/lib/relocator.c]
-    ├─ grub_cpu_relocator_preamble(rels)           → preamble   [relocator_common_c.c]
-    ├─ grub_cpu_relocator_forward/backward(rels,…) → 复制代码   [模板 relocator_asm.S，由 relocator_common_c.c 拷贝]
-    ├─ grub_cpu_relocator_jumper(rels, addr)       → jumper     [relocator_common_c.c]
-    └─ relst = movers_chunk 起始（即上述 16MB+ / modend 以上地址）
+    内存：movers_chunk 在 16MB+ 或 modend 以上分配 [relocator.c]
+    ├─ preamble   [relocator_common_c.c]
+    ├─ forward/backward  [relocator_asm.S 模板]
+    ├─ jumper     [relocator_common_c.c]
+    └─ relst = movers_chunk 起始
     ↓
-步骤 5：((void (*)(void)) relst)()   // 跳转到 movers_chunk
-    跳转目标：movers_chunk（16MB+ 或 modend 以上），非安全区
+步骤 5：GRUB 调用 ((void (*)(void)) relst)() → 跳转到 movers_chunk（非 relocator32 跳转）
     ↓
-┌── movers_chunk 内执行 ──────────────────────────────────────────────────────┐
-│ 内存位置：16MB+ 或 modend 以上，GRUB 空闲内存池动态分配；与 0x100000 (1MB) 为不同块。│
-│ preamble         [relocator_common_c.c]  i386-pc：空；x86_64-efi：页表等      │
-│     ↓                                                                        │
-│ 第 1 段 forward/backward  [relocator_asm.S 模板，已拷入 movers_chunk]        │
-│     ├─ 将内核/initrd 从 src（如 16MB+）复制到 target（0x100000 (1MB)）       │
-│     └─ src<target→backward；src>target→forward                              │
-│     ↓  若有更多 chunk，重复…                                                 │
-│ jumper           [relocator_common_c.c 写入的 mov+jmp]                        │
-│     └─ jmp 到安全区物理地址（relocator32 副本入口）                           │
+┌── movers_chunk  内存：16MB+ 或 modend 以上 ─────────────────────────────────┐
+│ preamble → forward/backward（src→0x100000 (1MB)）→ jumper                     │
+│ jumper：jmp 到安全区（relocator32 副本入口）                                 │
 └─────────────────────────────────────────────────────────────────────────────┘
     ↓
-┌── 安全区 (0x1000-0x9a000) 内 relocator32 副本执行 ──────────────────────────┐
-│ 内存位置：安全区 0x1000-0x9a000（1MB 以下）                                  │
-│ 源码：grub-core/lib/i386/relocator32.S（不负责复制，只负责模式切换与跳转）    │
-│     PREAMBLE → RELOAD_GDT → DISABLE_PAGING → 设段与寄存器                    │
-│     → ljmp 到 grub_relocator32_eip（即 code32_start @ 0x100000 (1MB)）      │
+┌── 安全区 0x1000-0x9a000  relocator32 副本  [relocator32.S] ──────────────────┐
+│ PREAMBLE → RELOAD_GDT → DISABLE_PAGING → 设段与寄存器 → ljmp code32_start   │
 └─────────────────────────────────────────────────────────────────────────────┘
     ↓
-┌── 0x100000 (1MB) 处与 relocator 的关系（与 BIOS_MEMORY_LAYOUT 一致）───────┐
-│ 内存位置：0x100000 (1MB)，复制目标 (target)，非 relocator 代码执行位置。   │
-│ movers_chunk 在 16MB+（或 modend 以上）单独分配，与此处为不同内存块。        │
-│ 职责：movers_chunk 内 forward/backward 将内核/initrd 从 src (16MB+) 复制到此；│
-│       复制只写入此处，不覆盖 movers_chunk 自身。                             │
-│ 复制完成后：此处为内核镜像，code32_start 指向此处，relocator32 的 ljmp 跳入。│
-└─────────────────────────────────────────────────────────────────────────────┘
+0x100000 (1MB)：复制目标，复制完成后为内核镜像；relocator32 的 ljmp 跳入此处
     ↓
 内核入口点（code32_start @ 0x100000 (1MB)）
 ```
