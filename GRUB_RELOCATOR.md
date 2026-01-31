@@ -14,25 +14,32 @@
 
 ```
 grub_relocator32_boot(rel, state, ...)     [grub-core/lib/i386/relocator.c]
+    执行位置：GRUB 保护模式代码，0x100000 (1MB)+
     ↓
-步骤 1：在安全区 (0x1000-0x9a000) 分配 chunk
+步骤 1：在安全区分配 chunk
+    内存：安全区 0x1000-0x9a000（1MB 以下）
     └─ grub_relocator_alloc_chunk_align_safe()，alloc 逻辑在 grub-core/lib/relocator.c
     ↓
 步骤 2：设置 grub_relocator32_eip、grub_relocator32_esi 等（供安全区 relocator32 使用）
+    执行位置：仍在上方 GRUB 代码区 0x100000 (1MB)+
     ↓
 步骤 3：将 relocator32.S 编译结果拷贝到安全区
+    目标内存：安全区 0x1000-0x9a000（1MB 以下）
     └─ grub_memmove(..., &grub_relocator32_start, ...)，源：grub-core/lib/i386/relocator32.S
     ↓
 步骤 4：grub_relocator_prepare_relocs() 生成 movers_chunk
+    movers_chunk 内存位置：16MB+ 或 modend 以上，GRUB 空闲内存池动态分配（与 0x100000 (1MB) 为不同块）
     ├─ 分配 movers_chunk [grub-core/lib/relocator.c]
     ├─ grub_cpu_relocator_preamble(rels)           → preamble   [relocator_common_c.c]
     ├─ grub_cpu_relocator_forward/backward(rels,…) → 复制代码   [模板 relocator_asm.S，由 relocator_common_c.c 拷贝]
     ├─ grub_cpu_relocator_jumper(rels, addr)       → jumper     [relocator_common_c.c]
-    └─ relst = movers_chunk 起始
+    └─ relst = movers_chunk 起始（即上述 16MB+ / modend 以上地址）
     ↓
-步骤 5：((void (*)(void)) relst)()   // 跳转到 movers_chunk（非安全区）
+步骤 5：((void (*)(void)) relst)()   // 跳转到 movers_chunk
+    跳转目标：movers_chunk（16MB+ 或 modend 以上），非安全区
     ↓
 ┌── movers_chunk 内执行 ──────────────────────────────────────────────────────┐
+│ 内存位置：16MB+ 或 modend 以上，GRUB 空闲内存池动态分配；与 0x100000 (1MB) 为不同块。│
 │ preamble         [relocator_common_c.c]  i386-pc：空；x86_64-efi：页表等      │
 │     ↓                                                                        │
 │ 第 1 段 forward/backward  [relocator_asm.S 模板，已拷入 movers_chunk]        │
@@ -44,16 +51,17 @@ grub_relocator32_boot(rel, state, ...)     [grub-core/lib/i386/relocator.c]
 └─────────────────────────────────────────────────────────────────────────────┘
     ↓
 ┌── 安全区 (0x1000-0x9a000) 内 relocator32 副本执行 ──────────────────────────┐
+│ 内存位置：安全区 0x1000-0x9a000（1MB 以下）                                  │
 │ 源码：grub-core/lib/i386/relocator32.S（不负责复制，只负责模式切换与跳转）    │
 │     PREAMBLE → RELOAD_GDT → DISABLE_PAGING → 设段与寄存器                    │
 │     → ljmp 到 grub_relocator32_eip（即 code32_start @ 0x100000 (1MB)）      │
 └─────────────────────────────────────────────────────────────────────────────┘
     ↓
 ┌── 0x100000 (1MB) 处与 relocator 的关系（与 BIOS_MEMORY_LAYOUT 一致）───────┐
-│ 地址：0x100000 (1MB)，复制目标 (target)，非 relocator 代码执行位置。        │
-│ 职责：movers_chunk 内 forward/backward 代码将内核/initrd 从临时缓冲区       │
-│       (src, 16MB+) 复制到此；与 movers_chunk 为不同区域，复制只写入此处，   │
-│       不覆盖 movers_chunk 自身。                                            │
+│ 内存位置：0x100000 (1MB)，复制目标 (target)，非 relocator 代码执行位置。   │
+│ movers_chunk 在 16MB+（或 modend 以上）单独分配，与此处为不同内存块。        │
+│ 职责：movers_chunk 内 forward/backward 将内核/initrd 从 src (16MB+) 复制到此；│
+│       复制只写入此处，不覆盖 movers_chunk 自身。                             │
 │ 复制完成后：此处为内核镜像，code32_start 指向此处，relocator32 的 ljmp 跳入。│
 └─────────────────────────────────────────────────────────────────────────────┘
     ↓
@@ -64,11 +72,11 @@ grub_relocator32_boot(rel, state, ...)     [grub-core/lib/i386/relocator.c]
 
 | 内存位置 | 来源 | 源码文件 | 符号/函数 |
 |----------|------|----------|-----------|
-| **安全区 (0x1000-0x9a000)** | relocator32 编译后代码的副本 | `grub-core/lib/i386/relocator32.S` | `grub_relocator32_start`～`_end`；由 `grub_relocator32_boot()` 里 `grub_memmove(..., &grub_relocator32_start, RELOCATOR_SIZEOF(32))` 拷贝到此 |
-| **movers_chunk**（动态分配） | preamble + forward/backward + jumper | 见下 | 见下 |
-| ↳ preamble | C 写入 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_preamble(rels)`（i386-pc 为空） |
-| ↳ forward/backward | relocator_asm.S 模板拷贝进 movers_chunk | `grub-core/lib/i386/relocator_asm.S` | `grub_relocator_forward_start`～`_end`、`grub_relocator_backward_start`～`_end`；由 `grub_cpu_relocator_forward/backward(rels, ...)` 拷贝 |
-| ↳ jumper | C 写入机器码 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_jumper(rels, addr)` |
+| **安全区 0x1000-0x9a000**（1MB 以下） | relocator32 编译后代码的副本 | `grub-core/lib/i386/relocator32.S` | `grub_relocator32_start`～`_end`；由 `grub_relocator32_boot()` 里 `grub_memmove(..., &grub_relocator32_start, RELOCATOR_SIZEOF(32))` 拷贝到此 |
+| **movers_chunk**（16MB+ 或 modend 以上，GRUB 空闲内存池动态分配；与 0x100000 (1MB) 为不同块） | preamble + forward/backward + jumper | 见下 | 见下 |
+| ↳ preamble（movers_chunk 内） | C 写入 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_preamble(rels)`（i386-pc 为空） |
+| ↳ forward/backward（movers_chunk 内） | relocator_asm.S 模板拷贝进 movers_chunk | `grub-core/lib/i386/relocator_asm.S` | `grub_relocator_forward_start`～`_end`、`grub_relocator_backward_start`～`_end`；由 `grub_cpu_relocator_forward/backward(rels, ...)` 拷贝 |
+| ↳ jumper（movers_chunk 内） | C 写入机器码 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_jumper(rels, addr)` |
 
 下文按：入口函数 `grub_relocator32_boot()`、数据结构与分配、`grub_relocator_prepare_relocs()` 与动态生成、关键问题解答与为何必须复制内核，展开实现细节。
 
@@ -571,7 +579,7 @@ relocator 代码是一个"桥梁"，整体负责：
 
 其中 **1 由 movers_chunk 执行**（preamble 后的 forward/backward 与 jumper 跳转），**2～5 由安全区中的 relocator32 副本执行**（jumper 跳入安全区之后）。
 
-**relocator 代码的组成**（此处指 **movers_chunk** 的组成；安全区为 relocator32 副本。由 `grub_relocator_prepare_relocs()` 在步骤 4 生成；详细执行顺序见下文「生成的 relocator 代码工作总览」）：
+**relocator 代码的组成**（此处指 **movers_chunk** 的组成；安全区为 relocator32 副本。由 `grub_relocator_prepare_relocs()` 在步骤 4 生成；详细执行顺序见上文「Relocator 执行总览」）：
 
 ```
 movers_chunk = preamble（初始化）
