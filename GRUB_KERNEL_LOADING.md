@@ -1101,80 +1101,53 @@ Linux 内核镜像（bzImage/vmlinuz）包含两部分：
 **完整源代码分析：**
 
 ```c
-// grub/grub-core/loader/i386/linux.c
+// grub/grub-core/loader/i386/linux.c（精简示意，与源码一致）
 grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
 {
     // 步骤 1: 打开内核文件（如 /boot/vmlinuz-5.x.x）
-    file = grub_file_open (argv[0]);
+    file = grub_file_open (argv[0], GRUB_FILE_TYPE_LINUX_KERNEL);
     
-    // 步骤 2: 读取整个文件到内存（注意：这里只是复制文件，不解压）
-    // vmlinuz 文件包含：
-    //   - 内核头部（512字节，未压缩）
-    //   - Setup 代码（未压缩，可以直接执行）
-    //   - 压缩的内核代码（gzip 压缩的 vmlinux）
-    // GRUB 只是将整个文件从磁盘复制到内存，不解压
-    len = grub_file_size (file);
-    kernel = grub_malloc (len);
-    grub_file_read (file, kernel, len);
+    // 步骤 2: 只读内核头部到 lh（无“整文件”缓冲区）
+    // 源码：grub_file_read (file, &lh, sizeof (lh))
+    if (grub_file_read (file, &lh, sizeof (lh)) != sizeof (lh))
+        goto fail;
     
-    // 步骤 3: 解析内核头部（前 512 字节）
-    grub_memcpy (&lh, kernel, sizeof (lh));  // lh 是 linux_kernel_header 结构
+    // 步骤 3: 验证内核签名与版本（boot_flag、header、setup_sects、loadflags 等）
+    if (lh.boot_flag != grub_cpu_to_le16 (0xAA55)) ...
+    if (lh.header != grub_cpu_to_le32 (0x53726448)) ...  // "HdrS"
     
-    // 步骤 4: 验证内核签名
-    if (lh.boot_flag != grub_cpu_to_le16 (0xAA55))
-        return grub_error (GRUB_ERR_BAD_OS, "invalid kernel signature");
+    // 步骤 4: 计算 setup 与“保护模式”部分大小
+    real_size = setup_sects << GRUB_DISK_SECTOR_BITS;
+    prot_file_size = grub_file_size (file) - real_size - GRUB_DISK_SECTOR_SIZE;
     
-    if (lh.header != grub_cpu_to_le32 (0x53726448))  // "HdrS"
-        return grub_error (GRUB_ERR_BAD_OS, "invalid kernel header");
-    
-    // 步骤 5: 计算 Setup 代码大小
-    setup_sects = lh.setup_sects;
-    if (setup_sects == 0)
-        setup_sects = 4;  // 默认 4 个扇区
-    setup_size = (setup_sects + 1) * 512;  // +1 是因为头部也算一个扇区
-    
-    // 步骤 6: 计算压缩内核代码大小
-    kernel_size = len - setup_size;
-    
-    // 步骤 7: 计算加载地址
+    // 步骤 5: 计算加载地址与对齐（preferred_address、align、min_align、relocatable）
     preferred_address = GRUB_LINUX_BZIMAGE_ADDR;  // 0x100000 (1MB)
-    if (lh.pref_address && relocatable)
+    if (relocatable)
         preferred_address = grub_le_to_cpu64 (lh.pref_address);
     
-    // 步骤 8: 通过 relocator 分配内存
-    // ⚠️ 关键：内核不是直接加载到 0x100000 (1MB)，而是加载到临时缓冲区
-    // 因为 GRUB 代码也在 0x100000 (1MB)，需要避免覆盖
+    // 步骤 6: 通过 relocator 分配临时缓冲区（非最终 0x100000）
     allocate_pages (prot_size, &align, min_align, relocatable, preferred_address);
-    // 说明：此处 "pages" 指分配的内存块/区域，非 MMU 的页（页表中的 4KB 页）。
-    // allocate_pages 内部调用 grub_relocator_alloc_chunk_align()：
-    //   1. 首先尝试在 preferred_address (0x100000 (1MB)) 分配
-    //      - 对于可重定位内核：这个尝试几乎总是失败（GRUB 代码占用）
-    //      - 但代码仍会尝试，保持逻辑统一和兼容性
-    //   2. 如果失败，则在 0x1000000 (16MB) 以上分配
-    //      - 0x1000000 (16MB) = 16 * 1024 * 1024 = 16 MB（硬编码在源代码中）
-    //      - 选择 16MB 的原因：避开 GRUB 区域，避开系统保留区域，历史原因
-    // 返回两个地址：
-   //   - prot_mode_mem：临时缓冲区地址（GRUB 用于写入数据，通常在 16MB+）
-   //   - prot_mode_target：最终目标地址（0x100000 (1MB)，boot 时 relocator 代码会将内核复制到此）
+    // 说明：此处 "pages" 指分配的内存块/区域，非 MMU 的页。
+    // 得到 prot_mode_mem（写入用，常为 16MB+）、prot_mode_target（最终 0x100000）。
     
-    // 步骤 9: 复制内核到临时缓冲区（不是最终位置！）
-    // 注意：这里只是复制文件内容到内存，不解压
-    // Setup 代码是未压缩的，可以直接执行
-    // 压缩的内核代码需要由 Setup 代码解压
-    grub_memcpy (prot_mode_mem, kernel, setup_size);  // Setup 代码（未压缩）
-    grub_memcpy (prot_mode_mem + setup_size, 
-                 kernel + setup_size, kernel_size);    // 压缩内核（gzip 压缩）
+    // 步骤 7: 将 setup 头扩展区读入 linux_params（boot_params）
+    len = 0x202 + *((char *) &lh.jump + 1);
+    grub_memcpy (&linux_params.hdr.setup_sects, &lh.setup_sects, len - 0x1F1);
+    len -= sizeof (lh);
+    if (len > 0)
+        grub_file_read (file, (char *) &linux_params + sizeof (lh), len);
     
-    // 步骤 10: 设置 boot_params 结构
-    linux_params.code32_start = prot_mode_target + 
-                                grub_le_to_cpu32 (lh.code32_start) - 
-                                GRUB_LINUX_BZIMAGE_ADDR;
-    linux_params.cmd_line_ptr = ...;  // 内核命令行参数
-    linux_params.ramdisk_image = ...; // initramfs 地址
+    // 步骤 8: 设置 boot_params 中 code32_start、type_of_loader、ramdisk 等
+    linux_params.hdr.code32_start = prot_mode_target + lh.code32_start - GRUB_LINUX_BZIMAGE_ADDR;
+    // ...
     
-    // 步骤 11: 注册启动函数
-    // 注意：这里只是注册，并不立即执行跳转
-    // 当用户在 GRUB 菜单中选择启动该项时，才会调用 grub_linux_boot()
+    // 步骤 9: 将“保护模式”部分一次性从文件读入临时缓冲区（源码无 kernel 缓冲、无两次 memcpy）
+    grub_file_seek (file, real_size + GRUB_DISK_SECTOR_SIZE);
+    len = prot_file_size;
+    if (grub_file_read (file, prot_mode_mem, len) != len)
+        ...
+    
+    // 步骤 10: 注册启动函数（实际跳转在 boot 时由 grub_linux_boot() 执行）
     grub_loader_set (grub_linux_boot, grub_linux_unload, 0);
 }
 ```
@@ -1192,6 +1165,22 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
 **前置条件：**
 - 必须先执行 `linux` 命令加载内核（`grub_cmd_linux()`）
 - 如果未加载内核，会返回错误：`"you need to load the kernel first"`
+
+**grub_cmd_initrd 如何得知内核占用与 initrd 起始地址：**
+
+`grub_cmd_initrd` 不调用 `allocate_pages()`，也不单独申请“一整块”内存；它复用 `grub_cmd_linux()` 在同一文件内建立的**静态变量**和**同一个 relocator**：
+
+| 来源 | 含义 |
+|------|------|
+| `loaded` | 由 `grub_cmd_linux()` 置 1；initrd 用 `if (! loaded)` 判断是否已加载内核，未加载则报错 `"you need to load the kernel first"`。 |
+| `prot_mode_target` | 由 `grub_cmd_linux()` 在 `allocate_pages()` 里通过 relocator 得到，即内核临时缓冲区的**物理起始地址**（通常为 0x100000 或 16MB+）。 |
+| `prot_init_space` | 由 `grub_cmd_linux()` 在解析内核头后计算并写入：对 2.10+ 内核用 `lh.init_size` 做页对齐，否则用 `prot_size`（或约 3 倍）做页对齐；表示内核占用的**长度**（字节）。 |
+| `relocator` | 由 `grub_cmd_linux()` 在 `allocate_pages()` 里创建并保留；initrd 用**同一个** `relocator` 再调用 `grub_relocator_alloc_chunk_align(relocator, &ch, addr_min, addr, ...)` 分配一块新区间，与内核块不重叠。 |
+
+因此：
+
+1. **内核占用了多少内存**：initrd 不自己算，直接读已存在的静态变量 **`prot_init_space`**（由 linux 命令在分配时填好）。
+2. **initrd 加载的起始位置**：**`addr_min = prot_mode_target + prot_init_space`**，即“内核临时缓冲区”的物理结束地址；initrd 必须放在该地址之后。再结合 `addr_max`（来自 `linux_params.hdr.initrd_addr_max` 或默认上限）得到允许区间 `[addr_min, addr_max]`，在区间内按“尽量高地址”选 `addr`，再用同一个 relocator 在该区间分配一块给 initrd。
 
 **完整源代码分析：**
 
