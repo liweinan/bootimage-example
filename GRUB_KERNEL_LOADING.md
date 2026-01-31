@@ -2049,6 +2049,39 @@ grub_relocator32_boot()            // 跳转到内核入口点
 内核 code32_start
 ```
 
+**隐式执行 boot 的代码与流程：**
+
+脚本体执行完后**不会自动**执行 boot，只有在「无错误且已加载 loader」时才隐式执行 boot。
+
+1. **触发位置**（`grub-core/normal/menu.c:303-307`）：
+   ```c
+   grub_script_execute_new_scope (entry->sourcecode, entry->argc, entry->args);
+
+   if (grub_errno == GRUB_ERR_NONE && grub_loader_is_loaded ())
+       /* Implicit execution of boot, only if something is loaded.  */
+       grub_command_execute ("boot", 0, 0);
+   ```
+   即：脚本体（`entry->sourcecode`）执行返回后，若当前无错误且 `grub_loader_is_loaded()` 为真，则调用 `grub_command_execute ("boot", 0, 0)`，相当于执行一次 boot 命令。
+
+2. **`grub_loader_is_loaded()`**（`grub-core/commands/boot.c:80-84`）：
+   ```c
+   int grub_loader_is_loaded (void)
+   {
+     return grub_loader_loaded;
+   }
+   ```
+   `grub_loader_loaded` 在 `grub_loader_set()` / `grub_loader_set_ex()` 里被置 1；`grub_cmd_linux()` 里调用 `grub_loader_set (grub_linux_boot, grub_linux_unload, 0)` 时就会置 1，表示「已加载内核并注册了启动函数」。
+
+3. **隐式 boot 的调用链**（与用户显式输入 `boot` 相同）：
+   ```
+   grub_command_execute ("boot", 0, 0)
+       → grub_command_find ("boot") 查表 → (cmd->func)(...) = grub_cmd_boot()
+       → grub_cmd_boot()  [commands/boot.c:224]
+       → grub_loader_boot()  [commands/boot.c:190]
+       → (grub_loader_boot_func)(grub_loader_context) 即 grub_linux_boot()
+       → grub_relocator32_boot()
+   ```
+
 **关键点：**
 - **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转；跳转由脚本执行完毕后的隐式或显式 `boot` 触发
 - **用户交互触发**：先由用户选择菜单项（按 Enter），GRUB 才执行该条目的脚本体（此时才调用 `grub_cmd_linux()`）；脚本执行完后若已加载 loader 则隐式 `boot`
