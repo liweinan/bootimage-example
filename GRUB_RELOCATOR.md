@@ -13,7 +13,7 @@
 **从 boot 到内核的完整执行流程：**
 
 ```
-执行顺序：GRUB → movers_chunk → 安全区 relocator32 副本 → 内核（relocator32 不跳去 movers_chunk，而是 movers_chunk 执行完后跳回 relocator32 副本）
+执行顺序：GRUB → movers_chunk → 安全区 relocator32 副本 → 内核（movers_chunk 执行完后跳回 relocator32 副本，而非 relocator32 跳去 movers_chunk）
 
 grub_relocator32_boot(...)     [relocator.c]，执行于 GRUB 0x100000 (1MB)+
     ↓
@@ -43,7 +43,7 @@ grub_relocator32_boot(...)     [relocator.c]，执行于 GRUB 0x100000 (1MB)+
 │ PREAMBLE → RELOAD_GDT → DISABLE_PAGING → 设段与寄存器 → ljmp code32_start   │
 └─────────────────────────────────────────────────────────────────────────────┘
     ↓
-0x100000 (1MB)：复制目标，复制完成后为内核镜像；relocator32 的 ljmp 跳入此处
+0x100000 (1MB)：复制目标（由 movers_chunk 内 forward/backward 写入）；此处为内核镜像后，relocator32 的 ljmp 跳入
     ↓
 内核入口点（code32_start @ 0x100000 (1MB)）
 ```
