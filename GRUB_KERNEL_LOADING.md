@@ -1594,6 +1594,42 @@ grub_arch_efi_linux_boot_image (grub_addr_t addr, grub_size_t size, char *args)
 
 `grub_loader_set` 是 GRUB 的 loader 注册机制，用于设置启动和卸载函数，供后续 `boot` 命令调用。
 
+**grub_linux_boot 在内存中的位置：**
+
+`grub_linux_boot` **不是**被“挂载”到某块特殊物理/虚拟地址的代码；它是 **loader 模块里注册的一个函数指针**，保存在 **boot 模块的静态变量**里：
+
+- **实现位置**：`grub-core/commands/boot.c`（boot 模块）中的静态变量：
+  - `grub_loader_boot_func`：实际被调用的入口是 **包装函数** `grub_simple_boot_hook`（见下文），不是直接存 `grub_linux_boot`。
+  - `grub_loader_context`：传给上述函数的 context，即 **`&simple_loader_hooks`**（同一文件内静态结构体）。
+  - `simple_loader_hooks`：静态结构体，其成员 **`.boot = grub_linux_boot`**、**.unload = grub_linux_unload** 在 `grub_loader_set()` 里被赋值。
+
+因此，“挂载”的含义是：**函数指针 `grub_linux_boot` 被写入 boot 模块的静态数据区**（`simple_loader_hooks.boot`），而 **`grub_linux_boot` 的代码本身** 仍在 **linux 模块（或内置）的代码段** 中，即 GRUB 正常加载的模块/内核镜像所在内存，没有单独拷贝到别的地址。
+
+**grub_loader_set 执行过程（源码：`grub-core/commands/boot.c`）：**
+
+1. **入口**：`grub_cmd_linux()` 调用  
+   `grub_loader_set (grub_linux_boot, grub_linux_unload, 0);`
+
+2. **`grub_loader_set()`（约 163–174 行）**：
+   - 调用 `grub_loader_set_ex (grub_simple_boot_hook, grub_simple_unload_hook, &simple_loader_hooks, flags)`：
+     - 若已有 loader（`grub_loader_loaded && grub_loader_unload_func`），先执行 `grub_loader_unload_func (grub_loader_context)` 卸载旧内核。
+     - `grub_loader_boot_func = grub_simple_boot_hook`  
+     - `grub_loader_unload_func = grub_simple_unload_hook`  
+     - `grub_loader_context = &simple_loader_hooks`  
+     - `grub_loader_flags = flags`  
+     - `grub_loader_loaded = 1`
+   - 然后在本函数内：`simple_loader_hooks.boot = boot`（即 `grub_linux_boot`），`simple_loader_hooks.unload = unload`（即 `grub_linux_unload`）。
+
+3. **后续 boot 命令触发时**：  
+   `grub_cmd_boot()` → `grub_loader_boot()`（约 190–220 行）：
+   - 若 `!grub_loader_loaded` 则报错 "you need to load the kernel first"。
+   - 执行 `grub_machine_fini (grub_loader_flags)`，再按链表执行各 preboot 钩子。
+   - **核心调用**：`err = (grub_loader_boot_func) (grub_loader_context)`  
+     即 `grub_simple_boot_hook (&simple_loader_hooks)`。
+   - `grub_simple_boot_hook()`（约 57–64 行）：从 context 取出 `struct grub_simple_loader_hooks *hooks`，执行 **`return hooks->boot ();`**，即 **`grub_linux_boot()`**。
+
+**小结**：`grub_linux_boot` 的“挂载”= 其**函数指针**被存进 boot 模块的 **`simple_loader_hooks.boot`**；真正执行时通过 **`grub_loader_boot_func(grub_loader_context)` → `grub_simple_boot_hook(&simple_loader_hooks)` → `hooks->boot()`** 间接调用到 `grub_linux_boot()`。
+
 **函数声明（`grub/include/grub/loader.h:39-41`）：**
 
 ```c
