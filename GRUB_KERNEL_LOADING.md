@@ -10,27 +10,24 @@
 
 ```
 grub_main()（grub/grub-core/kern/main.c）
-    ├─ 源代码位置：grub/grub-core/kern/main.c
-    ├─ 解析 grub.cfg 配置文件
-    ├─ 显示启动菜单（如果配置）
-    ├─ 用户选择启动 Linux 内核
-    └─ 执行 menuentry 中的命令：
+    ├─ 解析 grub.cfg：只注册 menuentry（grub_cmd_menuentry 把条目标题和脚本体存到 entry，不执行脚本体）
+    ├─ 显示启动菜单
+    └─ 用户选择某菜单项（按 Enter）
         ↓
-grub_cmd_linux()（执行 linux 命令）
-    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c:680-1062
+GRUB 执行该条目的脚本体（grub_menu_execute_entry → entry->sourcecode，见 normal/menu.c:298）
+        ↓
+执行到 linux 命令 → grub_cmd_linux()
+    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
     ├─ 加载内核镜像到临时缓冲区（通常在 16MB+，不是 0x100000 (1MB)）
     ├─ 设置内核启动参数（boot_params）
     ├─ 最终目标地址：0x100000 (1MB)（boot 时 relocator 代码会将内核复制到此）
     └─ 注册启动函数 grub_linux_boot()
         ↓
-grub_cmd_initrd()（执行 initrd 命令，可选）
-    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c:1065-1166
-    ├─ 读取 initrd 文件（支持多个文件和压缩格式）
-    ├─ 分配内存（尽量放在高地址，4KB 对齐）
-    ├─ 加载 initrd 到内存
-    └─ 设置 boot_params.ramdisk_image 和 ramdisk_size
+grub_cmd_initrd()（脚本中下一行 initrd 命令，可选）
+    ├─ 读取 initrd 文件，分配内存，加载并设置 boot_params.ramdisk_*
+    └─ （同上，均在“执行该条目脚本”阶段完成）
         ↓
-用户按 Enter 选择启动项
+脚本执行完毕；若 grub_loader_is_loaded() 则隐式执行 boot（menu.c:305-307）
         ↓
 grub_linux_boot() → grub_relocator32_boot()
     ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
@@ -58,13 +55,13 @@ Linux 内核 Setup 代码（实模式）
 
 ```
 grub_main()（grub/grub-core/kern/main.c）
-    ├─ 源代码位置：grub/grub-core/kern/main.c
-    ├─ 解析 grub.cfg 配置文件
-    ├─ 显示启动菜单（如果配置）
-    ├─ 用户选择启动 Linux 内核
-    └─ 执行 menuentry 中的命令：
+    ├─ 解析 grub.cfg：只注册 menuentry（脚本体存到 entry，不执行）
+    ├─ 显示启动菜单
+    └─ 用户选择某菜单项（按 Enter）
         ↓
-grub_cmd_linux()（执行 linux 命令）
+GRUB 执行该条目的脚本体（grub_menu_execute_entry → entry->sourcecode）
+        ↓
+执行到 linux 命令 → grub_cmd_linux()
     ├─ 源代码位置：grub/grub-core/loader/efi/linux.c:477-600
     ├─ 验证内核格式（PE/COFF，UEFI stub 内核）
     ├─ 分配内存（使用 EFI AllocatePages）
@@ -148,14 +145,73 @@ startup_64（64 位内核入口点）
 
 | 特性 | BIOS 启动 | UEFI 启动 |
 |------|----------|----------|
-| **延迟执行机制** | ✅ `grub_cmd_linux()` 只负责准备，不执行跳转 | ✅ 相同 |
-| **用户交互触发** | ✅ 跳转由用户在菜单中选择启动项时触发 | ✅ 相同 |
+| **延迟执行机制** | ✅ `grub_cmd_linux()` 只负责准备，不执行跳转；跳转由脚本结束后的隐式/显式 boot 触发 | ✅ 相同 |
+| **用户交互触发** | ✅ 先选菜单项，再执行该条目脚本体（此时才调用 `grub_cmd_linux()`）；脚本结束后隐式 boot | ✅ 相同 |
 | **寄存器状态** | `ESI` = `boot_params` 地址<br>`EIP` = `code32_start` | 由 EFI 固件设置（通过 `StartImage` 服务） |
 | **跳转方式** | relocator 代码手动跳转 | EFI `StartImage` 服务 |
 | **内核格式** | bzImage（实模式 setup + 压缩内核） | PE/COFF（UEFI stub 内核） |
 | **内核入口点** | `code32_start`（实模式代码） | PE/COFF EntryPoint（保护模式/长模式） |
 | **模式切换** | 需要（保护模式 → 实模式） | 不需要（都在保护模式/长模式） |
 | **参数传递** | `boot_params` 结构（通过 `ESI` 寄存器） | EFI System Table + 命令行参数（通过 `load_options`） |
+
+## grub_cmd_linux() 与 grub_linux_boot() 职责划分
+
+**触发时机不同**：解析 `grub.cfg` 时只注册 menuentry（脚本体存到 entry->sourcecode，不执行）。用户**选择该菜单项**后，GRUB 执行该条目的脚本体（`grub_menu_execute_entry` → `grub_script_execute_new_scope(entry->sourcecode)`），此时才执行到 `linux` 命令 → `grub_cmd_linux()`。`grub_linux_boot()` 在脚本执行完后由隐式或显式 `boot` 调用（loader 机制）。
+
+| 项目 | grub_cmd_linux() | grub_linux_boot() |
+|------|-------------------|--------------------|
+| **调用时机** | 用户选择该菜单项后，执行该条目脚本时执行到 `linux` 命令 | 脚本执行完后隐式/显式 `boot` 时 |
+| **主要动作** | 打开内核文件；解析头部；通过 relocator 分配临时缓冲区（通常 16MB+）；把内核拷到临时缓冲区；计算并设置 boot_params（含 code32_start、cmd_line_ptr、ramdisk 等）；**注册** `grub_linux_boot()`（不跳转） | 用已设好的 boot_params 填 state（esi、esp、eip=code32_start）；调用 `grub_relocator32_boot(relocator, state, 0)`，由 relocator 完成复制到 0x100000 (1MB) 并跳转内核 |
+| **是否跳转** | 否，仅准备并注册 | 是，通过 grub_relocator32_boot() 最终跳入内核 |
+
+**简要结论**：加载内核、设 boot_params、注册启动函数都在 **grub_cmd_linux()**；真正执行“复制到 0x100000 (1MB) + 跳内核”的是 **grub_linux_boot()** → **grub_relocator32_boot()**。
+
+### 从 grub_main 到 grub_cmd_menuentry 的调用链（源码依据）
+
+**典型路径（磁盘上的 grub.cfg）**：主菜单的 menuentry 来自** normal 模式**读取的配置文件，不是来自嵌入 core 的 config。
+
+```
+grub_main()                                    [kern/main.c:304]
+  → grub_load_normal_mode()                    [kern/main.c:368]
+      → grub_dl_load("normal")                  [kern/main.c:236]
+      → grub_command_execute("normal", 0, 0)    [kern/main.c:242]
+  → grub_cmd_normal(..., 0, 0)                 [normal/main.c:321]
+      → grub_enter_normal_mode(config)          [normal/main.c:355/359/362，config 多为 prefix/grub.cfg]
+  → grub_normal_execute(config, 0, 0)           [normal/main.c:310]
+      → read_config_file(config)               [normal/main.c:283，打开 grub.cfg 文件]
+          → while: read_config_file_getline(&line, 0, file)     [normal/main.c:182]
+          → grub_normal_parse_line(line, read_config_file_getline, file)  [normal/main.c:185]
+              → grub_script_parse(line, getline, file)          [script/main.c:30]
+              → grub_script_execute(parsed_script)              [script/main.c:36]
+              → （解析到 menuentry 时）grub_extcmd_dispatcher → grub_cmd_menuentry  [script/execute.c；commands/extcmd.c]
+  → grub_cmd_menuentry(ctxt, ...)              [commands/menuentry.c:256]
+      → grub_normal_add_menu_entry(..., sourcecode, ...)        [commands/menuentry.c:282-306]
+          → 仅把条目标题和脚本体（大括号内字符串）存到 entry->sourcecode，不执行脚本体
+```
+
+**可选路径（嵌入 core 的 config）**：若 core 镜像内嵌了 config（OBJ_TYPE_CONFIG），会先执行一遍，再用 rescue 解析器逐行执行，其中若有 menuentry 也会走到 grub_cmd_menuentry。
+
+```
+grub_main()
+  → grub_load_config()                         [kern/main.c:332，从 OBJ_TYPE_CONFIG 读出 load_config]
+  → grub_parser_execute(load_config)           [kern/main.c:364]
+      → 循环：grub_parser_execute_getline(&line, 0, &source)    [kern/parser.c:336]
+             grub_rescue_parse_line(line, grub_parser_execute_getline, &source)  [kern/parser.c:338]
+             → grub_parser_split_cmdline(...) → grub_command_find(name) → (cmd->func)(...)  [kern/rescue_parser.c]
+      → 若该行是 menuentry：cmd->func = grub_extcmd_dispatch → grub_extcmd_dispatcher → grub_cmd_menuentry
+```
+
+**用户选择菜单项后**（脚本体才执行，此时才可能调用 grub_cmd_linux）：
+
+```
+用户按 Enter 选中某条
+  → grub_menu_execute_entry(entry)             [normal/menu.c:206，如 347/358]
+      → grub_script_execute_new_scope(entry->sourcecode, entry->argc, entry->args)  [normal/menu.c:298]
+          → 执行到 linux 命令 → grub_command_find("linux") 查表 → (cmd->func)(...) = grub_cmd_linux()
+          → 执行到 initrd 命令 → grub_command_find("initrd") 查表 → grub_cmd_initrd()
+          → 脚本结束；若 grub_loader_is_loaded() 则隐式 grub_command_execute("boot")  [normal/menu.c:305-307]
+  → grub_linux_boot() → grub_relocator32_boot()
+```
 
 ## 核心函数详解
 
@@ -314,8 +370,8 @@ grub_main (void)
         grub_parser_execute (load_config);
     // 功能：
     //   - 解析并执行嵌入的 grub.cfg 配置文件
-    //   - 执行配置文件中的命令（如 menuentry, linux, initrd 等）
-    //   - 当遇到 linux 命令时，会调用 grub_cmd_linux() 加载内核
+    //   - 遇到 menuentry 时只注册条目（脚本体存到 entry->sourcecode，不执行脚本体）
+    //   - linux 命令在用户选择该菜单项后、执行该条目脚本体时才会被调用（grub_menu_execute_entry）
     // 源代码位置：grub/grub-core/commands/parser.c:grub_parser_execute()
 
     grub_boot_time ("After execution of embedded config. Attempt to go to normal mode");
@@ -546,7 +602,7 @@ grub_mod_init(mod)              [linux.c:1171-1178]
 **关键机制：**
 - **ELF 符号表**：模块是 ELF 格式文件，包含符号表
 - **约定的函数名**：GRUB 通过查找固定的函数名 `grub_mod_init` 和 `grub_mod_fini` 来识别初始化/清理函数
-- **自动调用**：模块加载完成后，自动调用初始化函数，初始化函数内部调用 `grub_register_command()` 注册命令
+- **自动调用**：模块加载完成后，自动调用初始化函数，初始化函数内部调用 `grub_register_command()` **仅注册**命令（把命令名与处理函数登记到命令表），**不执行** `grub_cmd_linux`；`grub_cmd_linux` 在用户选择菜单项后、执行该条目脚本体并遇到 `linux` 命令时，才由解析器通过 `grub_command_find("linux")` 查表并调用
 
 **`GRUB_MOD_INIT(name)` 宏展开：**
 
@@ -816,7 +872,7 @@ grub_register_command (const char *name,
 }
 ```
 
-注册的命令被添加到全局链表 `grub_command_list`，执行命令时通过 `grub_command_find()` 查找并调用对应的处理函数。
+注册的命令被添加到全局链表 `grub_command_list`。**`grub_register_command` 仅做登记**：把命令名与处理函数（如 `grub_cmd_linux`）挂到命令表，**不会在此处执行**该处理函数。真正执行发生在脚本/解析器执行到该命令时：通过 `grub_command_find("linux")` 查表得到 `cmd`，再调用 `(cmd->func)(cmd, argc, argv)`，即 `grub_cmd_linux()`。
 
 **5. `grub_parser_execute()` - 执行配置文件**
 
@@ -901,7 +957,7 @@ menuentry "Linux Kernel (Debian Installer)" {
 
 **源代码位置：** `grub/grub-core/kern/parser.c:330-344`
 
-**功能：** 逐行解析并执行配置文件（如 `grub.cfg`）中的命令。
+**功能：** 逐行解析并执行**嵌入 core 的 config 字符串**（`load_config`，来自 OBJ_TYPE_CONFIG 模块）。**注意**：磁盘上的主 `grub.cfg` 不是由此函数执行，而是由 normal 模式的 `read_config_file()` → `grub_normal_parse_line()`（脚本解析器）执行，见上文「从 grub_main 到 grub_cmd_menuentry 的调用链」。
 
 **源代码分析：**
 
@@ -969,48 +1025,17 @@ grub_rescue_parse_line (char *line, grub_reader_getline_t getline, void *data)
 }
 ```
 
-**执行流程图：**
-
-```
-grub_parser_execute("grub.cfg 内容")
-    │
-    ├─ 逐行读取配置文件
-    │   ├─ "set root='hd0,1'"
-    │   │   └─ grub_env_set("root", "hd0,1")  // 设置环境变量
-    │   │
-    │   ├─ "insmod gfxterm"  // ⚠️ 在 menuentry 外的 insmod 命令
-    │   │   └─ grub_core_cmd_insmod("gfxterm")
-    │   │       └─ grub_dl_load("gfxterm")  // 立即从文件系统加载模块
-    │   │           └─ grub_dl_load_file("/boot/grub/i386-pc/gfxterm.mod")
-    │   │
-    │   ├─ "menuentry 'Linux' { insmod linux; linux /vmlinuz; initrd /initrd.img }"
-    │   │   └─ grub_cmd_menuentry()  // ⚠️ 只注册 menuentry，不执行内部命令
-    │   │       └─ 将 menuentry 添加到菜单列表（包括内部的 insmod 命令）
-    │   │
-    │   └─ ... 其他命令 ...
-    │
-    └─ 返回（配置解析完成，显示菜单）
-
-用户按 Enter 选择 menuentry 后：
-    │
-    └─ GRUB 执行该 menuentry 的命令
-        ├─ "insmod linux" → grub_core_cmd_insmod("linux")  // ⚠️ 此时才执行 menuentry 中的 insmod
-        │   └─ grub_dl_load("linux")  // 从文件系统加载模块
-        ├─ "linux /vmlinuz" → grub_cmd_linux()
-        ├─ "initrd /initrd.img" → grub_cmd_initrd()
-        └─ 隐式 boot → grub_linux_boot()
-```
+**执行流程（仅针对嵌入 config）**：`grub_parser_execute(load_config)` 用 rescue 解析器逐行执行 `load_config`；若某行为 `menuentry ... { ... }`，则 `grub_rescue_parse_line` → `grub_command_find("menuentry")` → `(cmd->func)(...)` = `grub_extcmd_dispatch` → `grub_cmd_menuentry`，仅注册条目、不执行脚本体。用户按 Enter 选择某条后，由 `grub_menu_execute_entry(entry)` 执行 `entry->sourcecode`，此时才执行到 `linux`/`initrd` 等，见上文「从 grub_main 到 grub_cmd_menuentry 的调用链」。
 
 **⚠️ `insmod` 命令的处理时机：**
 
 1. **在 `menuentry` 外的 `insmod` 命令**：
-   - 在 `grub_parser_execute()` 解析 `grub.cfg` 时**立即执行**
-   - 例如：`grub.cfg` 顶部的 `insmod gfxterm` 会在显示菜单前加载模块
-   - **源代码位置**：`grub/grub-core/kern/main.c:364` → `grub_parser_execute(load_config)`
+   - 解析 config 时**立即执行**（嵌入 config 由 `grub_parser_execute(load_config)`；磁盘 grub.cfg 由 `read_config_file` → `grub_normal_parse_line` 逐行执行）
+   - 例如：config 顶部的 `insmod gfxterm` 会在显示菜单前加载模块
 
 2. **在 `menuentry` 内的 `insmod` 命令**：
-   - 在 `grub_parser_execute()` 解析时**不执行**（只注册 menuentry）
-   - 用户选择该 menuentry 并按 Enter 后**才执行**
+   - 解析时**不执行**（只把该条目的脚本体存到 `entry->sourcecode`）
+   - 用户选择该 menuentry 并按 Enter 后，执行 `entry->sourcecode` 时**才执行**
    - 例如：`menuentry "Linux" { insmod linux; linux /vmlinuz }` 中的 `insmod linux` 只在用户选择该菜单项时执行
 
 3. **`insmod` 命令的处理函数**：
@@ -1021,20 +1046,13 @@ grub_parser_execute("grub.cfg 内容")
 **关键点：**
 
 1. **配置文件解析时机**：
-   - `grub_parser_execute()` 在 `grub_main()` 中执行（**步骤 9**）
-   - 解析 `grub.cfg` 时：
-     - **menuentry 外的命令**（如 `insmod gfxterm`）**立即执行**
-     - **menuentry 内的命令**（如 `insmod linux`, `linux /vmlinuz`）**只注册，不执行**
-   - 用户在菜单界面选择并按 Enter 后，才执行所选 menuentry 中的命令
+   - 嵌入 config：`grub_main()` → `grub_parser_execute(load_config)`（kern/main.c:364）
+   - 磁盘 grub.cfg：`grub_main()` → `grub_load_normal_mode()` → … → `read_config_file(config)` → `grub_normal_parse_line` 逐行（见上文「从 grub_main 到 grub_cmd_menuentry 的调用链」）
+   - 解析时：**menuentry 外的命令**（如 `insmod gfxterm`）**立即执行**；**menuentry 内的命令**（如 `linux`）**只随脚本体存入 entry，不执行**
+   - 用户选择某条并按 Enter 后，才执行该条目的脚本体（`grub_menu_execute_entry` → `grub_script_execute_new_scope(entry->sourcecode)`）
 
 2. **`insmod` 命令的处理步骤**：
-   - **在 `grub_main()` 的步骤 9**：`grub_parser_execute(load_config)` 执行配置文件
-   - 当遇到 `insmod` 命令时：
-     - 调用 `grub_rescue_parse_line()` 解析命令行
-     - 调用 `grub_command_find("insmod")` 查找命令
-     - 调用 `grub_core_cmd_insmod()` 执行命令
-     - 调用 `grub_dl_load()` 或 `grub_dl_load_file()` 从文件系统加载模块
-     - 模块加载后，调用模块的 `grub_mod_init()` 注册其提供的命令
+   - 解析到 `insmod` 行时：当前解析器（rescue 或 script）→ `grub_command_find("insmod")` → 对应 insmod 命令处理函数 → `grub_dl_load()`/`grub_dl_load_file()` 加载模块，模块的 `grub_mod_init()` 注册其命令
 
 2. **menuentry 执行流程**：
    - 用户按 Enter 后，执行 `linux` 命令 → `grub_cmd_linux()` 加载内核到临时缓冲区（通常在 16MB+）
@@ -1127,6 +1145,7 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
     // ⚠️ 关键：内核不是直接加载到 0x100000 (1MB)，而是加载到临时缓冲区
     // 因为 GRUB 代码也在 0x100000 (1MB)，需要避免覆盖
     allocate_pages (prot_size, &align, min_align, relocatable, preferred_address);
+    // 说明：此处 "pages" 指分配的内存块/区域，非 MMU 的页（页表中的 4KB 页）。
     // allocate_pages 内部调用 grub_relocator_alloc_chunk_align()：
     //   1. 首先尝试在 preferred_address (0x100000 (1MB)) 分配
     //      - 对于可重定位内核：这个尝试几乎总是失败（GRUB 代码占用）
@@ -1698,6 +1717,8 @@ grub_loader_set (grub_err_t (*boot) (void),
    
    **完整的卸载流程**：
    
+   **注意**：以下步骤均发生在**加载阶段**（再次执行 `linux` 命令时），而非用户按 Enter **启动**时。allocate_pages 每次执行 `linux` 命令时都会在加载阶段被调用；旧缓冲区的释放是在**本次加载新内核**的过程中触发的。
+   
    当加载新内核时（执行第二个 `linux` 命令）：
    ```
    1. grub_loader_set_ex() 检测到已有内核加载
@@ -1724,22 +1745,30 @@ grub_loader_set (grub_err_t (*boot) (void),
    - **错误处理**：如果新内核加载失败，旧的内核资源仍然可用
 
 3. **实际场景示例**：
+   
+   **重要**：GRUB 不会在读取 cfg 时预先把所有 menuentry 的内核都加载到内存。解析 cfg 时只**注册**各 menuentry（把条目加入菜单）；menuentry **内部的命令**（如 `linux`、`initrd`）是在**用户选中该条目**（或该条目被自动执行）时才运行的。因此“再次执行 linux”只会在以下两种情况下出现：
+   
    ```bash
-   # 场景 1：在同一个 menuentry 中加载多个内核
+   # 场景 1：在同一个 menuentry 中写了两条 linux（少见）
+   # 用户选中本条目后，会依次执行两条 linux，第二条会触发卸载第一条
    menuentry "Test" {
-       linux /boot/vmlinuz-5.10 root=/dev/sda1    # 第一个内核
-       linux /boot/vmlinuz-5.15 root=/dev/sda1    # 第二个内核（第一个被卸载）
-       boot  # 只会启动第二个内核（5.15）
+       linux /boot/vmlinuz-5.10 root=/dev/sda1    # 先加载 5.10
+       linux /boot/vmlinuz-5.15 root=/dev/sda1    # 再加载 5.15（5.10 被卸载）
+       boot  # 启动 5.15
    }
    
-   # 场景 2：在不同 menuentry 中加载内核
+   # 场景 2：两个 menuentry，用户先选一个再改选另一个（未按 boot 前切回菜单重选）
+   # 用户先选 "Linux 5.10" → 执行该条目体 → linux 5.10 被加载
+   # 用户再按 Esc/箭头切回菜单，选 "Linux 5.15" → 执行该条目体 → linux 5.15 被调用，5.10 被卸载
    menuentry "Linux 5.10" {
        linux /boot/vmlinuz-5.10 root=/dev/sda1
    }
    menuentry "Linux 5.15" {
-       linux /boot/vmlinuz-5.15 root=/dev/sda1    # 如果之前选择了 5.10，它会被卸载
+       linux /boot/vmlinuz-5.15 root=/dev/sda1
    }
    ```
+   
+   若用户只选一次且直接 boot（最常见），则整个过程中只会执行**一次** `linux`，只加载一个内核。
 
 4. **内存布局（加载多个内核时）**：
    ```
@@ -2021,24 +2050,13 @@ grub_relocator32_boot()            // 跳转到内核入口点
 ```
 
 **关键点：**
-- **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转
-- **用户交互触发**：跳转由用户在菜单中选择启动项时触发
-- **灵活性**：用户可以在加载内核后继续浏览菜单、修改参数或选择其他启动项
+- **延迟执行机制**：`grub_cmd_linux()` 只负责准备（加载内核、注册函数），不执行跳转；跳转由脚本执行完毕后的隐式或显式 `boot` 触发
+- **用户交互触发**：先由用户选择菜单项（按 Enter），GRUB 才执行该条目的脚本体（此时才调用 `grub_cmd_linux()`）；脚本执行完后若已加载 loader 则隐式 `boot`
+- **灵活性**：解析 cfg 时只注册条目、不加载内核；只有被选中的条目的脚本体会执行，因此同一时刻最多只有一个内核被加载（除非同一条目内写多条 `linux` 或用户改选另一条目）
 
-**GRUB 菜单选择与启动函数的关系：**
+**GRUB 菜单选择与启动函数的关系（与源码一致）：**
 
-**执行时机说明：**
-
-1. **解析 `grub.cfg` 时**（`grub_main()` → `grub_cmd_linux()`）：
-   - 当 GRUB 解析 `grub.cfg` 配置文件时，遇到 `linux` 命令会调用 `grub_cmd_linux()`
-   - `grub_cmd_linux()` 加载内核镜像到内存，设置启动参数
-   - **关键**：此时只是**注册**启动函数 `grub_linux_boot()`，**并不立即执行跳转**
-   - 用户可以继续浏览菜单，选择其他启动项，或修改内核参数
-
-2. **用户选择启动项时**（菜单交互 → `grub_linux_boot()`）：
-   - 当用户在 GRUB 菜单中选择启动该项（按 Enter 键）时
-   - GRUB 会调用之前注册的启动函数 `grub_linux_boot()`
-   - `grub_linux_boot()` 通过 `grub_relocator32_boot()` 执行跳转到内核入口点
+执行时机与调用链见上文「从 grub_main 到 grub_cmd_menuentry 的调用链」与「grub_cmd_linux() 与 grub_linux_boot() 职责划分」：解析 config 时只注册 menuentry（脚本体存到 `entry->sourcecode`）；用户选择该条后执行 `entry->sourcecode`，此时才调用 `grub_cmd_linux()`；脚本结束后隐式或显式 `boot` → `grub_linux_boot()` → `grub_relocator32_boot()`。
 
 **示例 `grub.cfg` 配置：**
 
@@ -2049,11 +2067,10 @@ menuentry "Linux 5.x.x" {
     initrd /boot/initrd.img-5.x.x
 }
 
-# 用户按 Enter 选择后，执行顺序：
-# 1. linux 命令 → grub_cmd_linux() 加载内核到临时缓冲区（通常在 16MB+）
+# 用户按 Enter 选择该条目后，GRUB 执行该条目的脚本体，顺序为：
+# 1. linux 命令 → grub_cmd_linux() 加载内核到临时缓冲区（通常在 16MB+）、注册 grub_linux_boot()
 # 2. initrd 命令 → grub_cmd_initrd() 加载 initramfs
-# 3. menuentry 结束后隐式 boot → grub_linux_boot() → grub_relocator32_boot()
-# 4. boot → grub_linux_boot() → grub_relocator32_boot()
+# 3. 脚本体执行完毕；若 grub_loader_is_loaded() 则隐式 boot → grub_linux_boot() → grub_relocator32_boot()
 #    - 构建 relocator 代码（包含复制内核的代码 + 跳转代码）
 #    - 将 relocator 代码复制到安全区域（0x1000-0x9a000）
 #    - 执行 relocator 代码：

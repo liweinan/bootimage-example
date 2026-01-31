@@ -1,6 +1,6 @@
 # GRUB Relocator 详细分析
 
-本文档从 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) 提取，为 relocator 机制的详细实现与源码分析。主线流程（内核加载、boot 命令、code32_start 传递等）见 GRUB_KERNEL_LOADING.md。
+本文档从 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) 提取，为 relocator 机制的详细实现与源码分析。主线流程（内核加载、boot 命令、code32_start 传递等）见 GRUB_KERNEL_LOADING.md。**调用关系**：`grub_relocator32_boot()` 由 `grub_linux_boot()` 在隐式或显式 `boot` 时调用；`grub_linux_boot()` 由用户选择菜单项并执行该条目脚本体、脚本结束后触发。从 `grub_main` 到 `grub_cmd_menuentry` 的完整调用链（磁盘 grub.cfg：grub_main → grub_load_normal_mode → normal → grub_enter_normal_mode → read_config_file → grub_normal_parse_line → grub_script_execute → grub_cmd_menuentry）见 GRUB_KERNEL_LOADING.md「从 grub_main 到 grub_cmd_menuentry 的调用链」。
 
 ---
 
