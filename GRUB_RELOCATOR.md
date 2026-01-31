@@ -6,7 +6,9 @@
 
 ## Relocator 执行总览
 
-内存位置与 [BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md) 一致：**安全区** 0x1000–0x9a000（1MB 以下）、**movers_chunk** 与 **内核/initrd 临时缓冲区 (src)** 由 GRUB 空闲内存池动态分配（常在 16MB+ 或 modend 以上）、**复制目标** 0x100000 (1MB)。**重要**：movers_chunk 与 0x100000 (1MB) 是两块不同内存——movers_chunk 在 1MB 之上的某处（如 16MB+）单独分配，0x100000 仅为复制写入目标，故复制不会覆盖 movers_chunk。以下为从 boot 到内核的完整执行过程，并标明每步所在内存、源码文件与函数。
+**重要**：movers_chunk 与 0x100000 (1MB) 是两块不同内存——movers_chunk 在 1MB 之上的某处（如 16MB+）单独分配，0x100000 仅是复制写入目标，因此复制不会覆盖 movers_chunk。
+
+内存位置与 [BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md) 一致：**安全区** 0x1000–0x9a000（1MB 以下）、**movers_chunk** 与 **内核/initrd 临时缓冲区 (src)** 由 GRUB 空闲内存池动态分配（常在 16MB+ 或 modend 以上）、**复制目标** 0x100000 (1MB)。以下为从 boot 到内核的完整执行过程，并标明每步所在内存、源码文件与函数。
 
 **从 boot 到内核的完整执行流程：**
 
