@@ -4,6 +4,43 @@
 
 ---
 
+## 为什么在 BIOS + 实模式下一定要有 relocate 过程？
+
+**结论：** 在 BIOS + 实模式（或“GRUB 在保护模式、内核入口在实模式/保护模式 setup”）下，**内核约定放在 0x100000 (1MB)**，而 **GRUB 自身也运行在 0x100000 (1MB)+**，同一块物理地址不能同时放两套代码；因此必须先在内核“别处”（临时缓冲区）加载，等用户执行 boot 后，再由一段**位于 1MB 以下、不会被覆盖**的代码（relocator）把内核**复制**到 0x100000 并跳转。这段“先搬到 0x100000 再跳”的过程就是 **relocate**；没有它，要么覆盖 GRUB 导致无法跳转，要么内核不在约定地址无法正确执行。
+
+**1. GRUB 自身加载在 0x100000 (1MB)+（源码依据）**
+
+- **GRUB 约定**：i386 PC 上“1MB 以上”的起始地址为 `GRUB_MEMORY_MACHINE_UPPER_START = 0x100000`（1 MiB），GRUB 解压/运行时代码与数据在此之上。
+- **源码**：`grub/include/grub/i386/memory.h` 定义 `GRUB_MEMORY_MACHINE_UPPER_START 0x100000`；`grub/include/grub/i386/pc/memory.h` 有 `GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR 0x100000`，即解压后 GRUB 使用的机器内存从 1MB 开始。
+- **结果**：GRUB 的代码段、数据段、堆等都在 0x100000 及以上，**0x100000 这块物理地址被 GRUB 占用**。
+
+**2. Linux bzImage 协议规定内核放在 0x100000 (1MB)（源码依据）**
+
+- **GRUB 侧**：bzImage 的“建议/最终”加载地址为 `GRUB_LINUX_BZIMAGE_ADDR = 0x100000`。
+- **源码**：`grub/include/grub/i386/linux.h` 定义 `#define GRUB_LINUX_BZIMAGE_ADDR 0x100000`；`grub-core/loader/i386/linux.c` 中 `preferred_address = GRUB_LINUX_BZIMAGE_ADDR`，`code32_start` 等按“镜像在 0x100000”来算。
+- **Linux 侧**：内核期望自己（setup + 压缩镜像）被放在约定物理地址；`arch/x86/include/asm/page_types.h` 中 `LOAD_PHYSICAL_ADDR` 由 `CONFIG_PHYSICAL_START` 对齐得到，boot protocol 下 bzImage 的加载地址即为 0x100000；`arch/x86/kernel/kexec-bzimage64.c` 中有 `MIN_KERNEL_LOAD_ADDR 0x100000`。
+- **结果**：**内核“最终”必须在 0x100000**，否则 setup、code32_start、解压等地址计算都会错。
+
+**3. 冲突与“必须先 relocate”的必然性**
+
+- 若 bootloader **直接把** bzImage 读到 0x100000：会**立刻覆盖**正在运行的 GRUB 代码，GRUB 还没执行“跳转到内核”就会崩溃，不可行。
+- 若 bootloader 把内核放在“别处”（如 16MB+）且**不搬**：内核不在 0x100000，违反协议，无法正确执行。
+- **因此**：只能采用 **两阶段**：  
+  (1) 加载阶段：把内核放到**临时缓冲区**（如 16MB+，与 GRUB 不重叠）；  
+  (2) boot 阶段：用一段**不在 0x100000 以上**的代码（即 1MB 以下的 **relocator**）把内核从临时区**复制**到 0x100000，再跳转到 `code32_start`。  
+  这段“复制到 0x100000 + 跳转”就是 **relocate 过程**；在 BIOS + 实模式（及 GRUB 在保护模式、内核入口为 setup）下**必须有**，否则无法既保留 GRUB 的跳转能力又满足内核对 0x100000 的约定。
+
+**4. 为何 relocator 代码必须在 1MB 以下？**
+
+- 执行“复制到 0x100000”的代码若也在 0x100000+，复制时会**先覆盖自己**（或覆盖 GRUB），无法执行完再跳转。
+- 因此 GRUB 把“做复制 + 切实模式 + 跳内核”的代码**拷贝到安全区 0x1000–0x9a000**（1MB 以下），这段区域不会被“复制到 0x100000”的操作覆盖，relocator 执行完复制后再从安全区跳转到 0x100000 处的内核入口。详见下文「Relocator 执行总览」与「问题 2：为什么要复制？」。
+
+**5. 与 UEFI 的对比（为何 UEFI 不需要这套 relocate）**
+
+- UEFI 下：GRUB 和内核都运行在固件提供的环境；内核常由 EFI `LoadImage`/`StartImage` 加载到**任意地址**，由固件完成跳转；GRUB 不必占用 0x100000，也没有“同一地址两用”的问题，因此**不需要**“先放别处再搬到 0x100000”的 relocate 过程。详见下文「⚠️ UEFI 启动方式完全不同」与「bzImage 必须放在 0x100000 与 UEFI 不矛盾」。
+
+---
+
 ## Relocator 执行总览
 
 **重要**：movers_chunk 与 0x100000 (1MB) 是两块不同内存——movers_chunk 在 1MB 之上的某处（如 16MB+）单独分配，0x100000 仅是复制写入目标，因此复制不会覆盖 movers_chunk。
@@ -374,6 +411,7 @@ grub_modbase = GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR + (_edata - _start);
 | **最终目标** | 0x100000 (1MB) | `GRUB_LINUX_BZIMAGE_ADDR` |
 | **大小** | `prot_size`（内核压缩大小） | 由内核头部 `init_size` 字段决定 |
 
+**⚠️ 内核解压不由 relocator 完成：** relocator 只把**仍为压缩状态**的内核复制到 0x100000 并跳转到 `code32_start`；gzip 解压由内核自身的代码（如 `arch/x86/boot/compressed/` 中的 startup_32）在跳转之后执行。详见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) 中「内核文件的解压缩在哪一步完成」。
 
 ---
 
@@ -511,6 +549,46 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
 | **relocator 机制** | ✅ 需要 | ❌ 不需要 |
 | **源代码文件** | `loader/i386/linux.c` | `loader/efi/linux.c` |
 | **关键函数** | `grub_relocator32_boot()` | `grub_efi_start_image()` |
+
+**bzImage 必须放在 0x100000 与 UEFI 不矛盾（源码依据）**
+
+“bzImage 必须放在 0x100000”指的是 **Legacy BIOS 启动协议**下的约定；**UEFI 启动走的是另一套协议、另一种入口**，同一份磁盘上的 vmlinuz 在两种路径下被当作**两种“镜像形态”**使用，因此不矛盾。
+
+1. **同一文件、两种用法**  
+   磁盘上的 vmlinuz 是 **hybrid**：既有 Legacy 用的 boot sector + setup + 压缩镜像，也有 **PE/COFF 头 + EFI stub**（需内核配置 `CONFIG_EFI_STUB`）。  
+   - **Legacy 路径**：GRUB 用 `grub-core/loader/i386/linux.c`，按 **Linux 实模式/保护模式 boot protocol** 加载；协议规定 setup + 压缩镜像放在 **0x100000**，`code32_start` 等按此地址算，故必须先 relocate 到 0x100000。  
+   - **UEFI 路径**：GRUB 用 `grub-core/loader/efi/linux.c`，**先检查 PE 魔数**（`GRUB_PE32_MAGIC`）；若不是 PE/COFF 则直接报错 "plain image kernel not supported - rebuild with CONFIG_(U)EFI_STUB enabled"（`efi/linux.c` 约 106–107 行）。即：UEFI 下 **只认“带 EFI stub 的 PE 镜像”**，不按“放在 0x100000 的 bzImage”那一套来。
+
+2. **GRUB UEFI 加载方式（源码）**  
+   - `grub-core/loader/efi/linux.c`：`kernel_addr = grub_efi_allocate_any_pages (...)`（约 537 行）→ 内核被分配到**任意可用页**，**不是**固定 0x100000。  
+   - `grub_file_read (file, kernel_addr, kernel_size)` 把整个文件读入该缓冲区。  
+   - `grub_arch_efi_linux_boot_image ((grub_addr_t) kernel_addr, kernel_size, linux_args)` 里调用 `grub_efi_load_image (0, ..., (void *) addr, size, &image_handle)`（约 220–223 行），即告诉固件“镜像已在 `addr`”；再 `grub_efi_start_image (image_handle, 0, NULL)`（约 255 行），固件从 **PE 头里的 AddressOfEntryPoint** 跳转，**不是**从 Legacy 的 setup/code32_start 跳转。
+
+3. **内核侧：PE 入口是 EFI stub，不是 setup**  
+   - Linux `arch/x86/boot/header.S`（约 86 行）：PE 可选头里 **AddressOfEntryPoint** = `setup_size + ZO_efi_pe_entry`（64 位）或 `.compat` 里 `setup_size + ZO_efi32_pe_entry`（32 位 stub）。即 **PE 入口是压缩镜像内的 efi_pe_entry/efi32_pe_entry**，不是实模式 setup。  
+   - `arch/x86/boot/startup/efi-mixed.S`：`efi32_pe_entry` / `efi_stub_entry` 等是 EFI 环境下的入口，接收 (image_handle, system_table)，不依赖“镜像必须位于 0x100000”；stub 里再切长模式、解压、交权给 vmlinux。  
+   - 因此：**0x100000** 在 Legacy 协议里是“setup + 压缩镜像”的加载地址；在 UEFI 协议里 **PE 镜像可放在任意地址**，固件按 PE 入口跳转到 stub，stub 与后续解压代码自会处理重定位（如 `LOAD_PHYSICAL_ADDR` 等用于解压后的内核，与“bzImage 文件放在哪”无关）。
+
+4. **小结**  
+   - **0x100000** 是 **Legacy boot protocol** 的约定，只约束 `loader/i386/linux.c` 那条路径。  
+   - **UEFI 路径** 约束的是“带 EFI stub 的 PE 镜像 + LoadImage/StartImage”，加载地址由固件/GRUB 分配（`allocate_any_pages`），不要求 0x100000。  
+   - 因此：“bzImage 必须放在 0x100000”与“UEFI 下内核可放在任意地址”**不矛盾**——前者指 Legacy 协议下的必须行为，后者指 UEFI 协议下的行为；同一文件在不同路径下被用成两种形态。
+
+**涉及代码一览（两套协议对应的 GRUB / 内核代码）：**
+
+| 路径 | 项目 | 文件 / 符号 / 函数 | 说明 |
+|------|------|--------------------|------|
+| **Legacy** | GRUB 0x100000 约定 | `grub/include/grub/i386/linux.h`：`GRUB_LINUX_BZIMAGE_ADDR` | 定义为 0x100000 |
+| **Legacy** | GRUB 加载与 relocate | `grub-core/loader/i386/linux.c`：`grub_cmd_linux`、`allocate_pages`、`preferred_address`、`prot_mode_target`、`code32_start` 计算 | 见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) grub_cmd_linux / grub_linux_boot |
+| **Legacy** | GRUB 跳转 | `grub-core/loader/i386/linux.c`：`grub_linux_boot` → `grub_relocator32_boot` | 复制到 0x100000 后跳 code32_start |
+| **Legacy** | 内核入口 | Linux 源码 `linux/arch/x86/boot/header.S`（setup）、`linux/arch/x86/boot/compressed/head_64.S`（code32_start 指向的压缩内核入口 startup_32 等） | 协议约定镜像在 0x100000 |
+| **UEFI** | GRUB PE 检查 | `grub-core/loader/efi/linux.c`：`grub_arch_efi_linux_load_image_header`，`GRUB_PE32_MAGIC`（约 105–107 行） | 非 PE 则报错或回退 legacy |
+| **UEFI** | GRUB 分配与读入 | `grub-core/loader/efi/linux.c`：`grub_efi_allocate_any_pages`（约 537 行）、`grub_file_read (file, kernel_addr, kernel_size)` | 任意地址，非 0x100000 |
+| **UEFI** | GRUB 启动 | `grub-core/loader/efi/linux.c`：`grub_arch_efi_linux_boot_image`，`grub_efi_load_image`（约 220–223 行），`grub_efi_start_image`（约 255 行） | 固件按 PE 入口跳转 |
+| **UEFI** | 内核 PE 入口 | Linux 源码 `linux/arch/x86/boot/header.S`：PE 可选头 `AddressOfEntryPoint` = `setup_size + ZO_efi_pe_entry` / `ZO_efi32_pe_entry`（约 86、176 行） | 入口为 EFI stub，非 setup |
+| **UEFI** | 内核 stub 实现 | Linux 源码 `linux/arch/x86/boot/startup/efi-mixed.S`：`efi32_pe_entry`、`efi_stub_entry` 等 | 接收 (image_handle, system_table)，不依赖 0x100000 |
+
+以上在本文「为什么在 BIOS + 实模式下一定要有 relocate 过程？」「bzImage 必须放在 0x100000 与 UEFI 不矛盾」及 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) 的 grub_cmd_linux（i386/efi）、grub_linux_boot、UEFI 启动流程等小节中均有说明。
 
 3. **安全区域选择**：
    - 安全区域：`0x1000-0x9a000`（1MB 以下的常规内存）

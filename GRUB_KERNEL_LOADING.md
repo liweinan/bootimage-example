@@ -154,6 +154,8 @@ startup_64（64 位内核入口点）
 | **模式切换** | 需要（保护模式 → 实模式） | 不需要（都在保护模式/长模式） |
 | **参数传递** | `boot_params` 结构（通过 `ESI` 寄存器） | EFI System Table + 命令行参数（通过 `load_options`） |
 
+两套协议（Legacy 0x100000 与 UEFI 任意地址）所涉及的 **GRUB / 内核代码文件与函数一览**见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 中「bzImage 必须放在 0x100000 与 UEFI 不矛盾」小节末尾的 **「涉及代码一览」** 表格；本文对 `grub_cmd_linux`（i386/efi）、`grub_linux_boot`、UEFI 启动流程等的分析与之对应。
+
 ## grub_cmd_linux() 与 grub_linux_boot() 职责划分
 
 **触发时机不同**：解析 `grub.cfg` 时只注册 menuentry（脚本体存到 entry->sourcecode，不执行）。用户**选择该菜单项**后，GRUB 执行该条目的脚本体（`grub_menu_execute_entry` → `grub_script_execute_new_scope(entry->sourcecode)`），此时才执行到 `linux` 命令 → `grub_cmd_linux()`。`grub_linux_boot()` 在脚本执行完后由隐式或显式 `boot` 调用（loader 机制）。
@@ -1071,7 +1073,7 @@ grub_rescue_parse_line (char *line, grub_reader_getline_t getline, void *data)
        2. jumper 跳到安全区；安全区 relocator32 切换到实模式并 ljmp 到内核入口点（code32_start @ 0x100000 (1MB)）
    - 此时 GRUB 代码被覆盖，但已不需要
 
-**Relocator 概要**：内核先加载到 relocator 管理的临时缓冲区 (src，通常 16MB 以上)，boot 时由 **movers_chunk**（在 1MB 之上单独分配，与 0x100000 为不同块）内的复制代码从 src 复制到 0x100000 (1MB) (target)，再 jumper 到安全区、relocator32 跳入内核。数据结构、分配逻辑、为何 0x100000 (1MB) 分配失败、内存布局等详见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
+**Relocator 概要**：内核先加载到 relocator 管理的临时缓冲区 (src，通常 16MB 以上)，boot 时由 **movers_chunk**（在 1MB 之上单独分配，与 0x100000 为不同块）内的复制代码从 src 复制到 0x100000 (1MB) (target)，再 jumper 到安全区、relocator32 跳入内核。数据结构、分配逻辑、为何 0x100000 (1MB) 分配失败、内存布局等详见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。**为什么在 BIOS + 实模式下一定要有 relocate 过程？**（GRUB 与内核都涉及 0x100000：GRUB 运行在 0x100000+，内核协议要求放在 0x100000，故必须先加载到临时区，再由 1MB 以下的 relocator 复制到 0x100000 并跳转）见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 中「为什么在 BIOS + 实模式下一定要有 relocate 过程？」。
 
 ### grub_cmd_linux() 函数
 
@@ -1097,6 +1099,19 @@ Linux 内核镜像（bzImage/vmlinuz）包含两部分：
    - 位置：setup 代码之后
    - 格式：gzip 压缩的 vmlinux
    - 加载地址：`0x100000 (1MB)`（1MB）或内核指定的地址
+
+**内核文件的解压缩在哪一步完成？**
+
+**结论：GRUB 和 relocator 都不解压内核；解压由内核自身的代码在跳转之后完成。**
+
+| 阶段 | 是否解压 | 说明 |
+|------|----------|------|
+| **grub_cmd_linux()** | 否 | 仅把“保护模式”部分（压缩的 payload）从文件读到 `prot_mode_mem`，不解压。 |
+| **grub_linux_boot()** | 否 | 在 0x10000–0x90000 放 boot_params 副本，设置 state，调用 `grub_relocator32_boot()`。 |
+| **relocator（movers_chunk）** | 否 | 仅把**仍为压缩状态**的内核从临时缓冲区复制到 0x100000 (1MB)，再跳转到 `code32_start`。 |
+| **内核接管之后** | **是** | CPU 已跳转到内核入口（`code32_start`）。先执行 **Setup 代码**（实模式/保护模式切换），再执行 **压缩内核解压代码**（如 `arch/x86/boot/compressed/head_64.S` 中的 startup_32），在此处完成 **gzip 解压**，然后跳转到 startup_64 等。 |
+
+因此，**解压发生在“内核已获得控制权”之后**，即：relocator 跳转到 `code32_start` → 内核 Setup → 压缩内核入口（startup_32）→ **在此步完成 gzip 解压** → 再进入 64 位入口（startup_64）。GRUB/relocator 只负责加载和复制**压缩镜像**到 0x100000，不解压。
 
 **完整源代码分析：**
 
