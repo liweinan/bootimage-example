@@ -6,7 +6,7 @@
 
 | 小节 | 内容 |
 |------|------|
-| **为什么在 BIOS + 实模式下一定要有 relocate 过程？** | 0x100000 冲突、为何必须两阶段、为何 relocator 必须在 1MB 以下、与 UEFI 对比 |
+| **为什么在 BIOS/Legacy 下一定要有 relocate 过程？** | 0x100000 冲突、为何必须两阶段、为何 relocator 必须在 1MB 以下、与 UEFI 对比 |
 | **Relocator 执行总览** | 从 boot 到内核的完整流程（含构建时 vs 运行时、步骤 1–5）、两处代码来源对照表 |
 | **grub_relocator32_boot() 函数** | 入口函数、安全区分配、设置 eip/esi、拷贝 relocator32、调用 prepare_relocs、跳转 movers_chunk |
 | **Relocator 数据结构与分配** | allocate_pages、0x100000 分配失败原因、16MB+ 临时缓冲区、relocator_alloc_chunk_align |
@@ -25,20 +25,22 @@ GRUB 保护模式代码（0x100000 (1MB)+）
 跳转到 movers_chunk → 复制内核到 0x100000 (1MB) → jumper 跳到安全区
     ↓
 安全区中 relocator32 副本执行：
-    1. 关分页、重载 GDT，切换到内核期望的 32 位保护模式状态
+    1. 关分页、加载 relocator 内嵌的 GDT（平坦段，供内核入口用；非 GRUB 的 GDT），切换到内核期望的 32 位保护模式状态
     2. 设置段寄存器（CS/DS/ES/SS 等）、栈指针 ESP、ESI = boot_params
     3. ljmp 到 code32_start
     ↓
 内核入口点（code32_start @ 0x100000 (1MB)，32 位保护模式，如 startup_32）
 ```
 
+**说明**：bzImage 内虽有实模式 setup 代码（`arch/x86/boot/`），但从 GRUB 启动时**不执行**该段；GRUB 自填 boot_params 后**直接**跳转到 code32_start（压缩内核的 32 位保护模式入口）。从扇区 0 启动时才会先跑 setup 再切保护模式跳 code32_start。
+
 **内核入口点：BIOS 与 UEFI 不同**——**BIOS/Legacy**：bootloader 跳转到 **code32_start**（32 位保护模式，如 `linux/arch/x86/boot/compressed/head_64.S` 的 startup_32）；**UEFI**：固件按 PE 入口跳转到 **EFI stub**（如 `linux/arch/x86/boot/startup/efi-mixed.S` 的 efi_pe_entry），不经过 code32_start。详见下文「bzImage 必须放在 0x100000 与 UEFI 不矛盾」及「涉及代码一览」。
 
 ---
 
-## 为什么在 BIOS + 实模式下一定要有 relocate 过程？
+## 为什么在 BIOS/Legacy 下一定要有 relocate 过程？
 
-**结论：** 在 BIOS + 实模式（或“GRUB 在保护模式、内核入口在实模式/保护模式 setup”）下，**内核约定放在 0x100000 (1MB)**，而 **GRUB 自身也运行在 0x100000 (1MB)+**，同一块物理地址不能同时放两套代码；因此必须先在内核“别处”（临时缓冲区）加载，等用户执行 boot 后，再由一段**位于 1MB 以下、不会被覆盖**的代码（relocator）把内核**复制**到 0x100000 并跳转。这段“先搬到 0x100000 再跳”的过程就是 **relocate**；没有它，要么覆盖 GRUB 导致无法跳转，要么内核不在约定地址无法正确执行。
+**结论：** 在 BIOS/Legacy 下（GRUB 在保护模式，交给内核的入口为 code32_start，即 32 位保护模式），**内核约定放在 0x100000 (1MB)**，而 **GRUB 自身也运行在 0x100000 (1MB)+**，同一块物理地址不能同时放两套代码；因此必须先在内核“别处”（临时缓冲区）加载，等用户执行 boot 后，再由一段**位于 1MB 以下、不会被覆盖**的代码（relocator）把内核**复制**到 0x100000 并跳转。这段“先搬到 0x100000 再跳”的过程就是 **relocate**；没有它，要么覆盖 GRUB 导致无法跳转，要么内核不在约定地址无法正确执行。
 
 **1. GRUB 自身加载在 0x100000 (1MB)+（源码依据）**
 
@@ -60,12 +62,12 @@ GRUB 保护模式代码（0x100000 (1MB)+）
 - **因此**：只能采用 **两阶段**：  
   (1) 加载阶段：把内核放到**临时缓冲区**（如 16MB+，与 GRUB 不重叠）；  
   (2) boot 阶段：用一段**不在 0x100000 以上**的代码（即 1MB 以下的 **relocator**）把内核从临时区**复制**到 0x100000，再跳转到 `code32_start`。  
-  这段“复制到 0x100000 + 跳转”就是 **relocate 过程**；在 BIOS + 实模式（及 GRUB 在保护模式、内核入口为 setup）下**必须有**，否则无法既保留 GRUB 的跳转能力又满足内核对 0x100000 的约定。
+  这段“复制到 0x100000 + 跳转”就是 **relocate 过程**；在 BIOS/Legacy 下（GRUB 在保护模式、交给内核的入口为 code32_start）**必须有**，否则无法既保留 GRUB 的跳转能力又满足内核对 0x100000 的约定。
 
 **4. 为何 relocator 代码必须在 1MB 以下？**
 
 - 执行“复制到 0x100000”的代码若也在 0x100000+，复制时会**先覆盖自己**（或覆盖 GRUB），无法执行完再跳转。
-- 因此 GRUB 把“做复制 + 关分页/重载 GDT/设段 + 跳内核”的代码**拷贝到安全区 0x1000–0x9a000**（1MB 以下），这段区域不会被“复制到 0x100000”的操作覆盖，relocator 执行完复制后再从安全区跳转到 0x100000 处的内核入口。详见下文「Relocator 执行总览」与「问题 2：为什么要复制？」。
+- 因此 GRUB 把“做复制 + 关分页/加载内嵌 GDT/设段 + 跳内核”的代码**拷贝到安全区 0x1000–0x9a000**（1MB 以下），这段区域不会被“复制到 0x100000”的操作覆盖，relocator 执行完复制后再从安全区跳转到 0x100000 处的内核入口。详见下文「Relocator 执行总览」与「问题 2：为什么要复制？」。
 
 **5. 与 UEFI 的对比（为何 UEFI 不需要这套 relocate）**
 
@@ -111,7 +113,7 @@ grub_relocator32_boot(...)     [relocator.c]，执行于 GRUB 0x100000 (1MB)+
 └─────────────────────────────────────────────────────────────────────────────┘
     ↓
 ┌── 安全区 0x1000-0x9a000  relocator32 副本  [relocator32.S] ──────────────────┐
-│ PREAMBLE → RELOAD_GDT → DISABLE_PAGING → 设段与寄存器 → ljmp code32_start   │
+│ PREAMBLE → DISABLE_PAGING → 加载内嵌 GDT → 设段与寄存器 → ljmp code32_start   │
 └─────────────────────────────────────────────────────────────────────────────┘
     ↓
 0x100000 (1MB)：复制目标（由 movers_chunk 内 forward/backward 写入）；此处为内核镜像后，relocator32 的 ljmp 跳入
@@ -175,12 +177,12 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
     // ⚠️ 关键：relocator 代码不是简单的跳转代码，而是包含：
     //   1. preamble：初始化代码
     //   2. forward/backward 复制代码：将内核从临时缓冲区（src = 16MB+）复制到目标（target = 0x100000 (1MB)）
-    //   3. jumper：跳转到安全区，由 relocator32 关分页、重载 GDT、设段后 ljmp 到内核入口点
+    //   3. jumper：跳转到安全区，由 relocator32 关分页、加载内嵌 GDT、设段后 ljmp 到内核入口点
     // 这些代码是在 grub_relocator_prepare_relocs() 中动态生成的
     //
     // relocator32.S 与“完整 relocator 代码”的关系：
     // - relocator32.S 是源码；安全区里执行的是其编译后代码的副本（步骤 3 拷贝进去），
-    //   该段只负责关分页、重载 GDT、设段与寄存器、ljmp 到内核，不负责复制。
+    //   该段只负责关分页、加载内嵌 GDT、设段与寄存器、ljmp 到内核，不负责复制。
     // - 完整 relocator = movers_chunk（步骤 4 生成）+ 安全区里 relocator32 的副本。
     // - 复制内核/initrd 在 movers_chunk 里完成：由 preamble 后的多段 forward/backward 代码执行。
     err = grub_relocator_prepare_relocs (rel, 
@@ -191,7 +193,7 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
     // 步骤 5: 执行跳转（关闭中断，跳转到构建好的 relocator 代码）
     asm volatile ("cli");
     ((void (*) (void)) relst) ();  // 跳转到构建好的 relocator 代码
-    // relocator 代码执行顺序：见上文「Relocator 执行总览」；安全区 relocator32 为关分页、重载 GDT、设段与寄存器、ljmp 到 code32_start（32 位保护模式入口）。
+    // relocator 代码执行顺序：见上文「Relocator 执行总览」；安全区 relocator32 为关分页、加载内嵌 GDT、设段与寄存器、ljmp 到 code32_start（32 位保护模式入口）。
 }
 ```
 
@@ -433,23 +435,41 @@ grub_modbase = GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR + (_edata - _start);
 **编译过程**：relocator32.S 在 **GRUB 构建时**（`make`）由 Makefile 纳入 relocator 模块（`grub-core/Makefile.core.def` 中 `x86 = lib/i386/relocator32.S` 等），经 as/gcc 编译、链接进 GRUB core，生成符号 `grub_relocator32_start`～`_end`。**boot 时不编译**，`grub_relocator32_boot()` 里只是 `grub_memmove(安全区, &grub_relocator32_start, RELOCATOR_SIZEOF(32))`，把 GRUB 二进制里已有的机器码拷贝到安全区。编译与运行时的完整区分见 [GRUB_RELOCATOR_BUILD_AND_RUNTIME.md](GRUB_RELOCATOR_BUILD_AND_RUNTIME.md)。
 
 relocator32.S 是一个汇编源文件，包含以下关键功能：
-- 关分页、重载 GDT，切换到内核期望的 32 位保护模式状态
+- 关分页、加载 relocator 内嵌的 GDT，切换到内核期望的 32 位保护模式状态
 - 设置段寄存器（CS、DS、ES、SS）与栈指针（ESP）
 - 从全局变量读取目标地址（`grub_relocator32_eip`）与 boot_params（`grub_relocator32_esi`）
 - 执行远跳转（`ljmp`）到内核入口点（code32_start，如 startup_32）
 
 **源代码位置：** `grub/grub-core/lib/i386/relocator32.S`
 
+**relocator32 内嵌 GDT 说明（源码依据）**
+
+relocator32 加载的 GDT **不是空表**，也不提供“基础服务”；只包含**最小平坦段**（NULL、Reserved、代码段、数据段），供内核入口（code32_start）期望的 32 位保护模式使用。
+
+- **定义文件**：`grub-core/lib/i386/relocator32.S` 第 118–132 行（注释写 “GDT. Copied from loader/i386/linux.c”，实际 GDT 表体在该文件中内联定义）；加载逻辑在 `grub-core/lib/i386/relocator_common.S` 的 **RELOAD_GDT** 宏（计算拷贝后 GDT 地址、填 gdtdesc、`lgdt`、`ljmp` 更新 CS）。
+- **表内容**（4 项，每项 8 字节；Intel 段描述符布局：Limit[0:15]、Base[0:15]、Base[16:23]、Access、Limit[16:19]+Flags、Base[24:31]）：
+
+| 索引 | 选择子 | 源码字节（relocator32.S） | 含义 |
+|------|--------|---------------------------|------|
+| 0 | — | 全 0 | **NULL**：空描述符，不可用。 |
+| 1 | — | 全 0 | **Reserved**：保留，未用。 |
+| 2 | 0x10 | `FF FF 00 00 00 9A CF 00` | **Code**：基址=0，界限=0xFFFFF，粒度 G=1（×4KB⇒ 4GB），D=1（32 位），类型=0x9A（可执行+可读、非一致、DPL=0）。 |
+| 3 | 0x18 | `FF FF 00 00 00 92 CF 00` | **Data**：基址=0，界限=0xFFFFF，G=1⇒4GB，D=1，类型=0x92（可读+可写、向上扩展、DPL=0）。 |
+
+- **与 GDT 的关系**：Code 段和 Data 段**就是 GDT 表里的两项**。GDT 是一块连续内存，每项 8 字节为一段描述符。选择子 0x10、0x18 是**索引**（0x10÷8＝2、0x18÷8＝3）：CS＝0x10 时 CPU 用 **GDT[2]** 作为当前代码段，DS/ES/SS 等＝0x18 时 CPU 用 **GDT[3]** 作为当前数据段。取指或访存时 CPU 用段寄存器里的选择子查 GDT，取出对应描述符得到基址/界限/属性；真正定义“基址 0、4GB”的是 GDT 里这两项，0x10/0x18 只是指向它们的下标。
+- **这两项的用途**：**Code 段（0x10）** 给 **CS** 用——relocator 用 `ljmp` 把 CS 设为 0x10，之后内核入口（code32_start）的取指就用 GDT[2]，基址 0、4GB，等于“整个 32 位地址空间都是代码段”。**Data 段（0x18）** 给 **DS、ES、FS、GS、SS** 用——relocator32 里 `movl $DATA_SEGMENT, %eax` 再赋给这些段寄存器，内核用它们访问数据、栈；同样是基址 0、4GB，线性地址＝有效地址。合起来：关分页并加载此 GDT、设好 CS/DS/SS 后，CPU 处于 32 位保护模式下的平坦段状态，relocator 再 `ljmp` 到 code32_start，内核即可按协议运行；没有这两个描述符或不是平坦段，跳过去会出错。
+- **结论**：仅满足内核 32 位入口对段寄存器的要求（平坦代码段 + 平坦数据段），无其它服务。
+
 **问题 2：为什么要复制？**
 
-**答案：** 因为 GRUB 的代码在 0x100000 (1MB)+，复制到 0x100000 的内核会覆盖 GRUB；relocator 必须在 1MB 以下运行才能先完成复制再跳转。详见上文「为什么在 BIOS + 实模式下一定要有 relocate 过程？」（尤其是「3. 冲突与必须先 relocate」「4. 为何 relocator 代码必须在 1MB 以下」）。
+**答案：** 因为 GRUB 的代码在 0x100000 (1MB)+，复制到 0x100000 的内核会覆盖 GRUB；relocator 必须在 1MB 以下运行才能先完成复制再跳转。详见上文「为什么在 BIOS/Legacy 下一定要有 relocate 过程？」（尤其是「3. 冲突与必须先 relocate」「4. 为何 relocator 代码必须在 1MB 以下」）。
 
 **⚠️ UEFI 启动方式完全不同：**
 
 **UEFI 不需要 relocator 机制**，原因如下：
 
 1. **运行模式不同**：
-   - **BIOS 启动**：GRUB 在保护模式下运行，内核入口点（code32_start）为 32 位保护模式，需 relocator 关分页、重载 GDT、设段后再跳转
+   - **BIOS 启动**：GRUB 在保护模式下运行，内核入口点（code32_start）为 32 位保护模式，需 relocator 关分页、加载内嵌 GDT、设段后再跳转
    - **UEFI 启动**：GRUB 和内核都在保护模式/长模式下运行，不需要模式切换
 
 2. **启动方式不同**：
@@ -501,7 +521,7 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
 |------|----------|----------|
 | **GRUB 运行模式** | 保护模式 | 保护模式/长模式 |
 | **内核入口点模式** | 32 位保护模式（如 startup_32） | 保护模式/长模式（EFI stub） |
-| **是否需要模式切换** | ✅ 是（GRUB 保护模式→关分页/重载 GDT→跳 code32_start） | ❌ 否 |
+| **是否需要模式切换** | ✅ 是（GRUB 保护模式→关分页/加载 relocator 内嵌 GDT→跳 code32_start） | ❌ 否 |
 | **跳转方式** | relocator 代码手动跳转 | EFI `StartImage` 服务 |
 | **relocator 机制** | ✅ 需要 | ❌ 不需要 |
 | **源代码文件** | `loader/i386/linux.c` | `loader/efi/linux.c` |
@@ -545,7 +565,7 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
 | **UEFI** | 内核 PE 入口 | Linux 源码 `linux/arch/x86/boot/header.S`：PE 可选头 `AddressOfEntryPoint` = `setup_size + ZO_efi_pe_entry` / `ZO_efi32_pe_entry`（约 86、176 行） | 入口为 EFI stub，非 setup |
 | **UEFI** | 内核 stub 实现 | Linux 源码 `linux/arch/x86/boot/startup/efi-mixed.S`：`efi32_pe_entry`、`efi_stub_entry` 等 | 接收 (image_handle, system_table)，不依赖 0x100000 |
 
-以上在本文「为什么在 BIOS + 实模式下一定要有 relocate 过程？」「bzImage 必须放在 0x100000 与 UEFI 不矛盾」及 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) 的 grub_cmd_linux（i386/efi）、grub_linux_boot、UEFI 启动流程等小节中均有说明。
+以上在本文「为什么在 BIOS/Legacy 下一定要有 relocate 过程？」「bzImage 必须放在 0x100000 与 UEFI 不矛盾」及 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) 的 grub_cmd_linux（i386/efi）、grub_linux_boot、UEFI 启动流程等小节中均有说明。
 
 **问题 3：直接跳转到内核入口点地址（code32_start）不行吗？**
 
@@ -554,9 +574,9 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
 1. **运行状态不匹配**：
    - GRUB 在保护模式下运行，其 GDT、分页、段与内核约定可能不同
    - 内核入口点（`code32_start`，如 startup_32）期望 32 位保护模式下的特定状态（关分页、平坦段、ESI = boot_params 等）
-   - 不能直接 jmp，需要 relocator 先关分页、重载 GDT、设段与寄存器再 ljmp
+   - 不能直接 jmp，需要 relocator 先关分页、加载内嵌 GDT、设段与寄存器再 ljmp
 
-2. **段与分页状态**：GRUB 的 GDT/分页与内核期望不同；跳转前需禁用分页、重载 GDT、设段与栈。
+2. **段与分页状态**：GRUB 的 GDT/分页与内核期望不同；跳转前需禁用分页、加载 relocator 内嵌的 GDT、设段与栈。
 
 3. **栈和寄存器状态**：
    - 内核期望特定的寄存器状态（如 `ESI` 包含 `boot_params` 地址）
@@ -566,7 +586,7 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
 **relocator 代码的组成与作用：**
 
 - **movers_chunk**（由 `grub_relocator_prepare_relocs()` 在步骤 4 生成）：`preamble` + `forward/backward` 复制代码（若 src ≠ target，每 chunk 一段）+ `jumper`（跳转到安全区）。负责把内核从临时区（16MB+）复制到 0x100000，再跳入安全区。
-- **安全区 relocator32 副本**：关分页、重载 GDT、设段与寄存器、设置 ESI = boot_params、ljmp 到 code32_start。执行顺序见上文「Relocator 执行总览」。
+- **安全区 relocator32 副本**：关分页、加载内嵌 GDT、设段与寄存器、设置 ESI = boot_params、ljmp 到 code32_start。执行顺序见上文「Relocator 执行总览」。
 
 **为什么要动态生成？**
 
@@ -607,12 +627,10 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
    - `boot_params.code32_start`：内核入口点地址
    - 这些地址都是基于内核在 0x100000 (1MB) 的假设计算的
 
-3. **内核 setup 代码期望在 0x100000 (1MB)（仅 BIOS 模式）**：
-   - **BIOS 模式**：内核入口点是 setup 代码（`arch/x86/boot/header.S`）
-     - setup 代码期望在 0x100000 (1MB) 位置
-     - `code32_start` 是相对于 0x100000 (1MB) 的偏移
-     - 即使内核是可重定位的，setup 代码仍然期望在 0x100000 (1MB) 位置
-   - **UEFI 模式**：内核入口点是 EFI stub（`arch/x86/boot/startup/efi-mixed.S`）
+3. **Legacy 协议下镜像须在 0x100000 (1MB)**：
+   - **Legacy/GRUB 路径**：GRUB 不执行 bzImage 的实模式 setup，直接跳 **code32_start**（压缩内核入口）。**code32_start** 是 boot protocol 头里的**字段**，定义在 `arch/x86/boot/header.S`；其**值**指向的代码在 `arch/x86/boot/compressed/head_64.S`（如 startup_32），**不是** setup.S。setup.S（`arch/x86/boot/setup.S`）是实模式代码，从扇区 0 启动时先跑 setup，再由 setup 切保护模式并跳转到 code32_start 所指地址。`code32_start` 与 boot_params 中的地址均按“镜像在 0x100000”计算，故必须把镜像放在 0x100000。
+   - **从扇区 0 启动**时才会先跑 setup（`arch/x86/boot/`），再切保护模式跳 code32_start；此时同样约定镜像在 0x100000。
+   - **UEFI 模式**：入口为 EFI stub（`arch/x86/boot/startup/efi-mixed.S`），不经过 code32_start
      - EFI stub 是**位置无关的**（使用相对地址，如 `call 1f; popl %ecx`）
      - EFI stub 可以加载到任意地址，不需要在 0x100000 (1MB)
      - EFI stub 会调用 `efi32_startup`，然后跳转到 `efi_stub_entry`
@@ -632,10 +650,7 @@ relocator32.S 是一个汇编源文件，包含以下关键功能：
    - 复制后，所有地址计算都是正确的，不需要额外调整
 
 **结论**：
-- **BIOS 模式**：即使内核是可重定位的，GRUB 仍然选择复制内核到 0x100000 (1MB)，因为：
-  1. setup 代码期望在 0x100000 (1MB)
-  2. `code32_start` 和 `boot_params` 中的地址都是相对于 0x100000 (1MB) 计算的
-  3. 这是最简单、最安全、最兼容的方式
+- **Legacy/GRUB 路径**：即使内核是可重定位的，GRUB 仍复制到 0x100000 (1MB)，因为：Legacy 协议约定镜像在 0x100000；`code32_start` 与 `boot_params` 中的地址均按此计算；且为最简、最稳妥的兼容方式。
 - **UEFI 模式**：不需要复制到 0x100000 (1MB)，因为：
   1. EFI stub 是位置无关的，可以加载到任意地址
   2. EFI 固件通过 `LoadImage` 和 `StartImage` 服务处理地址重定位
@@ -654,5 +669,5 @@ asm volatile ("jmp *%0" : : "r" (code32_start));
 // 结果：系统崩溃或不可预测的行为
 ```
 
-**正确流程**见文档开头「从 GRUB 到内核的流程概览（BIOS/Legacy）」；relocator32 在安全区执行关分页、重载 GDT、设段与寄存器后 ljmp 到 code32_start（32 位保护模式，如 startup_32）。
+**正确流程**见文档开头「从 GRUB 到内核的流程概览（BIOS/Legacy）」；relocator32 在安全区执行关分页、加载其内嵌的 GDT（非 GRUB 提供）、设段与寄存器后 ljmp 到 code32_start（32 位保护模式，如 startup_32）。
 

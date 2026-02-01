@@ -55,7 +55,7 @@
 
 | 源码文件 | 说明 | 编译方式 | 产物/符号 |
 |----------|------|----------|-----------|
-| `grub-core/lib/i386/relocator32.S` | 安全区中执行的代码（关分页、设段、ljmp 到内核） | 随 relocator 模块一起编译、链接进 core | `grub_relocator32_start`～`grub_relocator32_end`（在 GRUB 二进制中） |
+| `grub-core/lib/i386/relocator32.S` | 安全区中执行的代码（关分页、加载内嵌 GDT、设段、ljmp 到内核）；GDT 为 4 项平坦段（NULL/Reserved/Code/Data），非空表、无“服务”，详见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)「relocator32 内嵌 GDT 说明」 | 随 relocator 模块一起编译、链接进 core | `grub_relocator32_start`～`grub_relocator32_end`（在 GRUB 二进制中） |
 | `grub-core/lib/i386/relocator_asm.S` | forward/backward 复制模板（含 VARIABLE 引用全局变量） | 同上 | `grub_relocator_forward_start`～`_end`、`grub_relocator_backward_start`～`_end`；全局变量 `*_dest`/`*_src`/`*_chunk_size` |
 | `grub-core/lib/i386/relocator_common_c.c` | C 侧：preamble、设置全局变量、拷贝模板、写 jumper | 同上 | `grub_cpu_relocator_preamble`、`grub_cpu_relocator_forward`、`grub_cpu_relocator_backward`、`grub_cpu_relocator_jumper` 等 |
 | `grub-core/lib/i386/relocator.c` | 通用 relocator 逻辑（分配、prepare_relocs、grub_relocator32_boot） | 同上 | `grub_relocator32_boot`、`grub_relocator_prepare_relocs` 等 |
@@ -304,7 +304,7 @@ grub_cpu_relocator_jumper (void *rels, grub_addr_t addr)
 }
 ```
 
-**分析**：向 `rels` 写入 `movl addr, %eax`（0xb8 + 4 字节）和 `jmp *%eax`（0xff 0xe0）。`addr` 即安全区物理地址（relocator32 副本所在位置）。执行完所有 forward/backward 后，跳转到安全区，从 relocator32 副本的 PREAMBLE 继续执行（关分页、重载 GDT、设段与寄存器、`ljmp` 到内核）。
+**分析**：向 `rels` 写入 `movl addr, %eax`（0xb8 + 4 字节）和 `jmp *%eax`（0xff 0xe0）。`addr` 即安全区物理地址（relocator32 副本所在位置）。执行完所有 forward/backward 后，跳转到安全区，从 relocator32 副本的 PREAMBLE 继续执行（关分页、加载 relocator 内嵌的 GDT、设段与寄存器、`ljmp` 到内核）。
 
 ### 4.7 执行顺序小结
 
