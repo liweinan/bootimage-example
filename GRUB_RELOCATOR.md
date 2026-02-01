@@ -468,9 +468,9 @@ grub_modbase = GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR + (_edata - _start);
 
 **问题 1：relocator 代码具体对应哪个文件？**
 
-**答案：** 安全区中执行的是 **relocator32.S** 编译后代码的副本，源码 `grub/grub-core/lib/i386/relocator32.S`。复制内核的代码来自 relocator_asm.S 与 relocator_common_c.c，在 movers_chunk 中，见上文「两处 relocator 代码来源对照」。relocator32.S 的执行顺序与功能见上文「relocator32.S 代码分析」。
+**答案：** 安全区中执行的是 **由 relocator32.S 编译得到的机器码** 的副本（源码文件 `grub-core/lib/i386/relocator32.S`）。**复制内核**的代码来自 **relocator_asm.S**（forward/backward 模板）；movers_chunk 内的 preamble 与 jumper 由 **relocator_common_c.c** 写入。二者均在 movers_chunk 中，详见上文「两处 relocator 代码来源对照」。relocator32.S 的执行顺序与功能见上文「relocator32.S 代码分析」。
 
-**编译过程**：relocator32.S 在 **GRUB 构建时**（`make`）由 Makefile 纳入 relocator 模块（`grub-core/Makefile.core.def` 中 `x86 = lib/i386/relocator32.S` 等），经 as/gcc 编译、链接进 GRUB core，生成符号 `grub_relocator32_start`～`_end`。**boot 时不编译**，`grub_relocator32_boot()` 里只是 `grub_memmove(安全区, &grub_relocator32_start, RELOCATOR_SIZEOF(32))`，把 GRUB 二进制里已有的机器码拷贝到安全区。编译与运行时的完整区分见 [GRUB_RELOCATOR_BUILD_AND_RUNTIME.md](GRUB_RELOCATOR_BUILD_AND_RUNTIME.md)。
+**编译过程**：relocator32.S 在 **GRUB 构建时**（`make`）由 Makefile 纳入 relocator 相关模块（见 `grub-core/Makefile.core.def` 中 relocator 相关项），经 as/gcc 编译、链接进 GRUB core，生成 relocator32 代码段（入口符号 `grub_relocator32_start`，大小由宏 `RELOCATOR_SIZEOF(32)` 给出）。**boot 时不编译**；在 `grub_relocator32_boot()` 中通过 `grub_memmove(安全区, &grub_relocator32_start, RELOCATOR_SIZEOF(32))` 将上述机器码拷贝到安全区，该函数还负责分配安全区、设置寄存器状态、组装 movers_chunk 并跳转等。编译与运行时的完整区分见 [GRUB_RELOCATOR_BUILD_AND_RUNTIME.md](GRUB_RELOCATOR_BUILD_AND_RUNTIME.md)。
 
 **relocator32 内嵌 GDT 说明（源码依据）**
 
