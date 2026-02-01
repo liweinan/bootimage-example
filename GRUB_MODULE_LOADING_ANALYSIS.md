@@ -2,7 +2,7 @@
 
 本文档详细分析 GRUB 如何从 `core.img` 中加载嵌入的模块，包括 `FOR_MODULES` 宏的工作原理、模块数据结构、内存布局等。
 
-> **相关文档**：关于 GRUB 内核加载流程，请参见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)。
+> **相关文档与对齐**：内核加载流程、relocator、code32_start 等见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)；relocator 机制细节（安全区、movers_chunk、GDT、BIOS/Legacy 下不执行 Setup）见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。本文档仅涉及 core.img 内模块加载（FOR_MODULES、grub_modbase），与上述两篇在 scope 上互补。
 
 ## 概述
 
