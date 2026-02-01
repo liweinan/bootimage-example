@@ -265,19 +265,116 @@ if (relocatable)
 }
 else
 {
-    // 非可重定位内核：必须精确在 preferred_address (0x100000 (1MB))
-    // 这种情况下，如果 0x100000 (1MB) 被占用，分配会直接失败
-    err = grub_relocator_alloc_chunk_align(relocator, &ch,
-                                            preferred_address,  // min_addr = 0x100000 (1MB)
-                                            preferred_address,  // max_addr = 0x100000 (1MB)
-                                            prot_size, 1,
-                                            GRUB_RELOCATOR_PREFERENCE_LOW, 1);
-    // 如果失败，内核无法加载（非可重定位内核必须在这个地址）
+    // 非可重定位内核：拷贝目标必须为 preferred_address (0x100000 (1MB))
+    err = grub_relocator_alloc_chunk_addr(relocator, &ch,
+                                            preferred_address,  // target = 0x100000（拷贝目标，见下说明）
+                                            prot_size);
+    // 如果失败，内核无法加载（无法在 0x100000 或更高处取得一块用于加载，或无法保证 boot 时复制到 0x100000）
 }
 
-prot_mode_mem = get_virtual_current_address(ch);    // 临时位置（src）
-prot_mode_target = get_physical_target_address(ch); // 最终位置（target = 0x100000 (1MB)）
+prot_mode_mem = get_virtual_current_address(ch);    // 临时位置（src，内核先加载到此）
+prot_mode_target = get_physical_target_address(ch); // 最终位置（target），boot 时 forward/backward 复制到此
 ```
+
+**内核 chunk 与 initrd chunk 的创建时机**
+
+- **内核 chunk**：在 **`linux` 命令**第一次加载内核时创建。执行顺序为：读 bzImage 头部 → 算 `prot_size` → 调用 **`allocate_pages(prot_size, ...)`** → 在 `allocate_pages` 内调用 `grub_relocator_alloc_chunk_align` 或 `grub_relocator_alloc_chunk_addr`，**此时即创建内核 chunk 并挂到 `rel->chunks`**，随后才把内核文件（保护模式部分）读进该块内存。因此：**在把内核文件读进内存之前，内核对应的 chunk 已经创建好**。
+- **initrd chunk**：**不是在 `grub_initrd_init` 里创建的**。执行 **`initrd` 命令**时顺序为：先 **`grub_initrd_init`**（只算 `initrd_ctx->size`、打开各文件，**不分配 relocator、不创建 chunk**）→ 再 `grub_get_initrd_size`、算 `aligned_size` → 再 **`grub_relocator_alloc_chunk_align(..., aligned_size, ...)`**，**此处才创建 initrd chunk** → 最后 `grub_initrd_load` 把 initrd 写进该块内存。因此：**`grub_initrd_init` 执行时尚未创建任何 chunk；initrd chunk 在同一条 initrd 命令内、在 `grub_initrd_init` 返回之后才创建**。
+- **小结**：**linux** 第一次加载内核时，会先创建内核 chunk，再读内核；**grub_initrd_init** 执行时不创建 chunk（此时内核 chunk 已存在，来自之前的 `linux`），initrd chunk 要等到后面的 `grub_relocator_alloc_chunk_align` 才创建。
+
+**拷贝目标 0x100000 的源码依据：**
+
+- **preferred_address 来源**：`grub-core/loader/i386/linux.c` 第 686 行 `preferred_address = GRUB_LINUX_BZIMAGE_ADDR`；`grub/include/grub/i386/linux.h` 定义 `GRUB_LINUX_BZIMAGE_ADDR 0x100000`。即 loader 显式把“最终希望内核所在地址”设为 0x100000。
+- **grub_relocator_alloc_chunk_addr 的 target 参数**：非可重定位内核走 `grub_relocator_alloc_chunk_addr(relocator, &ch, preferred_address, prot_size)`（linux.c:195-196）。该函数**第三形参**即 **target**（拷贝目标物理地址）。relocator 内部在 `grub-core/lib/relocator.c:1319` 执行 `chunk->target = target;`，故 `chunk->target = 0x100000`。随后 `get_physical_target_address(ch)` 返回 `chunk->target`（relocator.c:96-98），故 `prot_mode_target = 0x100000`。movers_chunk 里的 forward/backward 按各 chunk 的 `src`/`target` 复制，因此**拷贝目标 0x100000** 即由此 target 参数与 `chunk->target` 决定。
+- **grub_relocator_alloc_chunk_align 时 target 的取值**：可重定位内核用 `grub_relocator_alloc_chunk_align(..., preferred_address, preferred_address, ...)` 先尝试在 0x100000 分配；若成功则 `chunk->src = chunk->target = 0x100000`（relocator.c 首段分配逻辑），此时无需复制。若失败并改在 16MB+ 分配，则 `chunk->target` 为本次分配到的地址（16MB+），内核最终运行于该处，不复制到 0x100000。
+
+**kernel 与 initrd 拷贝尺寸的计算（源码依据）**
+
+relocator 为每个 chunk 复制的字节数由 loader 在分配 chunk 时传入的 **size** 决定；该 size 即“需要拷贝的 kernel/initrd 的尺寸”，计算方式如下。
+
+**1. 内核（kernel）拷贝尺寸：prot_size、prot_init_space**
+
+源码：`grub-core/loader/i386/linux.c`（grub_cmd_linux 内，约 751–791 行）。先读 bzImage 头部 `lh`，再算：
+
+```c
+// grub-core/loader/i386/linux.c（节选）
+
+setup_sects = lh.setup_sects;   // 头部 setup_sects，未设则默认 4
+if (! setup_sects)
+  setup_sects = GRUB_LINUX_DEFAULT_SETUP_SECTS;
+
+real_size = setup_sects << GRUB_DISK_SECTOR_BITS;
+// real_size = setup 段字节数（1 扇区 = 512）
+
+prot_file_size = grub_file_size (file) - real_size - GRUB_DISK_SECTOR_SIZE;
+// 保护模式部分在文件中的长度 = 文件总长 - setup - 1 扇区（boot sector）
+
+if (grub_le_to_cpu16 (lh.version) >= 0x020a) {
+  // 2.10+ 协议：使用头部 init_size（内核解压后需要的缓冲区大小）
+  prot_size = grub_le_to_cpu32 (lh.init_size);
+  prot_init_space = page_align (prot_size);
+  if (relocatable)
+    preferred_address = grub_le_to_cpu64 (lh.pref_address);
+} else {
+  // 旧协议：用文件中的保护模式部分长度，并按约 50% 压缩比预留解压空间
+  prot_size = prot_file_size;
+  prot_init_space = page_align (prot_size) * 3;
+}
+
+// 分配时传入的 size = prot_size → chunk->size = prot_size，拷贝字节数即 prot_size
+if (allocate_pages (prot_size, &align, min_align, relocatable, preferred_address))
+  goto fail;
+```
+
+- **prot_size**：传给 `allocate_pages(prot_size, ...)`，即**内核 chunk 的 size**；forward/backward 复制的字节数 = `chunk->size = prot_size`。
+  - **协议 ≥ 2.10**：`prot_size = lh.init_size`（boot protocol 头中的 `init_size`，见 `grub/include/grub/i386/linux.h`），表示“解压/运行所需缓冲区大小”。
+  - **协议 &lt; 2.10**：`prot_size = prot_file_size`（文件中保护模式部分长度 = 文件大小 − setup − 1 扇区）。
+- **prot_init_space**：`page_align(prot_size)` 或旧协议下 `page_align(prot_size) * 3`；用于计算 initrd 允许的起始地址（`addr_min = prot_mode_target + prot_init_space`），**不**直接作为拷贝尺寸。
+
+**2. initrd 拷贝尺寸：initrd_ctx->size、aligned_size**
+
+源码：`grub-core/loader/linux.c`（`grub_initrd_init` 累加 `initrd_ctx->size`）、`grub-core/loader/i386/linux.c`（`grub_cmd_initrd` 内，约 1089–1140 行）。
+
+```c
+// grub-core/loader/linux.c: grub_initrd_init() 内
+
+initrd_ctx->size = 0;
+for (i = 0; i < argc; i++) {
+  initrd_ctx->size = ALIGN_UP (initrd_ctx->size, 4);
+  // newc 格式：目录项、newc_head + 文件名、TRAILER 等会累加到 size
+  if (grub_memcmp (argv[i], "newc:", 5) == 0) {
+    // ... insert_dir、newc_head + name_len、dir_size ...
+    grub_add (initrd_ctx->size, ALIGN_UP (sizeof (struct newc_head) + name_len, 4), &initrd_ctx->size);
+    grub_add (initrd_ctx->size, dir_size, &initrd_ctx->size);
+  } else if (newc) {
+    grub_add (initrd_ctx->size, ALIGN_UP (sizeof (struct newc_head) + sizeof ("TRAILER!!!"), 4), &initrd_ctx->size);
+  }
+  initrd_ctx->components[i].size = grub_file_size (initrd_ctx->components[i].file);
+  grub_add (initrd_ctx->size, initrd_ctx->components[i].size, &initrd_ctx->size);
+}
+// 若有 newc，最后再加 TRAILER 头
+if (newc)
+  grub_add (initrd_ctx->size, ALIGN_UP (sizeof (struct newc_head) + sizeof ("TRAILER!!!"), 4), &initrd_ctx->size);
+
+// grub-core/loader/linux.c: grub_get_initrd_size()
+return initrd_ctx->size;
+
+// grub-core/loader/i386/linux.c: grub_cmd_initrd() 内
+size = grub_get_initrd_size (&initrd_ctx);
+aligned_size = ALIGN_UP (size, 4096);
+// 分配 initrd chunk 时传入 size = aligned_size → chunk->size = aligned_size，拷贝字节数 = aligned_size
+err = grub_relocator_alloc_chunk_align (relocator, &ch, addr_min, addr, aligned_size, 0x1000, ...);
+```
+
+- **initrd_ctx->size**：所有 initrd 组件在 **cpio newc** 镜像中的总长度（每个文件前有 newc 头 + 4 字节对齐，多文件时可能有 TRAILER 等）。
+- **aligned_size**：`ALIGN_UP(size, 4096)`，作为 **initrd chunk 的 size** 传入 `grub_relocator_alloc_chunk_align(..., aligned_size, ...)`；forward/backward 复制的字节数 = `chunk->size = aligned_size`。实际有效载荷为 `size`，多出的为对齐填充。
+
+**3. 小结**
+
+| 对象 | 拷贝尺寸（chunk->size） | 计算来源 | 源码位置 |
+|------|-------------------------|----------|----------|
+| 内核 | prot_size | 协议 ≥2.10：lh.init_size；否则：grub_file_size(file) − real_size − 1 扇区 | linux.c:757-791 |
+| initrd | aligned_size = ALIGN_UP(size, 4096) | size = initrd_ctx->size（grub_initrd_init 累加：各文件大小 + newc 头/目录/TRAILER） | linux.c:1089-1090、1141；loader/linux.c:180-251、265-267 |
 
 **`grub_relocator_alloc_chunk_align()` 内部逻辑（`grub-core/lib/relocator.c:1375-1508`）：**
 
@@ -712,6 +809,112 @@ LOCAL(cont1):
 - **入口**：按 `rel->relocators_size` 分配 movers 缓冲区（`malloc_in_range`），对 `rel->chunks` 按 `chunk->src` 做基数排序得到 `sorted[]`，保证复制顺序不覆盖未搬数据。
 - **写入**：先 `grub_cpu_relocator_preamble(rels)`（i386-pc 为空），再对每个 sorted chunk：`src < target` 调用 `grub_cpu_relocator_backward` 拷贝 backward 模板到 movers_chunk，`src > target` 调用 `grub_cpu_relocator_forward` 拷贝 forward 模板，`src == target` 只做 cache 同步；最后 `grub_cpu_relocator_jumper(rels, addr)` 写入 jumper 机器码（mov + jmp），`addr` 为安全区物理地址。
 - **C 侧**：`grub_cpu_relocator_forward/backward` 先设全局变量 `*_dest`/`*_src`/`*_chunk_size`，再 `grub_memmove(ptr, &grub_relocator_*_start, ...)` 把已编译好的汇编模板拷贝到 movers_chunk；jumper 由 C 直接写机器码。boot 时无编译，仅拷贝模板 + 写 jumper。
+
+**chunk 数量与顺序、复制代码生成的计算过程（源码解读）**
+
+以下依据 `grub-core/lib/relocator.c` 中 `grub_relocator_prepare_relocs()` 及分配路径的源码，说明“chunk 数量与顺序不固定”时，relocators_size 如何累加、排序如何做、以及如何为每个 src ≠ target 的 chunk 生成一段复制代码。**关键逻辑已在下列源码片段中用注释标出。**
+
+**1. chunk 的加入与 relocators_size 的累加**
+
+- **chunk 来源**：loader 多次调用 `grub_relocator_alloc_chunk_align` 或 `grub_relocator_alloc_chunk_addr`；每次成功在链表头插入：`chunk->next = rel->chunks; rel->chunks = chunk;`，链表顺序为**后加入的在前**。
+- **relocators_size 累加**：每加入一个 chunk 后按 src 与 target 关系累加（见下代码）；`src == target` 不累加。
+- **总大小**：初始为 preamble_size + jumper_size（见 grub_relocator_new），再加所有“需要复制”的 chunk 的 forward/backward 段大小。
+
+```c
+// grub-core/lib/relocator.c
+
+// 初始 relocators_size（grub_relocator_new，约 113 行）
+ret->relocators_size = grub_relocator_jumper_size + grub_relocator_preamble_size;
+
+// 每加入一个 chunk 后累加（grub_relocator_alloc_chunk_addr，约 1311-1322 行）
+if (chunk->src < target)
+  rel->relocators_size += grub_relocator_backward_size;   // src < target → 需要 backward 段
+if (chunk->src > target)
+  rel->relocators_size += grub_relocator_forward_size;    // src > target → 需要 forward 段
+// src == target 不累加
+chunk->target = target;
+chunk->next = rel->chunks;   // 链表头插入
+rel->chunks = chunk;
+```
+
+**2. 排序：按 chunk->src 升序（基数排序）**
+
+- **目的**：按 src 升序处理，避免“先复制到的 target”覆盖“尚未复制的 src”。
+- **实现**：对 `rel->chunks` 按 `chunk->src` 做 LSB 优先基数排序（低 8 位 → 次 8 位 → …，共 GRUB_CPU_SIZEOF_VOID_P 轮），得到 `sorted[]`。
+
+```c
+// grub-core/lib/relocator.c:1554-1604（prepare_relocs 内）
+
+grub_memset (count, 0, sizeof (count));
+// ① 统计 nchunks，并按 (chunk->src & 0xff) 做计数排序的 count 前缀和
+for (chunk = rel->chunks; chunk; chunk = chunk->next) {
+  nchunks++;
+  count[(chunk->src & 0xff) + 1]++;   // 键：src 低 8 位
+}
+for (j = 0; j < 256; j++)
+  count[j+1] += count[j];
+for (chunk = rel->chunks; chunk; chunk = chunk->next)
+  from[count[chunk->src & 0xff]++] = *chunk;   // 第一轮：按低 8 位排入 from[]
+
+// ② 按 (src >> 8*i) & 0xff 再排 GRUB_CPU_SIZEOF_VOID_P-1 轮，得到按 src 升序的 sorted
+for (i = 1; i < GRUB_CPU_SIZEOF_VOID_P; i++) {
+  // ... count 前缀和按第 i 字节 ...
+  to[count[(from[j].src >> (8 * i)) & 0xff]++] = from[j];
+  swap(from, to);
+}
+sorted = from;   // sorted[j] 按 chunk->src 升序
+```
+
+**3. 为每个“src ≠ target”的 chunk 生成一段复制代码**
+
+- **分配**：按 `rel->relocators_size` 分配 movers 缓冲区；`rels` 指向当前写入位置。
+- **写入顺序**：preamble → 对 sorted[0..nchunks-1] 依次写 backward/forward 或只做 cache 同步 → jumper。
+
+```c
+// grub-core/lib/relocator.c:1543-1550, 1606-1636（prepare_relocs 内）
+
+// ① 按累加好的 relocators_size 分配 movers 缓冲区
+if (!malloc_in_range (rel, 0, ~(grub_addr_t)0 - rel->relocators_size + 1,
+                      grub_relocator_align, rel->relocators_size, &movers_chunk, 1, 1))
+  return grub_error (...);
+rels = rels0 = grub_map_memory (movers_chunk.src, movers_chunk.size);
+
+// ② preamble（i386-pc 为空）
+grub_cpu_relocator_preamble (rels);
+rels += grub_relocator_preamble_size;
+
+// ③ 按 sorted 顺序为每个 chunk 写一段复制代码或做 cache 同步
+for (j = 0; j < nchunks; j++) {
+  if (sorted[j].src < sorted[j].target) {
+    grub_cpu_relocator_backward ((void *) rels, sorted[j].srcv,
+                                 grub_map_memory (sorted[j].target, sorted[j].size),
+                                 sorted[j].size);
+    rels += grub_relocator_backward_size;   // 写入 backward 段，rels 后移
+  }
+  if (sorted[j].src > sorted[j].target) {
+    grub_cpu_relocator_forward ((void *) rels, sorted[j].srcv,
+                                grub_map_memory (sorted[j].target, sorted[j].size),
+                                sorted[j].size);
+    rels += grub_relocator_forward_size;   // 写入 forward 段，rels 后移
+  }
+  if (sorted[j].src == sorted[j].target)
+    grub_arch_sync_caches (sorted[j].srcv, sorted[j].size);   // 无复制，仅 cache 同步
+}
+
+// ④ jumper：写跳转到安全区 relocator32 的机器码
+grub_cpu_relocator_jumper ((void *) rels, (grub_addr_t) addr);
+*relstart = rels0;
+```
+
+**4. 小结（与“为什么要动态生成？”对应）**
+
+| 项目 | 计算/来源 | 源码位置 |
+|------|-----------|----------|
+| chunk 数量 | 遍历 `rel->chunks` 计数 `nchunks` | relocator.c:1563-1568 |
+| chunk 顺序（执行顺序） | 按 `chunk->src` 升序基数排序得到 `sorted[]` | relocator.c:1556-1604 |
+| relocators_size | 初始 preamble+jumper；每 chunk 若 src&lt;target 加 backward_size，若 src&gt;target 加 forward_size | relocator.c:113、1311-1314、1488-1491 |
+| 每段复制代码 | src&lt;target → backward 模板；src&gt;target → forward 模板；src==target → 无复制、仅 cache 同步 | relocator.c:1616-1635 |
+| movers 布局 | preamble → [sorted[0] 的 forward/backward 或空] → … → [sorted[nchunks-1] 的 …] → jumper | relocator.c:1606-1636 |
 
 **具体实现（入口与排序、preamble/forward/backward/jumper 源码、C 侧与汇编模板、执行顺序小结）**见 [GRUB_RELOCATOR_BUILD_AND_RUNTIME.md](GRUB_RELOCATOR_BUILD_AND_RUNTIME.md) 的「4. grub_relocator_prepare_relocs() 具体实现（运行时细节）」。
 
