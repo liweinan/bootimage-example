@@ -8,11 +8,10 @@
 |------|------|
 | **为什么在 BIOS/Legacy 下一定要有 relocate 过程？** | 0x100000 冲突、为何必须两阶段、为何 relocator 必须在 1MB 以下、与 UEFI 对比 |
 | **Relocator 执行总览** | 从 boot 到内核的完整流程（含构建时 vs 运行时、步骤 1–5）、两处代码来源对照表 |
-| **relocator32.S 代码分析** | 执行顺序（PREAMBLE/RELOAD_GDT/DISABLE_PAGING/设段与寄存器/ljmp）、功能概要、GDT 见问题 1 |
 | **grub_relocator32_boot() 函数** | 入口函数、安全区分配、设置 eip/esi、拷贝 relocator32、调用 prepare_relocs、跳转 movers_chunk |
 | **Relocator 数据结构与分配** | allocate_pages、0x100000 分配失败原因、16MB+ 临时缓冲区、relocator_alloc_chunk_align |
 | **grub_relocator_prepare_relocs() 与动态生成** | movers_chunk 生成、forward/backward 模板、C 侧设置全局变量与拷贝、jumper、执行顺序 |
-| **关键问题解答** | relocator 代码对应文件、为何要复制、UEFI 不需要 relocator、bzImage 与 UEFI 不矛盾、涉及代码一览等 |
+| **关键问题解答** | 问题 1：relocator 代码对应文件、**relocator32.S 完整源代码分析**、GDT 说明；问题 2 起：为何要复制、UEFI 不需要 relocator、bzImage 与 UEFI 不矛盾、涉及代码一览等 |
 
 **编译与运行时**：relocator32.S、relocator_asm.S、relocator_common_c.c 在 **GRUB 构建时**（make）编译并链接进 GRUB；**boot 时不编译**，只拷贝已编译好的机器码并写 jumper。详见 [GRUB_RELOCATOR_BUILD_AND_RUNTIME.md](GRUB_RELOCATOR_BUILD_AND_RUNTIME.md)。
 
@@ -132,17 +131,7 @@ grub_relocator32_boot(...)     [relocator.c]，执行于 GRUB 0x100000 (1MB)+
 | ↳ forward/backward（movers_chunk 内） | relocator_asm.S 模板拷贝进 movers_chunk（**构建时**已编译进 GRUB，**boot 时** C 侧设全局变量并拷贝模板到 movers_chunk） | `grub-core/lib/i386/relocator_asm.S` | `grub_relocator_forward_start`～`_end`、`grub_relocator_backward_start`～`_end`；由 `grub_cpu_relocator_forward/backward(rels, ...)` 拷贝 |
 | ↳ jumper（movers_chunk 内） | C 写入机器码 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_jumper(rels, addr)` |
 
----
-
-### relocator32.S 代码分析
-
-**源码位置**：`grub-core/lib/i386/relocator32.S`（含 `#include "relocator_common.S"`，RELOAD_GDT、PREAMBLE、DISABLE_PAGING 等宏在 relocator_common.S 中定义）。
-
-**执行顺序（与 relocator_common.S 宏）**：jumper 跳入安全区后从 `grub_relocator32_start` 执行：**PREAMBLE**（计算当前基址并跳 cont0）→ **RELOAD_GDT**（填 gdtdesc、`lgdt`、`ljmp` 更新 CS 到 cont1）→ `.code32` → `movl $DATA_SEGMENT, %eax` 再赋给 ds/es/fs/gs/ss → **DISABLE_PAGING**（清 CR0 分页位）→ 可选清 CR4 PAE、清 amd64 MSR → 从 **VARIABLE(grub_relocator32_esp/ebp/esi/edi/eax/ebx/ecx/edx)** 读值并赋给对应寄存器 → `cld` → **远跳转**（`.byte 0xea` + `grub_relocator32_eip` + `CODE_SEGMENT`）到 code32_start。文件末尾内联 **GDT**（NULL、Reserved、Code 0x10、Data 0x18），由 RELOAD_GDT 宏中的 `lgdt` 加载。
-
-**功能概要**：关分页、加载内嵌 GDT、设段与寄存器（含 ESI = boot_params、EIP 目标 = code32_start）、ljmp 到内核；不负责复制内核，复制在 movers_chunk 的 forward/backward 中完成。GDT 表内容与 Code/Data 段用途见下文「关键问题解答」问题 1 内「relocator32 内嵌 GDT 说明」。
-
-下文按：入口函数 `grub_relocator32_boot()`、数据结构与分配、`grub_relocator_prepare_relocs()` 与动态生成、关键问题解答与为何必须复制内核，展开实现细节。
+relocator32.S 的执行顺序与**具体代码分析**见下文「关键问题解答」问题 1 内「relocator32.S 完整源代码分析」。
 
 ---
 
@@ -468,7 +457,7 @@ grub_modbase = GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR + (_edata - _start);
 
 **问题 1：relocator 代码具体对应哪个文件？**
 
-**答案：** 安全区中执行的是 **由 relocator32.S 编译得到的机器码** 的副本（源码文件 `grub-core/lib/i386/relocator32.S`）。**复制内核**的代码来自 **relocator_asm.S**（forward/backward 模板）；movers_chunk 内的 preamble 与 jumper 由 **relocator_common_c.c** 写入。二者均在 movers_chunk 中，详见上文「两处 relocator 代码来源对照」。relocator32.S 的执行顺序与功能见上文「relocator32.S 代码分析」。
+**答案：** 安全区中执行的是 **由 relocator32.S 编译得到的机器码** 的副本（源码文件 `grub-core/lib/i386/relocator32.S`）。**复制内核**的代码来自 **relocator_asm.S**（forward/backward 模板）；movers_chunk 内的 preamble 与 jumper 由 **relocator_common_c.c** 写入。二者均在 movers_chunk 中，详见上文「两处 relocator 代码来源对照」。relocator32.S 的执行顺序与具体代码分析见下文本问题内「relocator32.S 完整源代码分析」。
 
 **编译过程**：relocator32.S 在 **GRUB 构建时**（`make`）由 Makefile 纳入 relocator 相关模块（见 `grub-core/Makefile.core.def` 中 relocator 相关项），经 as/gcc 编译、链接进 GRUB core，生成 relocator32 代码段（入口符号 `grub_relocator32_start`，大小由宏 `RELOCATOR_SIZEOF(32)` 给出）。**boot 时不编译**；在 `grub_relocator32_boot()` 中通过 `grub_memmove(安全区, &grub_relocator32_start, RELOCATOR_SIZEOF(32))` 将上述机器码拷贝到安全区，该函数还负责分配安全区、设置寄存器状态、组装 movers_chunk 并跳转等。编译与运行时的完整区分见 [GRUB_RELOCATOR_BUILD_AND_RUNTIME.md](GRUB_RELOCATOR_BUILD_AND_RUNTIME.md)。
 
@@ -489,6 +478,99 @@ relocator32 加载的 GDT **不是空表**，也不提供“基础服务”；�
 - **与 GDT 的关系**：Code 段和 Data 段**就是 GDT 表里的两项**。GDT 是一块连续内存，每项 8 字节为一段描述符。选择子 0x10、0x18 是**索引**（0x10÷8＝2、0x18÷8＝3）：CS＝0x10 时 CPU 用 **GDT[2]** 作为当前代码段，DS/ES/SS 等＝0x18 时 CPU 用 **GDT[3]** 作为当前数据段。取指或访存时 CPU 用段寄存器里的选择子查 GDT，取出对应描述符得到基址/界限/属性；真正定义“基址 0、4GB”的是 GDT 里这两项，0x10/0x18 只是指向它们的下标。
 - **这两项的用途**：**Code 段（0x10）** 给 **CS** 用——relocator 用 `ljmp` 把 CS 设为 0x10，之后内核入口（code32_start）的取指就用 GDT[2]，基址 0、4GB，等于“整个 32 位地址空间都是代码段”。**Data 段（0x18）** 给 **DS、ES、FS、GS、SS** 用——relocator32 里 `movl $DATA_SEGMENT, %eax` 再赋给这些段寄存器，内核用它们访问数据、栈；同样是基址 0、4GB，线性地址＝有效地址。合起来：关分页并加载此 GDT、设好 CS/DS/SS 后，CPU 处于 32 位保护模式下的平坦段状态，relocator 再 `ljmp` 到 code32_start，内核即可按协议运行；没有这两个描述符或不是平坦段，跳过去会出错。
 - **结论**：仅满足内核 32 位入口对段寄存器的要求（平坦代码段 + 平坦数据段），无其它服务。
+
+**relocator32.S 完整源代码分析**
+
+源码文件：`grub-core/lib/i386/relocator32.S`（含 `#include "relocator_common.S"`）；宏 PREAMBLE、RELOAD_GDT、DISABLE_PAGING 定义在 `grub-core/lib/i386/relocator_common.S`。jumper 跳入安全区后从 `grub_relocator32_start` 执行，顺序如下。
+
+```asm
+# grub-core/lib/i386/relocator32.S（节选，与 relocator_common.S 宏展开对应）
+	.p2align	4
+VARIABLE(grub_relocator32_start)
+	PREAMBLE              # 步骤 1：见下 relocator_common.S
+
+	RELOAD_GDT            # 步骤 2：见下 relocator_common.S
+	.code32
+	/* Update other registers. */
+	movl	$DATA_SEGMENT, %eax   # 步骤 3：设数据段选择子
+	movl	%eax, %ds
+	movl	%eax, %es
+	movl	%eax, %fs
+	movl	%eax, %gs
+	movl	%eax, %ss
+
+	DISABLE_PAGING        # 步骤 4：见下 relocator_common.S
+
+	# 步骤 5（可选）：__x86_64__ 时关 amd64 MSR；然后关 PAE（cr4）
+	# 步骤 6：从 VARIABLE(grub_relocator32_*) 读值赋给 esp/ebp/esi/edi/eax/ebx/ecx/edx
+	.byte	0xb8
+VARIABLE(grub_relocator32_esp)
+	.long	0
+	movl	%eax, %esp
+	# … 同理 ebp、esi、edi、eax、ebx、ecx、edx …
+
+	cld                   # 步骤 7：清方向标志
+	.byte	0xea            # 步骤 8：JMP far（远跳转）操作码，见下说明
+VARIABLE(grub_relocator32_eip)
+	.long	0               # 偏移：由 C 侧写入，见下说明
+	.word	CODE_SEGMENT    # 段选择子 0x10
+
+LOCAL(gdt):               # 文件末尾：内联 GDT，由 RELOAD_GDT 中 lgdt 加载
+	.byte 0x00, 0x00, ...  # NULL、Reserved、Code 0x10、Data 0x18
+LOCAL(gdt_end):
+VARIABLE(grub_relocator32_end)
+```
+
+**步骤 8 说明（0xea 与 grub_relocator32_eip）：**
+
+- **0xea**：x86 操作码，对应 **JMP far**（远跳转，Intel 手册中的 JMP ptr16:32）。指令为 6 字节：`0xea` + 4 字节偏移（EIP）+ 2 字节段选择子（CS）；执行后 CS ← CODE_SEGMENT（0x10），EIP ← 偏移，即跳转到 (段:偏移) 处（内核 32 位入口）。
+- **grub_relocator32_eip 的值来源**：在 `grub_relocator32_boot()` 的步骤 2 中，C 侧执行 `grub_relocator32_eip = state.eip`；`state.eip` 由调用方（如 `grub_linux_boot()`）传入，为内核入口点 **code32_start**。该全局变量在 relocator32 代码段内对应上述 `.long 0` 槽位；写入后，步骤 3 的 `grub_memmove(安全区, &grub_relocator32_start, ...)` 会把已含 code32_start 的这段机器码拷贝到安全区，故安全区执行到此处时远跳转目标即为 code32_start。源代码位置：`grub-core/lib/i386/relocator.c` 中 `grub_relocator32_eip = state.eip`；`state.eip` 在 `grub-core/loader/i386/linux.c` 的 `grub_linux_boot()` 里按 boot protocol 计算并传入。
+
+**relocator_common.S 宏（节选）：**
+
+```asm
+# grub-core/lib/i386/relocator_common.S
+
+	.macro DISABLE_PAGING
+	movl	%cr0, %eax
+	andl	$(~GRUB_MEMORY_CPU_CR0_PAGING_ON), %eax
+	movl	%eax, %cr0
+	.endm
+
+	.macro PREAMBLE
+LOCAL(base):
+	mov	RAX, RSI                    # 保存“当前基址”（jumper 跳入时由调用约定传入）
+	add	$(LOCAL(cont0) - LOCAL(base)), RAX
+	jmp	*RAX                         # 跳到 cont0，使后续指令使用拷贝后的地址
+LOCAL(cont0):
+	.endm
+
+	.macro RELOAD_GDT
+	lea	(LOCAL(cont1) - LOCAL(base)) (RSI, 1), RAX
+	movl	%eax, (LOCAL(jump_vector) - LOCAL(base)) (RSI, 1)   # 填 ljmp 目标
+	lea	(LOCAL(gdt) - LOCAL(base)) (RSI, 1), RAX
+	mov	RAX, (LOCAL(gdt_addr) - LOCAL(base)) (RSI, 1)       # 填 GDT 基址（拷贝后）
+	lgdt	(LOCAL(gdtdesc) - LOCAL(base)) (RSI, 1)            # 加载 GDT
+	ljmp	*(LOCAL(jump_vector) - LOCAL(base)) (RSI, 1)       # 更新 CS 到 CODE_SEGMENT
+	# gdtdesc: .word gdt_end - gdt；gdt_addr / jump_vector 占位
+LOCAL(cont1):
+	.endm
+```
+
+**步骤与功能简述：**
+
+| 步骤 | 代码/宏 | 功能 | 源代码位置 |
+|------|---------|------|------------|
+| 1 | PREAMBLE | 以“当前基址”做相对跳转到 cont0，使后续指令在拷贝后的安全区地址下执行（位置无关） | relocator_common.S:37-52 |
+| 2 | RELOAD_GDT | 计算拷贝后 GDT 与 cont1 的地址，填 gdtdesc/gdt_addr/jump_vector，`lgdt` 后 `ljmp` 更新 CS 到 CODE_SEGMENT | relocator_common.S:54-110；GDT 表体在 relocator32.S:120-132 |
+| 3 | movl $DATA_SEGMENT, %eax 及 ds/es/fs/gs/ss | 设置数据段选择子为 0x18（GDT 第 3 项） | relocator32.S:34-39 |
+| 4 | DISABLE_PAGING | 清 CR0 分页位，关闭分页 | relocator_common.S:31-36 |
+| 5 | 可选关 PAE/amd64 MSR | 关 CR4 PAE；x86_64 构建时再关 amd64 长模式 MSR | relocator32.S:44-55 |
+| 6 | VARIABLE(grub_relocator32_*)、mov 到 reg | 从 C 侧写入的全局变量位置读 esp/ebp/esi/edi/eax/ebx/ecx/edx（含 ESI=boot_params、EIP 目标=code32_start） | relocator32.S:61-109 |
+| 7 | cld | 清方向标志，满足内核入口约定 | relocator32.S:113 |
+| 8 | .byte 0xea（JMP far）+ VARIABLE(grub_relocator32_eip)（.long 偏移）+ .word CODE_SEGMENT | 远跳转到 code32_start；0xea 为 JMP far 操作码，偏移值由 C 侧在拷贝前写入（grub_relocator32_eip = state.eip），见上「步骤 8 说明」 | relocator32.S:115-118 |
+
+不负责复制内核；复制由 movers_chunk 内 forward/backward 完成。GDT 表内容与 Code/Data 段用途见上「relocator32 内嵌 GDT 说明」。
 
 **问题 2：为什么要复制？**
 
