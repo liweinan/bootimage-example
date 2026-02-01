@@ -84,7 +84,7 @@ GRUB 保护模式代码（0x100000 (1MB)+）
 **从 boot 到内核的完整执行流程：**
 
 ```
-执行顺序：GRUB → movers_chunk → 安全区 relocator32 副本 → 内核（movers_chunk 执行完后跳回 relocator32 副本，而非 relocator32 跳去 movers_chunk）
+执行顺序：GRUB → movers_chunk → 安全区 relocator32 副本 → 内核（movers_chunk 执行完后 jumper 跳入 relocator32 副本，而非 relocator32 跳去 movers_chunk）。**全程保护模式**，无实模式：GRUB、movers_chunk、安全区 relocator32、code32_start（如 startup_32）均在 32 位保护模式下执行；relocator32 仅关分页、加载内嵌 GDT、设段后 ljmp，未切回实模式。
 
 grub_relocator32_boot(...)     [relocator.c]，执行于 GRUB 0x100000 (1MB)+
     ↓
@@ -168,31 +168,29 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
     grub_relocator32_eip = state.eip;  // 内核入口点地址（code32_start）
     grub_relocator32_esi = state.esi;  // boot_params 地址
     
-    // 步骤 3: 将 relocator32.S 的基础代码复制到安全区域
-    // 这是 relocator 的基础框架代码（relocator32.S）
+    // 步骤 3: 将 relocator32.S 编译后的机器码复制到安全区域（此时尚未执行；先执行的是步骤 5 跳入的 movers_chunk）
     grub_memmove (get_virtual_current_address (ch), &grub_relocator32_start,
                   RELOCATOR_SIZEOF (32));
     
-    // 步骤 4: 构建完整的 relocator 代码（包含复制内核的代码）
-    // ⚠️ 关键：relocator 代码不是简单的跳转代码，而是包含：
-    //   1. preamble：初始化代码
-    //   2. forward/backward 复制代码：将内核从临时缓冲区（src = 16MB+）复制到目标（target = 0x100000 (1MB)）
-    //   3. jumper：跳转到安全区，由 relocator32 关分页、加载内嵌 GDT、设段后 ljmp 到内核入口点
-    // 这些代码是在 grub_relocator_prepare_relocs() 中动态生成的
+    // 步骤 4: grub_relocator_prepare_relocs() 组装 movers_chunk（无编译）
+    // movers_chunk 内容：preamble（i386-pc 为空）+ forward/backward 模板（构建时已编译进 GRUB）+ jumper（C 写机器码）。
+    // boot 时仅拷贝已编译的 forward/backward 模板到 movers_chunk、设全局变量 dest/src/size、写 jumper 目标地址，非运行时编译。
+    // 执行效果：preamble → forward/backward（从 src 16MB+ 复制到 target 0x100000）→ jumper 跳入安全区，再由 relocator32 关分页、加载内嵌 GDT、设段后 ljmp 到内核。
     //
-    // relocator32.S 与“完整 relocator 代码”的关系：
-    // - relocator32.S 是源码；安全区里执行的是其编译后代码的副本（步骤 3 拷贝进去），
-    //   该段只负责关分页、加载内嵌 GDT、设段与寄存器、ljmp 到内核，不负责复制。
-    // - 完整 relocator = movers_chunk（步骤 4 生成）+ 安全区里 relocator32 的副本。
-    // - 复制内核/initrd 在 movers_chunk 里完成：由 preamble 后的多段 forward/backward 代码执行。
+    // relocator 由两处组成，执行顺序固定：
+    // - 步骤 5 跳入的是 movers_chunk（relst），不是安全区。movers_chunk 内：preamble → forward/backward（复制内核/initrd 到 0x100000）→ jumper 跳入安全区。
+    // - 安全区里是 relocator32.S 编译后代码的副本（步骤 3 拷贝进去），不负责复制；只负责关分页、加载内嵌 GDT、设段与寄存器、ljmp 到 code32_start。
+    // 因此：先执行 movers_chunk，再由 jumper 转到安全区执行 relocator32 副本，最后 ljmp 到内核。
     err = grub_relocator_prepare_relocs (rel, 
                                          get_physical_target_address (ch),  // 安全区域的物理地址
                                          &relst,  // 输出：构建好的 relocator 代码地址
                                          NULL);
     
-    // 步骤 5: 执行跳转（关闭中断，跳转到构建好的 relocator 代码）
+    // 步骤 5: 执行跳转（跳转到 movers_chunk（relst），入口不是 relocator32；relocator32 在 jumper 跳入安全区后才执行）
+    // cli：跳转前显式关可屏蔽中断，避免在“离开 GRUB → 复制到 0x100000 → relocator32 关分页/换 GDT → 跳内核”过渡期内发生中断；
+    // 此阶段 GRUB 的 IDT/中断处理可能已失效或被覆盖，若中断发生会导致未定义行为。与 GRUB 是否默认开中断无关，属过渡期安全措施。
     asm volatile ("cli");
-    ((void (*) (void)) relst) ();  // 跳转到构建好的 relocator 代码
+    ((void (*) (void)) relst) ();  // 跳转到 movers_chunk（relst）
     // relocator 代码执行顺序：见上文「Relocator 执行总览」；安全区 relocator32 为关分页、加载内嵌 GDT、设段与寄存器、ljmp 到 code32_start（32 位保护模式入口）。
 }
 ```
