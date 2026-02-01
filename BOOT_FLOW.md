@@ -1112,19 +1112,17 @@ boot_cdrom(struct drive_s *drive)
     ↓
 9. grub_linux_boot() → grub_relocator32_boot()
    ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
-   └─ 跳转到内核入口点（code32_start）
+   └─ 按 boot_params 中 code32_start 字段所存地址跳转
     ↓
 10. 内核开始执行
-    ├─ Linux 内核 Setup 代码（实模式）
-    │   ├─ 源代码位置：linux/arch/x86/boot/header.S
-    │   ├─ 内存位置：0x100000（1MB）或内核指定的地址
-    │   ├─ 运行模式：实模式（初始阶段）
-    │   ├─ 验证内核签名（boot_flag = 0xAA55）
-    │   ├─ 初始化基本环境
-    │   ├─ 切换到保护模式
-    │   └─ 跳转到压缩内核解压代码
+   ⚠️ **从 GRUB 启动时不执行 Setup**：GRUB 自填 boot_params 后按 code32_start 字段所存地址跳转（该地址处为压缩内核入口，32 位保护模式）。Setup（arch/x86/boot/）仅在**从扇区 0 启动**时执行；此时流程为：Setup（实模式）→ 切保护模式 → 读取 code32_start 字段值并跳转。
+    ├─ 压缩内核入口（code32_start 字段所存地址处的代码，32 位保护模式）
+    │   ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S（如 startup_32）
+    │   ├─ 内存位置：0x100000（1MB）+ 头部偏移
+    │   ├─ 运行模式：32 位保护模式（GRUB/relocator 已设好 GDT、段、关分页）
+    │   └─ 从 GRUB 进入时即由此处开始，不经过 Setup
     │       ↓
-    ├─ 压缩内核解压代码（startup_32）
+    ├─ 压缩内核解压代码（startup_32 等）
     │   ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
     │   ├─ 运行模式：32 位保护模式 → 64 位长模式
     │   ├─ 设置页表（身份映射：物理地址 = 线性地址）
@@ -2311,8 +2309,8 @@ GRUB 从 `grub_main()` 开始加载 Linux 内核的关键步骤：
 - 设置寄存器状态：
   - ESI = boot_params 结构地址
   - CS = 内核代码段
-  - EIP = code32_start (内核入口点)
-- 跳转到 Linux 内核 Setup 代码
+  - EIP = code32_start 字段的值（32 位入口物理地址）
+- 按 code32_start 字段所存地址跳转（该地址处为压缩内核入口，32 位保护模式）；**从 GRUB 启动时不经过 Setup**
 
 **3. 文档覆盖范围**
 
@@ -2323,9 +2321,9 @@ grub_main()
     ↓                               
 grub_cmd_linux()                    
     ↓                               
-grub_relocator32_boot() ────────→   Setup 代码（实模式）
+grub_relocator32_boot() ────────→   code32_start 字段所存地址处的代码（压缩内核入口，32 位保护模式；从 GRUB 不经过 Setup）
                                         ↓
-                                    模式切换
+                                    解压 / 模式切换
                                         ↓
                                     startup_64 ────────────────────→    start_kernel()
                                         ↓                                   ↓
@@ -2344,10 +2342,17 @@ grub_relocator32_boot() ────────→   Setup 代码（实模式�
 
 内核从 GRUB 跳转后，经历以下关键阶段：
 
-**1. Setup 代码（实模式）**
-- 源代码：linux/arch/x86/boot/header.S、main.c
-- 执行硬件检测、内存检测、参数处理
-- 调用 go_to_protected_mode() 切换到保护模式
+⚠️ **从 GRUB 启动时不执行 Setup**：GRUB 按 **code32_start** 字段所存的地址跳转（32 位保护模式入口），不经过 bzImage 内的实模式 Setup（arch/x86/boot/）。Setup 仅在**从扇区 0 启动**时执行；此时才会先跑 Setup（硬件检测、go_to_protected_mode()），再由 **pm.c** 调用 `protected_mode_jump(boot_params.hdr.code32_start, ...)`，**读取该字段的值**后跳转到该地址。详见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)、[GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
+
+**code32_start 在 Linux 源码中的定义与用法（与上文一致）**
+- **定义**：`code32_start` 是 boot protocol 头中的**数据字段**（仅一个 32 位值）。`arch/x86/boot/header.S` 第 271 行，标签 `code32_start:`，默认值 `.long 0x100000`（"here loaders can put a different start address for 32-bit code"）。boot protocol 头中偏移 0x214/4，类型为“boot loader 可修改”；该字段**存储** 32 位保护模式入口的**物理地址**。
+- **从扇区 0 启动时**：Setup（实模式）在 `arch/x86/boot/pm.c` 中调用 `protected_mode_jump(boot_params.hdr.code32_start, ...)`，**读取该字段的值**后切保护模式并跳转到该地址。
+- **该地址处的代码**：在 `arch/x86/boot/compressed/head_64.S`（如 startup_32），即压缩内核入口；**不是** setup.S 的代码。
+
+**1. 压缩内核入口（code32_start 字段所存地址处的代码，32 位保护模式）— 从 GRUB 进入时由此开始**
+- 源代码：linux/arch/x86/boot/compressed/head_64.S（如 startup_32）
+- GRUB/relocator 已设好 GDT、段、关分页，CPU 已处于 32 位保护模式
+- 此处完成解压与向 64 位长模式的切换
 
 **2. 解压内核（32 位保护模式 → 64 位长模式）**
 - 源代码：linux/arch/x86/boot/compressed/head_64.S (startup_32)
@@ -2368,9 +2373,7 @@ grub_relocator32_boot() ────────→   Setup 代码（实模式�
 
 **4. vmlinuz 文件结构说明**
 
-vmlinuz 文件包含两部分：
-1. **Setup 代码**（未压缩） - GRUB 直接加载到内存，可立即执行
-2. **压缩的内核代码**（gzip） - 由 Setup 代码中的 startup_32 解压
+vmlinuz（bzImage）包含：**Setup 代码**（未压缩，实模式）+ **压缩的内核代码**（gzip）。**从 GRUB 启动时**：GRUB 自填 boot_params，按 code32_start 字段所存地址跳转（该地址处为压缩内核入口），解压在 head_64.S 的 startup_32 等中完成；**从扇区 0 启动时**：先执行 Setup 再切保护模式，读取 code32_start 字段值并跳转。
 
 > 📖 **详细分析文档**：
 > - [Linux 内核早期启动详细流程（64 位）](LINUX_KERNEL_EARLY_BOOT.md) - Setup 代码、模式切换、startup_32/startup_64 完整源代码分析

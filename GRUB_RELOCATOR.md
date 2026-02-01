@@ -623,6 +623,19 @@ VARIABLE(grub_relocator32_end)
 - **0xea**：x86 操作码，对应 **JMP far**（远跳转，Intel 手册中的 JMP ptr16:32）。指令为 6 字节：`0xea` + 4 字节偏移（EIP）+ 2 字节段选择子（CS）；执行后 CS ← CODE_SEGMENT（0x10），EIP ← 偏移，即跳转到 (段:偏移) 处（内核 32 位入口）。
 - **grub_relocator32_eip 的值来源**：在 `grub_relocator32_boot()` 的步骤 2 中，C 侧执行 `grub_relocator32_eip = state.eip`；`state.eip` 由调用方（如 `grub_linux_boot()`）传入，为内核入口点 **code32_start**。该全局变量在 relocator32 代码段内对应上述 `.long 0` 槽位；写入后，步骤 3 的 `grub_memmove(安全区, &grub_relocator32_start, ...)` 会把已含 code32_start 的这段机器码拷贝到安全区，故安全区执行到此处时远跳转目标即为 code32_start。源代码位置：`grub-core/lib/i386/relocator.c` 中 `grub_relocator32_eip = state.eip`；`state.eip` 在 `grub-core/loader/i386/linux.c` 的 `grub_linux_boot()` 里按 boot protocol 计算并传入。
 
+**确认 state.eip（grub_relocator32_eip）以 0x100000 为基址的过程**
+
+“按约定应该是 0x100000”指的是**镜像加载基址**为 0x100000，**state.eip = code32_start = 0x100000 + 偏移**（32 位入口的物理地址）。确认过程如下（源码：`grub-core/loader/i386/linux.c`）：
+
+1. **state.eip 的赋值**（约 660 行）：`state.eip = ctx.params->hdr.code32_start`。`ctx.params` 是 boot_params 的副本（整块 `linux_params` 在 `grub_linux_boot()` 里拷入 real_mode 区），故 **state.eip = linux_params.hdr.code32_start**。
+2. **code32_start 的计算**（约 824 行，在 `grub_cmd_linux()` 中）：  
+   `linux_params.hdr.code32_start = prot_mode_target + lh.code32_start - GRUB_LINUX_BZIMAGE_ADDR`。  
+   - **prot_mode_target**：来自 `get_physical_target_address(ch)`，即内核 chunk 的 **target**（拷贝目标）。非可重定位内核时由 `grub_relocator_alloc_chunk_addr(..., preferred_address, ...)` 传入 **0x100000**，故 **prot_mode_target = 0x100000**（见上文「拷贝目标 0x100000 的源码依据」）。  
+   - **GRUB_LINUX_BZIMAGE_ADDR**：`grub/include/grub/i386/linux.h` 定义为 **0x100000**。  
+   - **lh.code32_start**：bzImage 头部字段，表示“镜像**按协议默认加载在 0x100000 时**，32 位入口相对该基址的偏移”或“该情形下的入口物理地址”（即 0x100000 + 偏移）。  
+   因此 **code32_start = 0x100000 + (lh.code32_start - 0x100000) = 0x100000 + 偏移**，即 **state.eip 以 0x100000 为基址**。
+3. **结论**：**grub_relocator32_eip = state.eip = code32_start = 0x100000 + 偏移**；基址 0x100000 由 **prot_mode_target = 0x100000** 与 **GRUB_LINUX_BZIMAGE_ADDR = 0x100000** 保证，与“内核最终放在 0x100000”的约定一致。
+
 **relocator_common.S 宏（节选）：**
 
 ```asm
@@ -930,21 +943,21 @@ grub_cpu_relocator_jumper ((void *) rels, (grub_addr_t) addr);
                                GRUB_LINUX_BZIMAGE_ADDR;
    // 其中：
    // - prot_mode_target = 0x100000 (1MB)（最终目标地址）
-   // - lh.code32_start：内核头部中的字段，相对于 0x100000 (1MB) 的偏移
+   // - lh.code32_start：内核头部中的字段，表示当镜像加载在 0x100000 时 32 位入口的物理地址（即 0x100000 或 0x100000+偏移）
    // - GRUB_LINUX_BZIMAGE_ADDR = 0x100000 (1MB)
    ```
    - `code32_start` 的计算假设内核在 `prot_mode_target`（0x100000 (1MB)）
    - 如果跳转到临时缓冲区（16MB+），`code32_start` 的地址会错误
 
-2. **boot_params 中的地址都是相对于 0x100000 (1MB) 的**：
+2. **boot_params 中的地址均按镜像在 0x100000 (1MB) 为基址计算得到的物理地址**：
    - `boot_params.cmd_line_ptr`：命令行参数地址
    - `boot_params.ramdisk_image`：initramfs 地址
-   - `boot_params.code32_start`：内核入口点地址
-   - 这些地址都是基于内核在 0x100000 (1MB) 的假设计算的
+   - `boot_params.code32_start`：内核入口点物理地址
+   - 这些地址均假设内核加载在 0x100000 (1MB)，为绝对物理地址
 
 3. **Legacy 协议下镜像须在 0x100000 (1MB)**：
-   - **Legacy/GRUB 路径**：GRUB 不执行 bzImage 的实模式 setup，直接跳 **code32_start**（压缩内核入口）。**code32_start** 是 boot protocol 头里的**字段**，定义在 `arch/x86/boot/header.S`；其**值**指向的代码在 `arch/x86/boot/compressed/head_64.S`（如 startup_32），**不是** setup.S。setup.S（`arch/x86/boot/setup.S`）是实模式代码，从扇区 0 启动时先跑 setup，再由 setup 切保护模式并跳转到 code32_start 所指地址。`code32_start` 与 boot_params 中的地址均按“镜像在 0x100000”计算，故必须把镜像放在 0x100000。
-   - **从扇区 0 启动**时才会先跑 setup（`arch/x86/boot/`），再切保护模式跳 code32_start；此时同样约定镜像在 0x100000。
+   - **Legacy/GRUB 路径**：GRUB 不执行 bzImage 的实模式 Setup，直接跳 **code32_start**（压缩内核入口）。**code32_start** 是 boot protocol 头里的**字段**，定义在 Linux `arch/x86/boot/header.S`（标签 `code32_start:`，默认 `.long 0x100000`）；其**值**为 32 位入口物理地址，该地址处的代码在 `arch/x86/boot/compressed/head_64.S`（如 startup_32），**不是** setup。从扇区 0 启动时先跑 Setup（`arch/x86/boot/`），再由 **pm.c** 调用 `protected_mode_jump(boot_params.hdr.code32_start, ...)` 切保护模式并跳转到该地址。`code32_start` 与 boot_params 中的地址均按“镜像在 0x100000”计算，故必须把镜像放在 0x100000。
+   - **从扇区 0 启动**时才会先跑 Setup（`arch/x86/boot/`），再在 pm.c 中 `protected_mode_jump(boot_params.hdr.code32_start, ...)` 切保护模式跳转；此时同样约定镜像在 0x100000。
    - **UEFI 模式**：入口为 EFI stub（`arch/x86/boot/startup/efi-mixed.S`），不经过 code32_start
      - EFI stub 是**位置无关的**（使用相对地址，如 `call 1f; popl %ecx`）
      - EFI stub 可以加载到任意地址，不需要在 0x100000 (1MB)

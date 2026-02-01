@@ -2,7 +2,7 @@
 
 本文档详细说明 GRUB 如何加载 Linux 内核镜像并跳转到内核入口点的完整过程，包括源代码分析和实现细节。
 
-**相关文档与对齐**：relocator 机制、BIOS/Legacy 下不执行 Setup 直接跳 code32_start、GDT/关分页等与 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 一致；模块加载（core.img、FOR_MODULES）见 [GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)。
+**相关文档与对齐**：relocator 机制、BIOS/Legacy 下不执行 Setup、按 boot_params 中 code32_start 字段所存地址跳转、GDT/关分页等与 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 一致；模块加载（core.img、FOR_MODULES）见 [GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)。
 
 ## 流程概述
 
@@ -33,22 +33,22 @@ grub_cmd_initrd()（脚本中下一行 initrd 命令，可选）
         ↓
 grub_linux_boot() → grub_relocator32_boot()
     ├─ 源代码位置：grub/grub-core/loader/i386/linux.c
-    └─ 跳转到内核入口点（code32_start）
+    └─ 按 boot_params 中 code32_start 字段所存地址跳转（见下 code32_start 说明）
         ↓
-grub_relocator32_boot() 跳转到内核入口点（code32_start）
+grub_relocator32_boot() 按 code32_start 字段所存地址跳转
     ├─ 源代码位置：grub/grub-core/lib/i386/relocator.c
-    ├─ 跳转地址：code32_start（内核头部字段，相对于 0x100000 (1MB) 的偏移）
+    ├─ 跳转目标：EIP = boot_params.hdr.code32_start 的值（该字段是数据，存 32 位入口物理地址，见下 code32_start 说明）
     └─ 寄存器状态：
         ├─ ESI = boot_params 地址
         ├─ ESP = 栈指针
-        └─ EIP = code32_start（内核入口点）
+        └─ EIP = code32_start 字段的值（即 32 位入口物理地址）
     ↓
-压缩内核入口（code32_start，32 位保护模式）
-    ├─ **从 GRUB 启动时不执行 Setup**：GRUB 自填 boot_params 后直接 ljmp 到 code32_start
-    ├─ code32_start 指向：linux/arch/x86/boot/compressed/head_64.S（如 startup_32），非 setup
+压缩内核入口（code32_start 字段所存地址处的代码，32 位保护模式，如 startup_32）
+    ├─ **从 GRUB 启动时不执行 Setup**：GRUB 自填 boot_params 后按 code32_start 字段所存地址 ljmp
+    ├─ code32_start：boot protocol 头中的**数据字段**（仅一个 32 位值），定义在 Linux arch/x86/boot/header.S（标签 code32_start:，默认 .long 0x100000）；表示 32 位入口的物理地址。该地址处的**代码**在 arch/x86/boot/compressed/head_64.S（如 startup_32），非 Setup。从扇区 0 启动时 Setup 在 arch/x86/boot/pm.c 中调用 protected_mode_jump(boot_params.hdr.code32_start, ...)，读取该字段值后跳转
     ├─ 运行模式：32 位保护模式（relocator 已关分页、加载内嵌 GDT、设段）
     └─ 解压、设页表、切长模式等由压缩内核在此之后完成
-    （从扇区 0 启动时才会先执行 Setup（arch/x86/boot/），再切保护模式跳 code32_start）
+    （从扇区 0 启动时才会先执行 Setup（arch/x86/boot/），再在 pm.c 中 protected_mode_jump 读取 code32_start 字段值并跳转）
 ```
 
 ### UEFI 启动流程
@@ -147,11 +147,11 @@ startup_64（64 位内核入口点）
 |------|----------|----------|
 | **延迟执行机制** | ✅ `grub_cmd_linux()` 只负责准备，不执行跳转；跳转由脚本结束后的隐式/显式 boot 触发 | ✅ 相同 |
 | **用户交互触发** | ✅ 先选菜单项，再执行该条目脚本体（此时才调用 `grub_cmd_linux()`）；脚本结束后隐式 boot | ✅ 相同 |
-| **寄存器状态** | `ESI` = `boot_params` 地址<br>`EIP` = `code32_start` | 由 EFI 固件设置（通过 `StartImage` 服务） |
+| **寄存器状态** | `ESI` = `boot_params` 地址<br>`EIP` = code32_start 字段的值 | 由 EFI 固件设置（通过 `StartImage` 服务） |
 | **跳转方式** | relocator 代码手动跳转 | EFI `StartImage` 服务 |
 | **内核格式** | bzImage（实模式 setup + 压缩内核） | PE/COFF（UEFI stub 内核） |
-| **内核入口点** | `code32_start`（32 位保护模式，如 startup_32；从 GRUB 不经过 Setup） | PE/COFF EntryPoint（保护模式/长模式） |
-| **模式切换** | 需要（GRUB 保护模式 → relocator 关分页/加载内嵌 GDT → 跳 code32_start） | 不需要（都在保护模式/长模式） |
+| **内核入口点** | code32_start 字段所存地址处的代码（32 位保护模式，如 startup_32；从 GRUB 不经过 Setup） | PE/COFF EntryPoint（保护模式/长模式） |
+| **模式切换** | 需要（GRUB 保护模式 → relocator 关分页/加载内嵌 GDT → 按 code32_start 字段跳转） | 不需要（都在保护模式/长模式） |
 | **参数传递** | `boot_params` 结构（通过 `ESI` 寄存器） | EFI System Table + 命令行参数（通过 `load_options`） |
 
 两套协议（Legacy 0x100000 与 UEFI 任意地址）所涉及的 **GRUB / 内核代码文件与函数一览**见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 中「bzImage 必须放在 0x100000 与 UEFI 不矛盾」小节末尾的 **「涉及代码一览」** 表格；本文对 `grub_cmd_linux`（i386/efi）、`grub_linux_boot`、UEFI 启动流程等的分析与之对应。
@@ -163,7 +163,7 @@ startup_64（64 位内核入口点）
 | 项目 | grub_cmd_linux() | grub_linux_boot() |
 |------|-------------------|--------------------|
 | **调用时机** | 用户选择该菜单项后，执行该条目脚本时执行到 `linux` 命令 | 脚本执行完后隐式/显式 `boot` 时 |
-| **主要动作** | 打开内核文件；解析头部；通过 relocator 分配临时缓冲区（通常 16MB+）；把内核拷到临时缓冲区；计算并设置 boot_params（含 code32_start、cmd_line_ptr、ramdisk 等）；**注册** `grub_linux_boot()`（不跳转） | 用已设好的 boot_params 填 state（esi、esp、eip=code32_start）；调用 `grub_relocator32_boot(relocator, state, 0)`，由 relocator 完成复制到 0x100000 (1MB) 并跳转内核 |
+| **主要动作** | 打开内核文件；解析头部；通过 relocator 分配临时缓冲区（通常 16MB+）；把内核拷到临时缓冲区；计算并设置 boot_params（含 code32_start 字段、cmd_line_ptr、ramdisk 等）；**注册** `grub_linux_boot()`（不跳转） | 用已设好的 boot_params 填 state（esi、esp、eip = code32_start 字段的值）；调用 `grub_relocator32_boot(relocator, state, 0)`，由 relocator 完成复制到 0x100000 (1MB) 并按该地址跳转 |
 | **是否跳转** | 否，仅准备并注册 | 是，通过 grub_relocator32_boot() 最终跳入内核 |
 
 **简要结论**：加载内核、设 boot_params、注册启动函数都在 **grub_cmd_linux()**；真正执行“复制到 0x100000 (1MB) + 跳内核”的是 **grub_linux_boot()** → **grub_relocator32_boot()**。
@@ -902,7 +902,7 @@ menuentry "Linux 5.x.x" {
 #    - 加载 initramfs 到高地址
 # 3. menuentry 执行完毕后，GRUB 隐式调用 boot 命令
 #    - 调用 grub_linux_boot() → grub_relocator32_boot()
-#    - 跳转到内核入口点（code32_start）
+#    - 按 code32_start 字段所存地址跳转到内核入口
 ```
 
 **示例 2：从 ISO 启动（测试环境，如 create_grub_iso_with_kernel.sh 生成的配置）**
@@ -1062,7 +1062,7 @@ grub_rescue_parse_line (char *line, grub_reader_getline_t getline, void *data)
    - menuentry 执行完毕后，GRUB 隐式调用 boot 命令
    - boot 命令调用 `grub_linux_boot()` → `grub_relocator32_boot()` 跳转到内核
 
-3. **内存布局与 Relocator 机制**：见上文「流程概述」与 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。要点：GRUB 与内核都涉及 0x100000；内核先加载到临时缓冲区 (16MB+)，boot 时 movers_chunk 复制到 0x100000，jumper 到安全区，relocator32 关分页、加载内嵌 GDT、设段后 ljmp 到 code32_start。为何必须 relocate、安全区与 movers_chunk 分配等见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)「为什么在 BIOS/Legacy 下一定要有 relocate 过程？」及「Relocator 执行总览」。
+3. **内存布局与 Relocator 机制**：见上文「流程概述」与 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。要点：GRUB 与内核都涉及 0x100000；内核先加载到临时缓冲区 (16MB+)，boot 时 movers_chunk 复制到 0x100000，jumper 到安全区，relocator32 关分页、加载内嵌 GDT、设段后按 code32_start 字段所存地址 ljmp。为何必须 relocate、安全区与 movers_chunk 分配等见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)「为什么在 BIOS/Legacy 下一定要有 relocate 过程？」及「Relocator 执行总览」。
 
 ### grub_cmd_linux() 函数
 
@@ -1081,8 +1081,8 @@ Linux 内核镜像（bzImage/vmlinuz）包含两部分：
 
 1. **Setup 代码**（实模式代码）：
    - 大小：通常 4-64 个扇区（由 `setup_sects` 字段指定）
-   - 功能：切换到保护模式/长模式，解压内核
-   - 源代码：`linux/arch/x86/boot/header.S`
+   - 功能：硬件检测、参数处理，调用 go_to_protected_mode() 后由 **pm.c** 的 `protected_mode_jump(boot_params.hdr.code32_start, ...)` 读取 code32_start 字段值并跳转到该地址；解压在压缩内核（head_64.S）中完成，非 Setup。
+   - 源代码：`linux/arch/x86/boot/`（如 header.S，含 boot protocol 头及 code32_start 数据字段；main.c、pm.c 等）
 
 2. **压缩的内核代码**：
    - 位置：setup 代码之后
@@ -1097,10 +1097,10 @@ Linux 内核镜像（bzImage/vmlinuz）包含两部分：
 |------|----------|------|
 | **grub_cmd_linux()** | 否 | 仅把“保护模式”部分（压缩的 payload）从文件读到 `prot_mode_mem`，不解压。 |
 | **grub_linux_boot()** | 否 | 在 0x10000–0x90000 放 boot_params 副本，设置 state，调用 `grub_relocator32_boot()`。 |
-| **relocator（movers_chunk）** | 否 | 仅把**仍为压缩状态**的内核从临时缓冲区复制到 0x100000 (1MB)，再跳转到 `code32_start`。 |
-| **内核接管之后** | **是** | CPU 已跳转到 `code32_start`（**从 GRUB 不经过 Setup**，直接进入压缩内核入口 startup_32 等）。在 **压缩内核解压代码**（如 `arch/x86/boot/compressed/head_64.S`）中完成 **gzip 解压**，然后跳转到 startup_64 等。从扇区 0 启动时才会先执行 Setup 再跳 code32_start。 |
+| **relocator（movers_chunk）** | 否 | 仅把**仍为压缩状态**的内核从临时缓冲区复制到 0x100000 (1MB)，再按 code32_start 字段所存地址跳转。 |
+| **内核接管之后** | **是** | CPU 已跳转到 code32_start 字段所存地址（**从 GRUB 不经过 Setup**，直接进入该地址处的代码，如 startup_32）。在 **压缩内核解压代码**（如 `arch/x86/boot/compressed/head_64.S`）中完成 **gzip 解压**，然后跳转到 startup_64 等。从扇区 0 启动时才会先执行 Setup 再按 code32_start 字段跳转。 |
 
-因此，**解压发生在「内核接管之后」**（见上表）；从 GRUB 启动时 relocator 跳转到 code32_start（压缩内核入口 startup_32）→ 在此完成 gzip 解压 → startup_64。GRUB/relocator 只负责加载和复制**压缩镜像**到 0x100000，不解压。
+因此，**解压发生在「内核接管之后」**（见上表）；从 GRUB 启动时 relocator 按 code32_start 字段所存地址跳转（该地址处为压缩内核入口 startup_32）→ 在此完成 gzip 解压 → startup_64。GRUB/relocator 只负责加载和复制**压缩镜像**到 0x100000，不解压。
 
 **完整源代码分析：**
 
@@ -1141,7 +1141,7 @@ grub_cmd_linux (grub_command_t cmd, int argc, char *argv[])
     if (len > 0)
         grub_file_read (file, (char *) &linux_params + sizeof (lh), len);
     
-    // 步骤 8: 设置 boot_params 中 code32_start、type_of_loader、ramdisk 等
+    // 步骤 8: 设置 boot_params 中 code32_start 字段、type_of_loader、ramdisk 等
     linux_params.hdr.code32_start = prot_mode_target + lh.code32_start - GRUB_LINUX_BZIMAGE_ADDR;
     // ...
     
@@ -1577,7 +1577,7 @@ grub_arch_efi_linux_boot_image (grub_addr_t addr, grub_size_t size, char *args)
 | **加载内核** | `grub_cmd_linux()` 直接读取文件到内存 | `grub_cmd_linux()` → `grub_efi_load_image()` |
 | **设置参数** | `boot_params` 结构 | `load_options`（UTF-16）+ EFI System Table |
 | **启动内核** | `grub_relocator32_boot()` 手动跳转 | `grub_efi_start_image()` EFI 服务 |
-| **模式切换** | GRUB 保护模式 → relocator 关分页/加载内嵌 GDT → 跳 code32_start | 不需要（都在保护模式/长模式） |
+| **模式切换** | GRUB 保护模式 → relocator 关分页/加载内嵌 GDT → 按 code32_start 字段跳转 | 不需要（都在保护模式/长模式） |
 | **环境准备** | relocator 代码设置寄存器、段等 | EFI 固件自动处理 |
 
 ### GRUB loader 机制和 boot 命令
@@ -1851,7 +1851,7 @@ grub_loader_set (grub_err_t (*boot) (void),
    relocator 代码执行：
      1. 复制内核 2 从临时缓冲区（16MB+）→ 0x100000 (1MB)
      2. jumper 跳到安全区；安全区 relocator32 关分页、加载内嵌 GDT、设段后 ljmp
-     3. 跳转到内核 2 的 code32_start @ 0x100000 (1MB)
+     3. 按 code32_start 字段所存地址跳转到内核 2（通常为 0x100000 (1MB)）
    
    # 内核 1 不会被复制，因为它已经被卸载
    ```
@@ -2075,7 +2075,7 @@ grub_linux_boot()                  [grub-core/loader/i386/linux.c]
     ↓
 grub_relocator32_boot()            // 跳转到内核入口点
     ↓
-内核 code32_start
+内核入口（code32_start 字段所存地址）
 ```
 
 **隐式执行 boot 的代码与流程：**
@@ -2138,7 +2138,7 @@ menuentry "Linux 5.x.x" {
 #    - 执行 relocator 代码：
 #      a. 将内核从临时缓冲区（16MB+）复制到 0x100000 (1MB)
 #      b. jumper 跳到安全区；安全区 relocator32 关分页、加载内嵌 GDT、设段后 ljmp
-#      c. 跳转到内核入口点（code32_start @ 0x100000 (1MB)）
+#      c. 按 code32_start 字段所存地址跳转到内核入口（通常 0x100000 (1MB)）
 ```
 
 ### grub_linux_boot() 函数
@@ -2148,7 +2148,7 @@ menuentry "Linux 5.x.x" {
 **功能概要：**
 - 设置视频模式（gfxpayload、setup_video、屏幕信息）
 - 在 0x10000–0x90000 内分配 real_mode 区域，构建 boot_params 副本（含 cmdline、e820）
-- 设置 relocator32 的 state（esi、esp、eip=code32_start），调用 `grub_relocator32_boot()` 完成复制到 0x100000 并跳转内核
+- 设置 relocator32 的 state（esi、esp、eip = code32_start 字段的值），调用 `grub_relocator32_boot()` 完成复制到 0x100000 并按该地址跳转
 
 **grub_linux_boot() 完整执行过程（展开分析，对应源码顺序）：**
 
@@ -2165,14 +2165,14 @@ menuentry "Linux 5.x.x" {
 | 9 | 581–586 | **`ctx.params = real_mode_mem`**；**`*ctx.params = linux_params`**（整块 boot_params 拷入 real_mode 区）；`ctx.params->hdr.cmd_line_ptr = ctx.real_mode_target + cl_offset`；`grub_memcpy ((char *)ctx.params + cl_offset, linux_cmdline, maximal_cmdline_size)` 写入命令行。 |
 | 10 | 591–596 | `grub_mmap_iterate (grub_linux_boot_mmap_fill, &ctx)` 填 **e820 表** 到 `ctx.params->e820_table`，并设 `ctx.params->e820_entries`。 |
 | 11 | EFI 分支 598–640 | 若 EFI：`grub_efi_finish_boot_services()`；根据内核版本填 `efi_info.v0204/v0206/v0208`（efi_memmap 等）。 |
-| 12 | 642–652 | 若 x86_64 EFI 且内核支持 64 位：`state64.rsi = ctx.real_mode_target`，`state64.rip = code32_start + LINUX_X86_STARTUP64_OFFSET`，**`return grub_relocator64_efi_boot (relocator, state64)`**（不走到 relocator32）。 |
-| 13 | 655–661 | **BIOS/非 EFI 或 32 位路径**：`state.ebp = state.edi = state.ebx = 0`；`state.esi = ctx.real_mode_target`（boot_params 物理地址）；`state.esp = ctx.real_mode_target`；**`state.eip = ctx.params->hdr.code32_start`**（内核入口）；**`return grub_relocator32_boot (relocator, state, 0)`**。 |
+| 12 | 642–652 | 若 x86_64 EFI 且内核支持 64 位：`state64.rsi = ctx.real_mode_target`，`state64.rip = ctx.params->hdr.code32_start + LINUX_X86_STARTUP64_OFFSET`（读取 code32_start 字段值），**`return grub_relocator64_efi_boot (relocator, state64)`**（不走到 relocator32）。 |
+| 13 | 655–661 | **BIOS/非 EFI 或 32 位路径**：`state.ebp = state.edi = state.ebx = 0`；`state.esi = ctx.real_mode_target`（boot_params 物理地址）；`state.esp = ctx.real_mode_target`；**`state.eip = ctx.params->hdr.code32_start`**（读取 code32_start 字段的值作为入口地址）；**`return grub_relocator32_boot (relocator, state, 0)`**。 |
 
 **要点：**
 
 - **real_mode 区**：boot 时在 0x10000–0x90000 内分配，用于放置 **boot_params 的副本**（含 cmdline、e820、screen_info 等），**不是**内核镜像；内核仍在 `prot_mode_mem`（临时缓冲区），由 relocator 复制到 0x100000。
 - **relocator 复用**：`grub_cmd_linux()` 创建的 **同一个 relocator** 在 `grub_linux_boot()` 里再次使用：先 `grub_relocator_alloc_chunk_addr` 在 real_mode_target 分配 boot_params 区，再 `grub_relocator32_boot(relocator, state, 0)` 时 relocator 内部会复制内核到 0x100000 并跳转 `state.eip`。
-- **code32_start**：在 `grub_cmd_linux()` 里已根据 `prot_mode_target` 算好并写入 `linux_params.hdr.code32_start`；`grub_linux_boot()` 只是把整块 `linux_params` 拷到 `ctx.params`，故 **`state.eip = ctx.params->hdr.code32_start`**。
+- **code32_start 字段**：在 `grub_cmd_linux()` 里已根据 `prot_mode_target` 算好并写入 `linux_params.hdr.code32_start`（该字段是数据，存 32 位入口物理地址）；`grub_linux_boot()` 把整块 `linux_params` 拷到 `ctx.params`，故 **`state.eip = ctx.params->hdr.code32_start`**（EIP 取该字段的值）。
 
 **精简代码示意（与源码一致）：**
 
@@ -2214,11 +2214,39 @@ static grub_err_t grub_linux_boot (void)
 
 **概要**：在安全区 (0x1000-0x9a000) 分配 chunk，拷贝 relocator32 副本，调用 `grub_relocator_prepare_relocs()` 生成 movers_chunk（复制内核 + jumper），再跳转到 movers_chunk；执行顺序、两处代码来源、为何动态生成、为何必须复制等详见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
 
-**⚠️ 关键问题解答（简要）**：relocator 代码对应 relocator32.S（安全区）与 relocator_asm.S/relocator_common_c.c（movers_chunk）；复制到安全区是因 GRUB 在 0x100000 (1MB)+ 会被内核覆盖；不能直接跳 code32_start 因需先关分页、加载内嵌 GDT、设段与寄存器。详述见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
+**⚠️ 关键问题解答（简要）**：relocator 代码对应 relocator32.S（安全区）与 relocator_asm.S/relocator_common_c.c（movers_chunk）；复制到安全区是因 GRUB 在 0x100000 (1MB)+ 会被内核覆盖；不能直接按 code32_start 字段跳转因需先关分页、加载内嵌 GDT、设段与寄存器。详述见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)。
 
 ### code32_start 地址的来源和传递过程
 
-**1. `code32_start` 的来源：**
+**0. code32_start 是数据字段（与上文一致）**  
+`code32_start` 是 boot protocol 头中的**数据字段**（仅一个 32 位值），在 Linux 中定义于 `arch/x86/boot/header.S`（标签 `code32_start:`，默认 `.long 0x100000`）。该字段**存储** 32 位保护模式入口的物理地址；**该地址处**的代码在 `arch/x86/boot/compressed/head_64.S`（如 startup_32）。从扇区 0 启动时，Setup 在 `arch/x86/boot/pm.c` 中调用 `protected_mode_jump(boot_params.hdr.code32_start, ...)`，**读取该字段的值**后切保护模式并跳转到该地址。
+
+**code32_start 字段与 startup_32：源码中无直接联系**
+
+在源码里**没有任何一行**把 code32_start 和 startup_32 连在一起（没有“code32_start = startup_32”或引用 startup_32 的 patch）。对应关系完全靠**约定 + 链接布局**，不是靠代码引用。
+
+1. **约定**：boot protocol 规定保护模式部分（压缩内核）加载到 **0x100000**（LOADED_HIGH）；文档说明 code32_start “defaults to the load address of the kernel”（Documentation/arch/x86/boot.rst）。即默认值 0x100000 表示“32 位入口的物理地址 = 压缩部分的加载基址”。
+
+2. **压缩内核链接布局**（源码：`arch/x86/boot/compressed/vmlinux.lds.S`，**不是**主内核的 `arch/x86/kernel/vmlinux.lds.S`）：
+   - **vmlinux.lds.S**：`. = 0`，第一个段是 `.head.text`（`HEAD_TEXT`），随后才是 `.text` 等；`#ifdef CONFIG_X86_64` 时 `ENTRY(startup_64)`，`#else` 时 `ENTRY(startup_32)`。`.head.text` 里最先放的是 **startup_32**（head_64.S 或 head_32.S），故 **startup_32 在压缩镜像内的链接地址为 0**。
+   - **head_64.S**：注释写明 “32bit entry is 0 and it is ABI so immutable!”（约 83–84 行）；`rva(X) = (X) - startup_32` 表示“相对 startup_32 的偏移”，因为 startup_32 在 0。
+   - 压缩 vmlinux 用 **-pie** 链接（Makefile 里 `LDFLAGS_vmlinux := -pie ...`），没有 -Ttext 0x100000，所以**链接时** .head.text 从 0 开始，**startup_32 在偏移 0**。
+   - header.S（setup）和压缩 vmlinux **分开编译**（setup.bin 与 compressed/vmlinux 分别生成再拼成 bzImage），header.S 里只有 `.long 0x100000`，**不会**在构建时填入 startup_32 的地址。
+
+3. **为何“对得上”**：保护模式部分按约定加载到物理地址 **0x100000**，其**第一个字节**就是压缩镜像的偏移 0，即 **startup_32**。所以 **code32_start 字段的默认值 0x100000 = 加载基址 + 0 = 运行时 startup_32 的物理地址**。只要遵守“压缩部分加载到 0x100000”和“压缩部分入口在偏移 0”的 ABI，该字段所存地址与 startup_32 自然一致；**没有**任何代码“把 startup_32 的地址写进 code32_start”。
+
+**phys_startup_32 如何指向实际入口 startup_32（主内核，有显式代码）**
+
+解压后的**主内核**（`arch/x86/kernel/`）是另一套：这里**有**显式联系。
+
+- **链接脚本**（`arch/x86/kernel/vmlinux.lds.S`）：
+  - 第 18 行：`#define LOAD_OFFSET __START_KERNEL_map`（主内核按高地址链接）。
+  - 第 125 行（CONFIG_X86_32）：`phys_startup_32 = ABSOLUTE(startup_32 - LOAD_OFFSET);`
+  - 第 127 行（CONFIG_X86_64）：`phys_startup_64 = ABSOLUTE(startup_64 - LOAD_OFFSET);`
+- **含义**：`startup_32` / `startup_64` 是主内核里的**符号**（如 `arch/x86/kernel/head_32.S` 第 65 行 `SYM_CODE_START(startup_32)`、`head_64.S` 第 38 行 `SYM_CODE_START_NOALIGN(startup_64)`）。链接器给这些符号分配虚拟地址（如 0xffffffff81000000）；`LOAD_OFFSET` 是虚拟基址，所以 **startup_32 - LOAD_OFFSET = 该符号的物理地址**。`phys_startup_32` 被**显式定义**为这个物理地址，ENTRY(phys_startup_32) 表示可执行文件入口是该地址。
+- **与 code32_start 的区别**：code32_start 是 boot protocol 里的**数据字段**，和压缩内核的 startup_32 **没有**代码引用关系，只靠约定对齐；phys_startup_32 是主内核链接脚本里的**符号定义**，直接引用同一链接单元内的 startup_32 符号，由链接器算出物理地址。
+
+**1. code32_start 字段在 GRUB 侧的设置：**
 
 在 `grub_cmd_linux()` 中计算（步骤 10）：
 
@@ -2230,7 +2258,7 @@ linux_params.code32_start = prot_mode_target +
                             GRUB_LINUX_BZIMAGE_ADDR;
 // 其中：
 // - prot_mode_target: 内核实际加载地址（通常是 0x100000 (1MB)）
-// - lh.code32_start: 内核头部中的字段，表示相对于 0x100000 (1MB) 的偏移
+// - lh.code32_start: 内核头部中的数据字段（32 位值），表示当镜像加载在 0x100000 时 32 位入口的物理地址（即 0x100000 或 0x100000+偏移）
 // - GRUB_LINUX_BZIMAGE_ADDR: 0x100000 (1MB)
 ```
 
@@ -2239,7 +2267,7 @@ linux_params.code32_start = prot_mode_target +
 在 `grub_linux_boot()` 中设置（见上表步骤 13）：
 
 ```c
-state.eip = ctx.params->hdr.code32_start;  // 从 boot_params 副本中读取 code32_start
+state.eip = ctx.params->hdr.code32_start;  // 读取 code32_start 字段的值
 ```
 
 **3. `grub_relocator32_eip` 的存储：**
@@ -2260,15 +2288,15 @@ relocator32_start:
     ; 3. 从 grub_relocator32_eip 读取地址
     mov eax, [grub_relocator32_eip]  ; 读取目标地址
     mov [esp], eax                    ; 准备跳转
-    ; 4. 跳转到内核入口点（此时 EIP = code32_start）
-    jmp eax                           ; 跳转，EIP 寄存器被设置为 code32_start
+    ; 4. 跳转到 code32_start 字段所存地址（EIP = 该字段的值）
+    jmp eax                           ; 跳转，EIP 寄存器被设置为该地址
 ```
 
 **关键点总结：**
-- **地址来源**：`code32_start` 在 `grub_cmd_linux()` 中计算，存储在 `boot_params` 中
-- **传递路径**：`boot_params.code32_start` → `state.eip` → `grub_relocator32_eip`
-- **加载时机**：relocator 代码执行时，从 `grub_relocator32_eip` 读取并加载到 EIP 寄存器
-- **最终结果**：CPU 的 EIP 寄存器指向内核入口点（`code32_start`），开始执行内核代码
+- **code32_start 是数据**：在 `grub_cmd_linux()` 中计算并写入 `boot_params.hdr.code32_start`（该字段存 32 位入口物理地址）
+- **传递路径**：`boot_params.hdr.code32_start` 的值 → `state.eip` → `grub_relocator32_eip`
+- **跳转时**：relocator 代码执行时，从 `grub_relocator32_eip` 读取该地址并跳转
+- **最终结果**：CPU 的 EIP 寄存器指向 code32_start 字段所存地址处的代码（如 startup_32），开始执行内核
 
 ### 内存布局和启动参数
 
@@ -2289,13 +2317,13 @@ relocator32_start:
 
 **⚠️ 关键问题：内核覆盖 GRUB 代码后如何完成跳转？**
 
-内核被加载到 0x100000 (1MB)+，与 GRUB 代码区域重叠；GRUB 通过 **relocator 机制**（安全区 0x1000–0x9a000 存放 relocator32 副本，movers_chunk 在 16MB+ 复制内核到 0x100000，jumper 跳到安全区后 relocator32 关分页、加载内嵌 GDT、设段并 ljmp 到 code32_start）完成跳转。安全区分配、relocator32 与 movers_chunk 执行顺序、内存布局、为何有效等详见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 与上文「流程概述」「Relocator 概要」「grub_relocator32_boot() 函数」。
+内核被加载到 0x100000 (1MB)+，与 GRUB 代码区域重叠；GRUB 通过 **relocator 机制**（安全区 0x1000–0x9a000 存放 relocator32 副本，movers_chunk 在 16MB+ 复制内核到 0x100000，jumper 跳到安全区后 relocator32 关分页、加载内嵌 GDT、设段并按 code32_start 字段所存地址 ljmp）完成跳转。安全区分配、relocator32 与 movers_chunk 执行顺序、内存布局、为何有效等详见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 与上文「流程概述」「Relocator 概要」「grub_relocator32_boot() 函数」。
 
 **内核启动参数传递：**
 
 GRUB 通过 `boot_params` 结构（Linux Boot Protocol）向内核传递参数：
 
-- **`code32_start`**：内核入口点地址（传递给内核，内核从这里开始执行）
+- **`code32_start` 字段**：boot protocol 头中的数据（32 位值），存 32 位入口物理地址；GRUB 将该值写入 boot_params，跳转时读取该值作为 EIP
 - **`cmd_line_ptr`**：内核命令行参数地址（如 `root=/dev/sda1`）
 - **`ramdisk_image`**：initramfs 地址（由 GRUB 的 `grub_cmd_initrd()` 设置）
 - **`ramdisk_size`**：initramfs 大小（由 GRUB 的 `grub_cmd_initrd()` 设置）

@@ -317,6 +317,6 @@ grub_cpu_relocator_jumper (void *rels, grub_addr_t addr)
 
 ## 5. 与 GRUB_RELOCATOR.md 的对应关系
 
-- **执行顺序、内存布局、为何必须 relocate**：见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 的「Relocator 执行总览」「为什么在 BIOS + 实模式下一定要有 relocate 过程？」。
+- **执行顺序、内存布局、为何必须 relocate**：见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 的「Relocator 执行总览」「为什么在 BIOS/Legacy 下一定要有 relocate 过程？」。
 - **grub_relocator32_boot()**、**为何要复制、UEFI、涉及代码一览** 等：见 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 的「grub_relocator32_boot() 函数」「关键问题解答」等小节。
 - **编译在何处、如何编译、C 侧含义、grub_relocator_prepare_relocs() 具体实现（运行时细节）**：本文档。
