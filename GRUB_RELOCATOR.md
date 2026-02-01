@@ -8,6 +8,7 @@
 |------|------|
 | **为什么在 BIOS/Legacy 下一定要有 relocate 过程？** | 0x100000 冲突、为何必须两阶段、为何 relocator 必须在 1MB 以下、与 UEFI 对比 |
 | **Relocator 执行总览** | 从 boot 到内核的完整流程（含构建时 vs 运行时、步骤 1–5）、两处代码来源对照表 |
+| **relocator32.S 代码分析** | 执行顺序（PREAMBLE/RELOAD_GDT/DISABLE_PAGING/设段与寄存器/ljmp）、功能概要、GDT 见问题 1 |
 | **grub_relocator32_boot() 函数** | 入口函数、安全区分配、设置 eip/esi、拷贝 relocator32、调用 prepare_relocs、跳转 movers_chunk |
 | **Relocator 数据结构与分配** | allocate_pages、0x100000 分配失败原因、16MB+ 临时缓冲区、relocator_alloc_chunk_align |
 | **grub_relocator_prepare_relocs() 与动态生成** | movers_chunk 生成、forward/backward 模板、C 侧设置全局变量与拷贝、jumper、执行顺序 |
@@ -131,6 +132,16 @@ grub_relocator32_boot(...)     [relocator.c]，执行于 GRUB 0x100000 (1MB)+
 | ↳ forward/backward（movers_chunk 内） | relocator_asm.S 模板拷贝进 movers_chunk（**构建时**已编译进 GRUB，**boot 时** C 侧设全局变量并拷贝模板到 movers_chunk） | `grub-core/lib/i386/relocator_asm.S` | `grub_relocator_forward_start`～`_end`、`grub_relocator_backward_start`～`_end`；由 `grub_cpu_relocator_forward/backward(rels, ...)` 拷贝 |
 | ↳ jumper（movers_chunk 内） | C 写入机器码 | `grub-core/lib/i386/relocator_common_c.c` | `grub_cpu_relocator_jumper(rels, addr)` |
 
+---
+
+### relocator32.S 代码分析
+
+**源码位置**：`grub-core/lib/i386/relocator32.S`（含 `#include "relocator_common.S"`，RELOAD_GDT、PREAMBLE、DISABLE_PAGING 等宏在 relocator_common.S 中定义）。
+
+**执行顺序（与 relocator_common.S 宏）**：jumper 跳入安全区后从 `grub_relocator32_start` 执行：**PREAMBLE**（计算当前基址并跳 cont0）→ **RELOAD_GDT**（填 gdtdesc、`lgdt`、`ljmp` 更新 CS 到 cont1）→ `.code32` → `movl $DATA_SEGMENT, %eax` 再赋给 ds/es/fs/gs/ss → **DISABLE_PAGING**（清 CR0 分页位）→ 可选清 CR4 PAE、清 amd64 MSR → 从 **VARIABLE(grub_relocator32_esp/ebp/esi/edi/eax/ebx/ecx/edx)** 读值并赋给对应寄存器 → `cld` → **远跳转**（`.byte 0xea` + `grub_relocator32_eip` + `CODE_SEGMENT`）到 code32_start。文件末尾内联 **GDT**（NULL、Reserved、Code 0x10、Data 0x18），由 RELOAD_GDT 宏中的 `lgdt` 加载。
+
+**功能概要**：关分页、加载内嵌 GDT、设段与寄存器（含 ESI = boot_params、EIP 目标 = code32_start）、ljmp 到内核；不负责复制内核，复制在 movers_chunk 的 forward/backward 中完成。GDT 表内容与 Code/Data 段用途见下文「关键问题解答」问题 1 内「relocator32 内嵌 GDT 说明」。
+
 下文按：入口函数 `grub_relocator32_boot()`、数据结构与分配、`grub_relocator_prepare_relocs()` 与动态生成、关键问题解答与为何必须复制内核，展开实现细节。
 
 ---
@@ -147,11 +158,16 @@ grub_relocator32_boot(...)     [relocator.c]，执行于 GRUB 0x100000 (1MB)+
 **完整源代码分析：**
 
 ```c
-// grub/grub-core/lib/i386/relocator.c
-grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state state, ...)
+// grub/grub-core/lib/i386/relocator.c:75-117
+grub_err_t
+grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state state,
+                       int avoid_efi_bootservices)
 {
-    // 步骤 1: 在安全区域（0x1000-0x9a000）分配内存
-    // 这个区域在 1MB 以下，不会被加载到 0x100000 (1MB)+ 的内核覆盖
+    grub_err_t err;
+    void *relst;
+    grub_relocator_chunk_t ch;
+
+    // 步骤 1: 在安全区域（0x1000-0x9a000）分配 chunk
     err = grub_relocator_alloc_chunk_align_safe (rel, &ch,
         0x1000,   // 最小地址
         0x9a000,  // 最大地址（1MB 以下的安全区域）
@@ -159,39 +175,63 @@ grub_relocator32_boot (struct grub_relocator *rel, struct grub_relocator32_state
         16,       // 对齐
         GRUB_RELOCATOR_PREFERENCE_LOW,
         avoid_efi_bootservices);
-    
-    relocator_mem = get_virtual_current_address (ch);  // 获取安全区域的虚拟地址
-    
-    // 步骤 2: 设置寄存器值
-    // grub_relocator32_eip 是 relocator 代码中的一个全局变量
-    // 用于存储目标跳转地址，relocator 代码执行时会读取这个变量并加载到 EIP
-    grub_relocator32_eip = state.eip;  // 内核入口点地址（code32_start）
-    grub_relocator32_esi = state.esi;  // boot_params 地址
-    
-    // 步骤 3: 将 relocator32.S 编译后的机器码复制到安全区域（此时尚未执行；先执行的是步骤 5 跳入的 movers_chunk）
+    // 功能：
+    //   - 在 1MB 以下的常规内存中分配一块，用于存放 relocator32 的副本
+    //   - 该区域不会被“复制到 0x100000”的内核覆盖，relocator32 执行时安全
+    //   - 地址与大小符合 Linux/x86 Boot Protocol 对 real_mode 区的约定
+    // 源代码位置：grub-core/lib/relocator.c:grub_relocator_alloc_chunk_align_safe()
+
+    if (err)
+        return err;
+
+    // 步骤 2: 设置 relocator32 将使用的寄存器值（写入全局变量，安全区执行时读取）
+    grub_relocator32_eax = state.eax;
+    grub_relocator32_ebx = state.ebx;
+    grub_relocator32_ecx = state.ecx;
+    grub_relocator32_edx = state.edx;
+    grub_relocator32_eip = state.eip;   // 内核入口点（code32_start）
+    grub_relocator32_esp = state.esp;
+    grub_relocator32_ebp = state.ebp;
+    grub_relocator32_esi = state.esi;   // boot_params 地址
+    grub_relocator32_edi = state.edi;
+    // 功能：
+    //   - 上述变量在 relocator32.S 中通过 VARIABLE() 引用，编译为“mov imm32, reg”的立即数
+    //   - 安全区中 relocator32 执行时从这些“位置”读入 esp/ebp/esi/edi/eax/ebx/ecx/edx 和 ljmp 目标
+    // 源代码位置：grub-core/lib/i386/relocator32.S（VARIABLE(grub_relocator32_*)）
+
+    // 步骤 3: 将 relocator32.S 编译后的机器码复制到安全区域
     grub_memmove (get_virtual_current_address (ch), &grub_relocator32_start,
                   RELOCATOR_SIZEOF (32));
-    
-    // 步骤 4: grub_relocator_prepare_relocs() 组装 movers_chunk（无编译）
-    // movers_chunk 内容：preamble（i386-pc 为空）+ forward/backward 模板（构建时已编译进 GRUB）+ jumper（C 写机器码）。
-    // boot 时仅拷贝已编译的 forward/backward 模板到 movers_chunk、设全局变量 dest/src/size、写 jumper 目标地址，非运行时编译。
-    // 执行效果：preamble → forward/backward（从 src 16MB+ 复制到 target 0x100000）→ jumper 跳入安全区，再由 relocator32 关分页、加载内嵌 GDT、设段后 ljmp 到内核。
-    //
-    // relocator 由两处组成，执行顺序固定：
-    // - 步骤 5 跳入的是 movers_chunk（relst），不是安全区。movers_chunk 内：preamble → forward/backward（复制内核/initrd 到 0x100000）→ jumper 跳入安全区。
-    // - 安全区里是 relocator32.S 编译后代码的副本（步骤 3 拷贝进去），不负责复制；只负责关分页、加载内嵌 GDT、设段与寄存器、ljmp 到 code32_start。
-    // 因此：先执行 movers_chunk，再由 jumper 转到安全区执行 relocator32 副本，最后 ljmp 到内核。
-    err = grub_relocator_prepare_relocs (rel, 
-                                         get_physical_target_address (ch),  // 安全区域的物理地址
-                                         &relst,  // 输出：构建好的 relocator 代码地址
-                                         NULL);
-    
-    // 步骤 5: 执行跳转（跳转到 movers_chunk（relst），入口不是 relocator32；relocator32 在 jumper 跳入安全区后才执行）
-    // cli：跳转前显式关可屏蔽中断，避免在“离开 GRUB → 复制到 0x100000 → relocator32 关分页/换 GDT → 跳内核”过渡期内发生中断；
-    // 此阶段 GRUB 的 IDT/中断处理可能已失效或被覆盖，若中断发生会导致未定义行为。与 GRUB 是否默认开中断无关，属过渡期安全措施。
+    // 功能：
+    //   - 把 GRUB 二进制中已有的 relocator32 机器码拷贝到步骤 1 分配的安全区
+    //   - 此时尚未执行；先执行的是步骤 5 跳入的 movers_chunk，jumper 再跳入此处
+    // ⚠️ 注意：boot 时不编译，仅拷贝构建时已编入 core 的机器码
+    // 源代码位置：grub-core/lib/i386/relocator32.S（grub_relocator32_start～_end）
+
+    // 步骤 4: 组装 movers_chunk（分配缓冲区、排序 chunk、拷贝 forward/backward 模板、写 jumper）
+    err = grub_relocator_prepare_relocs (rel, get_physical_target_address (ch), &relst, NULL);
+    // 功能：
+    //   - 在 16MB+ 或 modend 以上分配 movers 缓冲区
+    //   - 对 rel->chunks 按 src 排序，按序写入 preamble（i386-pc 为空）、forward/backward 模板、jumper
+    //   - forward/backward 为构建时已编译模板，boot 时仅拷贝并设全局变量 dest/src/size；jumper 由 C 写机器码（mov + jmp）
+    //   - relst 输出为 movers_chunk 起始地址，步骤 5 将跳入此处，入口不是安全区 relocator32
+    // ⚠️ 注意：无运行时编译；执行顺序为 movers_chunk（复制到 0x100000）→ jumper 跳安全区 → relocator32（关分页/加载 GDT/设段/ljmp 到 code32_start）
+    // 源代码位置：grub-core/lib/relocator.c:grub_relocator_prepare_relocs()；模板见 relocator_asm.S、relocator_common_c.c
+
+    if (err)
+        return err;
+
+    // 步骤 5: 关可屏蔽中断并跳转到 movers_chunk（relst）
     asm volatile ("cli");
-    ((void (*) (void)) relst) ();  // 跳转到 movers_chunk（relst）
-    // relocator 代码执行顺序：见上文「Relocator 执行总览」；安全区 relocator32 为关分页、加载内嵌 GDT、设段与寄存器、ljmp 到 code32_start（32 位保护模式入口）。
+    ((void (*) (void)) relst) ();
+    // 功能：
+    //   - cli：过渡期内（离开 GRUB → 复制到 0x100000 → relocator32 关分页/换 GDT → 跳内核）禁止可屏蔽中断，避免 IDT/处理程序失效时发生中断导致未定义行为
+    //   - relst()：跳转到 movers_chunk 执行，入口不是 relocator32；relocator32 在 jumper 跳入安全区后才执行
+    // ⚠️ 注意：与 GRUB 是否默认开中断无关，属过渡期安全措施
+    // 源代码位置：relocator.c 同上；relocator 执行顺序见本文「Relocator 执行总览」
+
+    /* Not reached.  */
+    return GRUB_ERR_NONE;
 }
 ```
 
@@ -428,17 +468,9 @@ grub_modbase = GRUB_MEMORY_MACHINE_DECOMPRESSION_ADDR + (_edata - _start);
 
 **问题 1：relocator 代码具体对应哪个文件？**
 
-**答案：** 安全区中执行的是 **relocator32.S** 编译后代码的副本，源码 `grub/grub-core/lib/i386/relocator32.S`。复制内核的代码来自 relocator_asm.S 与 relocator_common_c.c，在 movers_chunk 中，见下文「两处 relocator 代码来源对照」。
+**答案：** 安全区中执行的是 **relocator32.S** 编译后代码的副本，源码 `grub/grub-core/lib/i386/relocator32.S`。复制内核的代码来自 relocator_asm.S 与 relocator_common_c.c，在 movers_chunk 中，见上文「两处 relocator 代码来源对照」。relocator32.S 的执行顺序与功能见上文「relocator32.S 代码分析」。
 
 **编译过程**：relocator32.S 在 **GRUB 构建时**（`make`）由 Makefile 纳入 relocator 模块（`grub-core/Makefile.core.def` 中 `x86 = lib/i386/relocator32.S` 等），经 as/gcc 编译、链接进 GRUB core，生成符号 `grub_relocator32_start`～`_end`。**boot 时不编译**，`grub_relocator32_boot()` 里只是 `grub_memmove(安全区, &grub_relocator32_start, RELOCATOR_SIZEOF(32))`，把 GRUB 二进制里已有的机器码拷贝到安全区。编译与运行时的完整区分见 [GRUB_RELOCATOR_BUILD_AND_RUNTIME.md](GRUB_RELOCATOR_BUILD_AND_RUNTIME.md)。
-
-relocator32.S 是一个汇编源文件，包含以下关键功能：
-- 关分页、加载 relocator 内嵌的 GDT，切换到内核期望的 32 位保护模式状态
-- 设置段寄存器（CS、DS、ES、SS）与栈指针（ESP）
-- 从全局变量读取目标地址（`grub_relocator32_eip`）与 boot_params（`grub_relocator32_esi`）
-- 执行远跳转（`ljmp`）到内核入口点（code32_start，如 startup_32）
-
-**源代码位置：** `grub/grub-core/lib/i386/relocator32.S`
 
 **relocator32 内嵌 GDT 说明（源码依据）**
 
