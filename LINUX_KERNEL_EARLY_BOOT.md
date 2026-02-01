@@ -46,41 +46,35 @@ grub_relocator32_boot() 按 code32_start 字段所存地址跳转
   - **x86_32（CONFIG_EFI_MIXED）**：`linux/arch/x86/boot/startup/efi-mixed.S` 第 **219** 行，`SYM_FUNC_START(efi32_pe_entry)`  
   PE 头中 AddressOfEntryPoint 在 header.S 中设为 `setup_size + ZO_efi_pe_entry`（64 位）或 `.compat` 中 `setup_size + ZO_efi32_pe_entry`（32 位）。
 
-**压缩内核解压代码（startup_32）：**
+**压缩内核解压代码（startup_32）→ startup_64 → x86_64_start_kernel：**
+
+```
+压缩内核解压代码（startup_32）
     ├─ 源代码位置：linux/arch/x86/boot/compressed/head_64.S
     ├─ 运行模式：32 位保护模式 → 64 位长模式
-    ├─ **切换到 64 位长模式的关键步骤**（源代码位置：`linux/arch/x86/boot/compressed/head_64.S`）：
+    ├─ 切换到 64 位长模式的关键步骤（head_64.S）：
     │   ├─ 步骤 1: 设置页表（身份映射：物理地址 = 线性地址）
-    │   ├─ 步骤 2: 启用 PAE（Physical Address Extension）
-    │   │   └─ 设置 CR4.PAE = 1（必须，长模式需要 PAE）
+    │   ├─ 步骤 2: 启用 PAE（CR4.PAE = 1）
     │   ├─ 步骤 3: 加载页表基址到 CR3
-    │   │   └─ `mov %eax, %cr3`（设置页表基址）
     │   ├─ 步骤 4: 启用长模式（EFER.LME = 1）
-    │   │   └─ 使用 `wrmsr` 设置 EFER MSR 寄存器
     │   ├─ 步骤 5: 启用分页（CR0.PG = 1）
-    │   │   └─ `mov %eax, %cr0`（设置 CR0.PG 位）
-    │   └─ 步骤 6: 跳转到 64 位代码段
-    │       └─ `ljmp $__KERNEL_CS, $startup_64`（使用 64 位代码段选择子）
-    ├─ **解压内核（gzip 解压）**：
-    │   ├─ 解压 vmlinuz 文件中的压缩内核代码部分
-    │   ├─ 解压目标：0x100000+（覆盖压缩代码区域）
-    │   └─ 这是**第一次解压**，由内核自己的代码完成
+    │   └─ 步骤 6: 跳转到 64 位代码段（ljmp $__KERNEL_CS, $startup_64）
+    ├─ 解压内核（gzip 解压）：解压目标 0x100000+，由内核代码完成
     └─ 跳转到 startup_64
         ↓
 startup_64（64 位内核入口点，已切换到长模式）
     ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
     ├─ 运行模式：64 位长模式
-    ├─ 保存 boot_params 结构地址（%RSI → %R15）
-    ├─ 设置初始内核栈
-    ├─ 设置 GS 段基址（per-CPU 数据）
-    ├─ 设置 GDT 和早期 IDT
-    ├─ 切换到内核代码段（__KERNEL_CS）
-    ├─ 激活内存加密（SEV/SME，如果支持）
-    ├─ 验证和清理 CPU 配置（verify_cpu）
+    ├─ 保存 boot_params（%RSI → %R15）、设置初始内核栈、GS 段基址
+    ├─ 设置 GDT 和早期 IDT、切换到内核代码段（__KERNEL_CS）
+    ├─ 激活内存加密（SEV/SME，若支持）、验证 CPU（verify_cpu）
     └─ 继续内核初始化流程
         ↓
-x86_64_start_kernel（head64.c）：早期 IDT、TDX、copy_bootdata、微码、高地址映射等 → x86_64_start_reservations → start_kernel()  
-（早期 IDT 设置详见 [LINUX_KERNEL_INTERRUPT_TAKEOVER.md](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)；start_kernel() 详见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)）
+x86_64_start_kernel（head64.c）：早期 IDT、TDX、copy_bootdata、微码、高地址映射等
+    → x86_64_start_reservations → start_kernel()
+```
+
+（早期 IDT 详见 [LINUX_KERNEL_INTERRUPT_TAKEOVER.md](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)；start_kernel() 详见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)）
 
 **Linux 内核切换到 64 位长模式的详细代码：**
 
