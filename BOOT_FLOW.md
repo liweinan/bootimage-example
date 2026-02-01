@@ -27,7 +27,8 @@
 
 层级 2: 详细分析文档
   ├─ GRUB_KERNEL_LOADING.md - GRUB 加载内核完整流程
-  ├─ LINUX_KERNEL_EARLY_BOOT.md - 内核早期启动详细分析
+  ├─ LINUX_KERNEL_EARLY_BOOT.md - 内核早期启动（不走 Setup）
+  ├─ LINUX_KERNEL_SETUP_FLOW.md - 从扇区 0 启动时的 Setup 流程
   ├─ LINUX_KERNEL_INIT.md - start_kernel() 初始化
   └─ LINUX_KERNEL_INTERRUPT_TAKEOVER.md - 中断系统接管
 
@@ -63,8 +64,19 @@
 
 这些文档提供各启动阶段的完整源代码分析和实现细节：
 
+**阅读说明（三篇内核文档按启动顺序）**：
+
+| 顺序 | 文档 | 对应的大致时机 |
+|------|------|----------------|
+| 1 | LINUX_KERNEL_EARLY_BOOT.md | GRUB 交权 → startup_32 → startup_64 → x86_64_start_kernel（含早期 IDT）→ 调用 start_kernel() |
+| 2 | LINUX_KERNEL_INTERRUPT_TAKEOVER.md | 早期 IDT：在 1 的末尾（x86_64_start_kernel）；PIC/APIC/syscall：与 3 重叠（start_kernel() 及之后） |
+| 3 | LINUX_KERNEL_INIT.md | start_kernel() 及之后 |
+
+按启动先后：**早期启动 → 中断接管（跨早期末尾与 init）→ 内核初始化**；文档主线顺序为 EARLY_BOOT → INTERRUPT_TAKEOVER → INIT。
+
 - 📖 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md) - grub_main() 到内核入口点完整分析
-- 📖 [Linux 内核早期启动详细流程（64 位）](LINUX_KERNEL_EARLY_BOOT.md) - Setup 代码、模式切换、startup_64
+- 📖 [Linux 内核早期启动详细流程（64 位，不走 Setup）](LINUX_KERNEL_EARLY_BOOT.md) - 模式切换、startup_32/startup_64
+- 📖 [Linux 内核 Setup 流程（从扇区 0 启动）](LINUX_KERNEL_SETUP_FLOW.md) - header.S → main → go_to_protected_mode → startup_32
 - 📖 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md) - start_kernel()、PID 0/1/2、系统调用初始化
 - 📖 [Linux 内核中断系统接管](LINUX_KERNEL_INTERRUPT_TAKEOVER.md) - IDT 设置、PIC 重编程、APIC 配置
 - 📖 [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md) - IVT、中断服务程序、硬件初始化
@@ -2376,7 +2388,8 @@ grub_relocator32_boot() ────────→   code32_start 字段所存�
 vmlinuz（bzImage）包含：**Setup 代码**（未压缩，实模式）+ **压缩的内核代码**（gzip）。**从 GRUB 启动时**：GRUB 自填 boot_params，按 code32_start 字段所存地址跳转（该地址处为压缩内核入口），解压在 head_64.S 的 startup_32 等中完成；**从扇区 0 启动时**：先执行 Setup 再切保护模式，读取 code32_start 字段值并跳转。
 
 > 📖 **详细分析文档**：
-> - [Linux 内核早期启动详细流程（64 位）](LINUX_KERNEL_EARLY_BOOT.md) - Setup 代码、模式切换、startup_32/startup_64 完整源代码分析
+> - [Linux 内核早期启动详细流程（不走 Setup）](LINUX_KERNEL_EARLY_BOOT.md) - 模式切换、startup_32/startup_64
+> - [Linux 内核 Setup 流程（从扇区 0 启动）](LINUX_KERNEL_SETUP_FLOW.md) - Setup 代码、go_to_protected_mode
 > - [vmlinuz 文件详细结构分析](VMLINUZ_STRUCTURE.md) - bzImage 格式、boot_params 结构
 > - [Linux 内核初始化详解](LINUX_KERNEL_INIT.md) - start_kernel() 之后的初始化流程
 

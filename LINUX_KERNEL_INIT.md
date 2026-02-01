@@ -3,9 +3,11 @@
 本文档详细说明 Linux 内核从 `start_kernel()` 开始的初始化过程，包括进程创建、系统调用设置等核心功能的实现。
 
 > **相关文档**：
-> - **前置阶段**：关于 GRUB 跳转后的早期启动（Setup 代码、模式切换、startup_64），请参见 [Linux 内核早期启动详细流程](LINUX_KERNEL_EARLY_BOOT.md)
+> - **前置阶段**：关于 GRUB 跳转后的早期启动（从 GRUB 不执行 Setup、按 code32_start 字段跳转到压缩内核、模式切换、startup_64），请参见 [Linux 内核早期启动详细流程](LINUX_KERNEL_EARLY_BOOT.md)
 > - 关于启动流程概述，请参见 [BOOT_FLOW.md](BOOT_FLOW.md)
 > - 关于 GRUB 加载内核，请参见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)
+>
+> **阅读说明**：本系列三篇文档按启动顺序为 EARLY_BOOT → INTERRUPT_TAKEOVER → INIT；时间线简表见 [BOOT_FLOW.md 相关文档索引](BOOT_FLOW.md#相关文档索引)。
 
 ## start_kernel() 初始化流程
 

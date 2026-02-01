@@ -115,10 +115,10 @@ Linux 内核 EFI stub 代码（保护模式/长模式）
     ├─ 设置页表（身份映射：物理地址 = 线性地址）
     ├─ 切换到 64 位长模式
     ├─ 解压内核（gzip 解压）
-    └─ 跳转到 startup_64
+    └─ 跳转到同文件内 startup_64（64 位），解压后跳转主内核
         ↓
 startup_64（64 位内核入口点）
-    ├─ 源代码位置：linux/arch/x86/kernel/head_64.S
+    ├─ 源代码位置：压缩内核内 linux/arch/x86/boot/compressed/head_64.S；解压后进入主内核 linux/arch/x86/kernel/head_64.S（下述为主内核 startup_64 行为）
     ├─ 运行模式：64 位长模式
     ├─ 保存 boot_params 结构地址（%RSI → %R15）
     ├─ 设置初始内核栈
@@ -135,7 +135,7 @@ startup_64（64 位内核入口点）
     │   └─ 源代码位置：linux/arch/x86/kernel/idt.c
     ├─ TDX 早期初始化（tdx_early_init，如果支持）
     ├─ 复制引导数据（copy_bootdata）
-    ├─ 加载微码更新（load_ucode_boot）
+    ├─ 加载微码更新（load_ucode_bsp）
     ├─ 设置内核高地址映射
     └─ 启动内核预留区域初始化（x86_64_start_reservations）
         └─ 最终调用 start_kernel()
