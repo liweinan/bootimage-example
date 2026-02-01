@@ -2,7 +2,7 @@
 
 本文档详细说明 Linux 内核如何从 BIOS 接管中断系统，包括早期 IDT 设置、8259A PIC 重新编程、APIC 和中断门设置，以及 INT 0x80 系统调用的完整实现路径。
 
-> **相关文档**：启动流程概述见 [BOOT_FLOW.md](BOOT_FLOW.md)；GRUB 跳转与 code32_start 字段、压缩内核入口见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)、[LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)；start_kernel() 之后初始化见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)。
+> **相关文档**：启动流程概述见 [BOOT_FLOW.md](BOOT_FLOW.md)；GRUB 跳转与 code32_start 字段、压缩内核入口见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)、[LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)；start_kernel() 之后初始化见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)。若需了解内核**运行时**的中断处理模型（Top Half/Bottom Half、softirq/tasklet/workqueue），见 [Linux 内核中断处理：Top Half 和 Bottom Half](LINUX_INTERRUPT_HANDLING.md)。
 >
 > **阅读说明**：本系列三篇文档按启动顺序为 EARLY_BOOT → INTERRUPT_TAKEOVER → INIT；时间线简表见 [BOOT_FLOW.md 相关文档索引](BOOT_FLOW.md#相关文档索引)。
 

@@ -46,6 +46,10 @@ grub_relocator32_boot() 按 code32_start 字段所存地址跳转
   - **x86_32（CONFIG_EFI_MIXED）**：`linux/arch/x86/boot/startup/efi-mixed.S` 第 **219** 行，`SYM_FUNC_START(efi32_pe_entry)`  
   PE 头中 AddressOfEntryPoint 在 header.S 中设为 `setup_size + ZO_efi_pe_entry`（64 位）或 `.compat` 中 `setup_size + ZO_efi32_pe_entry`（32 位）。
 
+**head_32.S 与 head_64.S 的选用**（由内核配置决定，二选一）：
+- **64 位内核（CONFIG_X86_64）**：压缩阶段用 `arch/x86/boot/compressed/head_64.S`（startup_32 → 切长模式 → startup_64），解压后进入主内核 `arch/x86/kernel/head_64.S`（startup_64）。本文档描述的就是这条路径。
+- **32 位内核（CONFIG_X86_32）**：压缩阶段用 `arch/x86/boot/compressed/head_32.S`（startup_32，不切 64 位），解压后进入主内核 `arch/x86/kernel/head_32.S`（startup_32，`SYM_CODE_START(startup_32)`）。trampoline 里的 startup_32 用于 SMP 等，与从 bootloader 进入的压缩/主内核路径不同。
+
 **压缩内核解压代码（startup_32）→ startup_64 → x86_64_start_kernel：**
 
 ```
@@ -84,8 +88,8 @@ x86_64_start_kernel（head64.c）：早期 IDT、TDX、copy_bootdata、微码、
 
 ```asm
 // linux/arch/x86/boot/compressed/head_64.S
-// startup_32: 32 位保护模式入口点
-SYM_CODE_START(startup_32)
+// startup_32: 32 位保护模式入口点（压缩内核；主内核 head_32.S 与 trampoline 使用 SYM_CODE_START(startup_32)）
+SYM_FUNC_START(startup_32)
 	.code32  // 32 位保护模式代码
 	
 	// 步骤 1: 设置页表（身份映射：物理地址 = 线性地址）
