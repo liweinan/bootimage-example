@@ -22,6 +22,8 @@
 │    • grub_relocator_backward_start ～ _end（backward 模板机器码）             │
 │    • 全局变量：grub_relocator_*_dest/_src/_chunk_size 等                     │
 └─────────────────────────────────────────────────────────────────────────────┘
+
+**说明**：构建时 relocator 只是编进 GRUB 二进制，都在 0x100000+ 的 GRUB 镜像内，**没有**在内存里分成两块。**分成两块**是 **boot 时** 才发生：relocator32 被拷贝到安全区（0x1000–0x9a000），forward/backward+jumper 被组装到 16MB+ 的 movers_chunk。
                                         │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
