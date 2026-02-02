@@ -29,8 +29,7 @@
   ├─ GRUB_KERNEL_LOADING.md - GRUB 加载内核完整流程
   ├─ LINUX_KERNEL_EARLY_BOOT.md - 内核早期启动（不走 Setup）
   ├─ LINUX_KERNEL_SETUP_FLOW.md - 从扇区 0 启动时的 Setup 流程
-  ├─ LINUX_KERNEL_INIT.md - start_kernel() 初始化
-  └─ LINUX_KERNEL_INTERRUPT_TAKEOVER.md - 中断系统接管
+  └─ LINUX_KERNEL_INIT.md - start_kernel() 初始化（含中断接管：早期 IDT、PIC、APIC、INT 0x80）
 
 层级 3: 技术深度文档
   ├─ BOOT_FLOW_NOTES.md - 16 个技术深度说明
@@ -69,16 +68,14 @@
 | 顺序 | 文档 | 对应的大致时机 |
 |------|------|----------------|
 | 1 | LINUX_KERNEL_EARLY_BOOT.md | GRUB 交权 → startup_32 → startup_64 → x86_64_start_kernel（含早期 IDT）→ 调用 start_kernel() |
-| 2 | LINUX_KERNEL_INTERRUPT_TAKEOVER.md | 早期 IDT：在 1 的末尾（x86_64_start_kernel）；PIC/APIC/syscall：与 3 重叠（start_kernel() 及之后） |
-| 3 | LINUX_KERNEL_INIT.md | start_kernel() 及之后 |
+| 2 | LINUX_KERNEL_INIT.md | start_kernel() 及之后（含早期 IDT、PIC/APIC、INT 0x80，见文档内「中断系统接管详细流程」） |
 
-按启动先后：**早期启动 → 中断接管（跨早期末尾与 init）→ 内核初始化**；文档主线顺序为 EARLY_BOOT → INTERRUPT_TAKEOVER → INIT。
+按启动先后：**早期启动 → 内核初始化（含中断接管）**；文档主线为 EARLY_BOOT → INIT（中断接管已合并入 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md#中断系统接管详细流程)）。
 
 - 📖 [GRUB 加载 Linux 内核详细流程](GRUB_KERNEL_LOADING.md) - grub_main() 到内核入口点完整分析
 - 📖 [Linux 内核早期启动详细流程（64 位，不走 Setup）](LINUX_KERNEL_EARLY_BOOT.md) - 模式切换、startup_32/startup_64
 - 📖 [Linux 内核 Setup 流程（从扇区 0 启动）](LINUX_KERNEL_SETUP_FLOW.md) - header.S → main → go_to_protected_mode → startup_32
-- 📖 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md) - start_kernel()、PID 0/1/2、系统调用初始化
-- 📖 [Linux 内核中断系统接管](LINUX_KERNEL_INTERRUPT_TAKEOVER.md) - IDT 设置、PIC 重编程、APIC 配置
+- 📖 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md) - start_kernel()、中断接管（IDT/PIC/APIC/INT 0x80）、系统调用、PID 0/1/2、init 进程
 - 📖 [BIOS 中断处理完整详解](BIOS_INTERRUPT_COMPLETE.md) - IVT、中断服务程序、硬件初始化
 
 ### 系统层次专题文档
@@ -2426,7 +2423,7 @@ vmlinuz（bzImage）包含：**Setup 代码**（未压缩，实模式）+ **压�
 - ✅ BIOS 代码不再执行（除 UEFI Runtime Services）
 
 > 📖 **详细分析文档**：
-> - [Linux 内核中断系统接管详细流程](LINUX_KERNEL_INTERRUPT_TAKEOVER.md) - 完整源代码分析、PIC 编程、APIC 设置、INT 0x80 系统调用
+> - [Linux 内核初始化详解](LINUX_KERNEL_INIT.md#中断系统接管详细流程) - 中断接管（早期 IDT、PIC、APIC、INT 0x80）
 > - [BIOS IVT vs Kernel IDT 详细对比](BIOS_IVT_VS_KERNEL_IDT.md) - 中断向量表对比
 > - [Linux 内核中断处理机制](LINUX_INTERRUPT_HANDLING.md) - Top Half 和 Bottom Half
 

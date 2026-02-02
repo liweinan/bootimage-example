@@ -2,7 +2,7 @@
 
 在 Linux 内核中，为了高效、安全地处理硬件中断，内核将中断处理分为两个部分：**Top Half（上半部）** 和 **Bottom Half（下半部）**。这种设计的核心目的是**尽量缩短中断禁用时间**，保证系统的实时性和响应能力。
 
-> **相关文档**：本文档描述内核**运行时**的中断处理模型（上下半部、softirq/tasklet/workqueue）。若需了解内核**从 BIOS 接管中断系统**的启动阶段流程（早期 IDT、PIC 重编程、APIC、INT 0x80 路径），见 [Linux 内核中断系统接管详细流程](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)。
+> **相关文档**：本文档描述内核**运行时**的中断处理模型（上下半部、softirq/tasklet/workqueue）。若需了解内核**从 BIOS 接管中断系统**的启动阶段流程（早期 IDT、PIC 重编程、APIC、INT 0x80 路径），见 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md#中断系统接管详细流程)。
 
 ## 为什么需要 Top Half 和 Bottom Half？
 

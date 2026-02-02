@@ -7,7 +7,9 @@
 > - 关于启动流程概述，请参见 [BOOT_FLOW.md](BOOT_FLOW.md)
 > - 关于 GRUB 加载内核，请参见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)
 >
-> **阅读说明**：本系列三篇文档按启动顺序为 EARLY_BOOT → INTERRUPT_TAKEOVER → INIT；时间线简表见 [BOOT_FLOW.md 相关文档索引](BOOT_FLOW.md#相关文档索引)。
+> **阅读说明**：启动主线为 EARLY_BOOT → INIT（本文档，含中断接管）；时间线简表见 [BOOT_FLOW.md 相关文档索引](BOOT_FLOW.md#相关文档索引)。原「中断系统接管」已合并入本文档「[4. init_IRQ() 与完整 INT 服务](#4-init_irq-与完整-int-服务)」。
+>
+> **本文档按实际执行顺序组织**：1. 早期 INT（在 start_kernel 之前）→ 2. start_kernel 与 setup_arch() → 3. trap_init() 与 syscall → 4. init_IRQ() 与完整 INT → 5. rest_init() 与 kernel_init() → 6. 核心进程详解。
 
 ## start_kernel() 初始化流程
 
@@ -74,13 +76,108 @@ kernel_init()（linux/init/main.c:1465-1528）
         └─ 6. run_init_process("/bin/sh")      // 最后尝试 shell
 ```
 
-### 内核接管内存的关键一步
+### 1. 早期 INT（在 start_kernel 之前）
+
+**调用时机**：`x86_64_start_kernel()`（early boot 末尾，见 [LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)），早于 `start_kernel()`。
+
+**源代码位置：** `linux/arch/x86/kernel/head64.c:273-307`
+
+```c
+	idt_setup_early_handler();
+	// ... TDX、copy_bootdata、load_ucode_bsp、高地址映射 ...
+	x86_64_start_reservations(real_mode_data);  // 最终调用 start_kernel()
+```
+
+**源代码位置：** `linux/arch/x86/kernel/idt.c:318-331`（`idt_setup_early_handler` 内部对 64 位使用 early_idt_handler_array）
+
+```c
+void __init idt_setup_early_handler(void)
+{
+	int i;
+	for (i = 0; i < NUM_EXCEPTION_VECTORS; i++)
+		set_intr_gate(i, early_idt_handler_array[i]);
+	// ...
+	load_idt(&idt_descr);  // 从此刻起 CPU 使用内核 IDT，取代 BIOS IVT
+}
+```
+
+早期陷阱处理程序用于 CPU 异常（如页故障、除零等）；尚未设置硬件 IRQ 门和 INT 0x80。此后才进入 `start_kernel()`。
+
+### 2. setup_arch() 与内核接管内存
 
 **关键步骤：`setup_arch(&command_line)`**（在 `start_kernel()` 阶段 1 中调用）。
 
 此前早期启动（startup_64、x86_64_start_kernel）仅有身份映射和 early 页表（early_top_pgt），内核能运行但尚未建立对整机物理内存的管理。**内核对物理内存的完整接管**发生在 **setup_arch()** 中（x86 上）：解析 e820/EFI 内存图、初始化 memblock、`init_mem_mapping()` 建立内核低端内存页表、`paging_init()` 建立直接映射与内存区域（zone）。此后内核具备完整物理内存布局和页表，可进行常规页分配。`mm_core_init()` 在 setup_arch() 之后调用，初始化核心 mm 子系统（如 slab），依赖 setup_arch() 已建立好的内存布局。
 
 > **详细展开**：e820 解析、memblock 建立、init_mem_mapping、paging_init 的调用顺序与源码位置见 [Linux 内核 setup_arch() 内存接管详解](LINUX_KERNEL_SETUP_ARCH_MEMORY.md)。
+
+### 3. trap_init() 与系统调用
+
+**时机与调用链**：**cpu_init()** 在 **trap_init()** 中被调用（`arch/x86/kernel/traps.c:1576`）。start_kernel() 中顺序为 setup_arch() → … → **trap_init()**（`main.c:958`）→ cpu_init() → **syscall_init()**（每个 CPU 都会执行一次）。因此“提供 syscall 服务”发生在 start_kernel() 的 **trap_init()** 阶段，早于 init_IRQ() 和 local_irq_enable()。
+
+**做了什么**：syscall 不经过 IDT，由 CPU 的 **MSR** 决定入口。syscall_init() 写 **MSR_STAR**；idt_syscall_init() 写 **MSR_LSTAR**（64 位入口 = `entry_SYSCALL_64`）、**MSR_CSTAR**、**MSR_SYSCALL_MASK** 及 SYSENTER 相关 MSR。用户态执行 **syscall** 时 CPU 跳转到 `entry_SYSCALL_64`，该入口保存寄存器、构建 pt_regs，再调用 **do_syscall_64(regs, nr)**，由 `sys_call_table[nr]` 分发。
+
+**调用链：**
+
+```
+start_kernel()                  [init/main.c:898]
+    ↓
+trap_init()                     [init/main.c:958 → arch/x86/kernel/traps.c:1561]
+    ↓
+cpu_init()                      [arch/x86/kernel/cpu/common.c:2384]
+    ↓
+syscall_init()                  [arch/x86/kernel/cpu/common.c:2234]
+    ↓
+idt_syscall_init()              [arch/x86/kernel/cpu/common.c:2198]
+```
+
+**syscall_init() / idt_syscall_init()** 源码见 `arch/x86/kernel/cpu/common.c`：设置 MSR_STAR、MSR_LSTAR（entry_SYSCALL_64）、MSR_SYSCALL_MASK 等。**entry_SYSCALL_64** 在 `arch/x86/entry/entry_64.S`，保存 pt_regs 后调用 do_syscall_64；**系统调用表**在 `arch/x86/entry/syscall_64.c`（sys_call_table），系统调用号在 `unistd_64.h`。
+
+### 4. init_IRQ() 与完整 INT 服务
+
+#### 提供 INT 服务
+
+“提供 INT 服务”指：CPU 在发生**中断或异常**时，根据向量号查 **IDT**，跳转到内核注册的处理函数，而不再交给 BIOS/固件。分为两段：
+
+**早期 INT 服务**（仅异常，无硬件 IRQ、无 INT 0x80）：在 **x86_64_start_kernel()** 里调用 **idt_setup_early_traps()**（head64.c 中通过 idt_setup_early_handler() 调用），早于 start_kernel()。该函数用 **early_idts** 表填充 `idt_table` 中部分向量（如 #DB、#BP、#DE、#OF、#BR、#UD、#NM、#DF、#TS、#NP、#SS、#GP、#PF、#MF、#AC、#MC 等 CPU 异常），然后 **load_idt(&idt_descr)**，把 IDT 加载到 CPU。此后 CPU 使用内核的 IDT 而非 BIOS 的 IVT，上述异常发生时都会进入内核的陷阱处理程序（例如 #PF 用于缺页、init_mem_mapping 依赖早期 #PF 处理）。此时尚未设置硬件 IRQ 门和 INT 0x80，因此“早期”只覆盖异常。
+
+**完整 INT/IRQ 服务**（异常 + 硬件 IRQ + INT 0x80 等）：在 **start_kernel() 阶段 2** 的 **init_IRQ()** 中完成。init_IRQ() 会：  
+(1) 用 **idt_setup_traps()** 等补全/更新 IDT 中的异常门；  
+(2) 对 8259A PIC 做 **init_8259A()** 重编程，把硬件 IRQ 从 BIOS 的 0x08–0x0F / 0x70–0x77 重映射到内核使用的 0x20–0x2F，避免与 CPU 异常向量 0–31 冲突；  
+(3) 调用 **idt_setup_apic_and_irq_gates()**，为 APIC 和每个 IRQ 向量设置中断门（指向 `irq_entries_start` 等），并 **load_idt(&idt_descr)** 再次加载 IDT；  
+(4) 若启用 32 位兼容，**idt_setup_ia32_syscall_gate()** 会把 **INT 0x80** 写入 IDT[0x80]，使软件执行 INT 0x80 时进入内核的 entry_INT80_32 → do_int80_syscall_32。  
+此后，硬件中断和软件 INT（如 INT 0x80）都由内核 IDT 处理，“完整 INT 服务”就绪。再之后 **local_irq_enable()** 打开中断，硬件 IRQ 即可交付内核。
+
+**小结**：早期 INT 服务 = x86_64_start_kernel() 中 idt_setup_early_traps()，只提供 CPU 异常处理；完整 INT 服务 = start_kernel() 阶段 2 的 init_IRQ()（完整 IDT + PIC 重编程 + APIC/IRQ 门 + INT 0x80）。更多细节与源码见 [LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)。
+
+**系统从哪一步开始接管了所有中断服务？**  
+从 **start_kernel() 阶段 2 的 init_IRQ() 完成之后**开始。具体是 **idt_setup_apic_and_irq_gates()** 中执行完 **load_idt(&idt_descr)** 之后：此时完整 IDT 已加载到 CPU，所有向量（CPU 异常、硬件 IRQ、INT 0x80 等）都指向内核处理程序，CPU 发生中断/异常时查 IDT 只会进入内核，不再进入 BIOS。因此“接管所有中断服务”的起点是 **init_IRQ() 返回之后**。硬件 IRQ 是否真正交付给 CPU 还受 **IF 标志**控制，要等 **local_irq_enable()** 之后硬件中断才会被响应，但中断的**路由权**（由谁处理）在 init_IRQ() 完成后已完全在内核。
+
+#### 中断系统接管详细流程（init_IRQ() 内）
+
+##### 8259A PIC 重新编程
+
+源代码位置：`linux/arch/x86/kernel/i8259.c:349-399`
+
+将硬件中断从 BIOS 的向量（0x08-0x0F, 0x70-0x77）重映射到内核的 0x20-0x2F，避免与 CPU 异常向量 0-31 冲突。主 PIC ICW2 设为 `ISA_IRQ_VECTOR(0)`，从 PIC ICW2 设为 `ISA_IRQ_VECTOR(8)`，完全覆盖 BIOS 的 PIC 配置。
+
+##### APIC 和中断门设置
+
+源代码位置：`linux/arch/x86/kernel/idt.c` 中 `idt_setup_apic_and_irq_gates()`
+
+- 从 **apic_idts** 表设置 APIC 相关中断门（Local APIC，CPU 内部）。
+- 为每个 IRQ 向量设置中断门，指向 `irq_entries_start` 等。
+- **load_idt(&idt_descr)**：此时完整 IDT 加载到 CPU，**BIOS IVT 被完全取代**。
+
+`idt_table` 由多步填充：early_idts（idt_setup_early_traps）、def_idts（idt_setup_traps）、apic_idts 与 IRQ 门（idt_setup_apic_and_irq_gates）、INT 0x80（idt_setup_ia32_syscall_gate，若启用 32 位兼容）。
+
+##### INT 0x80 系统调用路径（32 位兼容）
+
+若启用 CONFIG_IA32_EMULATION，**idt_setup_ia32_syscall_gate()** 将 IDT[0x80] 设为 `entry_INT80_32`（或 asm_int80_emulation）。用户态执行 INT 0x80 → CPU 查 IDT[0x80] → entry_INT80_32 → do_int80_syscall_32 → do_syscall_32_irqs_on → ia32_sys_call(regs, nr) 分发。系统调用号在 %eax，参数在 %ebx、%ecx 等，返回值在 %eax。
+
+> 关于 BIOS IVT 与 Kernel IDT 的对比见 [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)；UEFI 中断见 [UEFI_INTERRUPT_HANDLING.md](UEFI_INTERRUPT_HANDLING.md)。内核**运行时**的中断处理模型（Top Half/Bottom Half）见 [LINUX_INTERRUPT_HANDLING.md](LINUX_INTERRUPT_HANDLING.md)。
+>
+> **更多相关文档**：[BOOT_FLOW.md](BOOT_FLOW.md) 完整启动流程概述；[GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) GRUB 加载内核；[VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md) vmlinuz 结构；[INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md) initramfs 分析。
 
 ### start_kernel() 关键代码
 
@@ -121,7 +218,9 @@ void start_kernel(void)
 }
 ```
 
-### rest_init() 代码分析
+### 5. rest_init() 与 kernel_init()
+
+#### rest_init() 代码分析
 
 ```c
 // linux/init/main.c:699-746
@@ -146,7 +245,7 @@ static noinline void __ref __noreturn rest_init(void)
 }
 ```
 
-### kernel_init() 执行 init 进程
+#### kernel_init() 执行 init 进程
 
 ```c
 // linux/init/main.c:1465-1528
@@ -190,7 +289,7 @@ static int __ref kernel_init(void *unused)
 }
 ```
 
-## 核心进程详解
+## 6. 核心进程详解
 
 ### 进程关系图
 
@@ -384,245 +483,3 @@ int kthreadd(void *unused)
 1. **隔离性**：用户空间进程和内核线程分开管理
 2. **安全性**：PID 1 有特殊保护，内核线程不需要这种保护
 3. **清晰的层次**：便于调试和监控（`ps` 命令可以清晰看到进程归属）
-
-## 提供 syscall 服务与 INT 服务的步骤
-
-### 提供 syscall 服务
-
-**时机与调用链**：在 **setup_arch()** 执行过程中，会调用到 **cpu_init()**（每个 CPU 都会执行一次）；cpu_init() 内部调用 **syscall_init()**，再由 syscall_init() 在非 FRED 模式下调用 **idt_syscall_init()**。因此“提供 syscall 服务”发生在 start_kernel() 的**阶段 1**（setup_arch 内），早于 local_irq_enable()。
-
-**做了什么**：syscall 不经过 IDT，而是由 CPU 的 **MSR** 决定入口。syscall_init() 写 **MSR_STAR**（段选择子）；idt_syscall_init() 写 **MSR_LSTAR**（64 位入口地址 = `entry_SYSCALL_64`）、**MSR_CSTAR**（32 位兼容）、**MSR_SYSCALL_MASK**（进入内核时要清除的 RFLAGS 位），以及 Intel 的 SYSENTER 相关 MSR。用户态执行 **syscall** 时，CPU 会：把 RIP 存到 RCX、RFLAGS 存到 R11，然后 **RIP = MSR_LSTAR**、**CS = 内核代码段**，从而跳转到内核的 `entry_SYSCALL_64`。该汇编入口保存寄存器、构建 pt_regs，再调用 **do_syscall_64(regs, nr)**，由 `sys_call_table[nr]` 分发到具体系统调用处理函数。因此，一旦 MSR_LSTAR 等设置完成，用户态即可通过 `syscall` 指令进入内核并得到系统调用服务。
-
-**小结**：提供 syscall 服务 = 在 setup_arch() → cpu_init() → syscall_init() 中设置 MSR，使 `syscall` 指令跳转到 entry_SYSCALL_64，进而 do_syscall_64 与 sys_call_table。更多细节与源码见下节「系统调用初始化」。
-
-### 提供 INT 服务
-
-“提供 INT 服务”指：CPU 在发生**中断或异常**时，根据向量号查 **IDT**，跳转到内核注册的处理函数，而不再交给 BIOS/固件。分为两段：
-
-**早期 INT 服务**（仅异常，无硬件 IRQ、无 INT 0x80）：在 **x86_64_start_kernel()** 里调用 **idt_setup_early_traps()**（head64.c 中通过 idt_setup_early_handler() 调用），早于 start_kernel()。该函数用 **early_idts** 表填充 `idt_table` 中部分向量（如 #DB、#BP、#DE、#OF、#BR、#UD、#NM、#DF、#TS、#NP、#SS、#GP、#PF、#MF、#AC、#MC 等 CPU 异常），然后 **load_idt(&idt_descr)**，把 IDT 加载到 CPU。此后 CPU 使用内核的 IDT 而非 BIOS 的 IVT，上述异常发生时都会进入内核的陷阱处理程序（例如 #PF 用于缺页、init_mem_mapping 依赖早期 #PF 处理）。此时尚未设置硬件 IRQ 门和 INT 0x80，因此“早期”只覆盖异常。
-
-**完整 INT/IRQ 服务**（异常 + 硬件 IRQ + INT 0x80 等）：在 **start_kernel() 阶段 2** 的 **init_IRQ()** 中完成。init_IRQ() 会：  
-(1) 用 **idt_setup_traps()** 等补全/更新 IDT 中的异常门；  
-(2) 对 8259A PIC 做 **init_8259A()** 重编程，把硬件 IRQ 从 BIOS 的 0x08–0x0F / 0x70–0x77 重映射到内核使用的 0x20–0x2F，避免与 CPU 异常向量 0–31 冲突；  
-(3) 调用 **idt_setup_apic_and_irq_gates()**，为 APIC 和每个 IRQ 向量设置中断门（指向 `irq_entries_start` 等），并 **load_idt(&idt_descr)** 再次加载 IDT；  
-(4) 若启用 32 位兼容，**idt_setup_ia32_syscall_gate()** 会把 **INT 0x80** 写入 IDT[0x80]，使软件执行 INT 0x80 时进入内核的 entry_INT80_32 → do_int80_syscall_32。  
-此后，硬件中断和软件 INT（如 INT 0x80）都由内核 IDT 处理，“完整 INT 服务”就绪。再之后 **local_irq_enable()** 打开中断，硬件 IRQ 即可交付内核。
-
-**小结**：早期 INT 服务 = x86_64_start_kernel() 中 idt_setup_early_traps()，只提供 CPU 异常处理；完整 INT 服务 = start_kernel() 阶段 2 的 init_IRQ()（完整 IDT + PIC 重编程 + APIC/IRQ 门 + INT 0x80）。更多细节与源码见 [LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)、[LINUX_KERNEL_INTERRUPT_TAKEOVER.md](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)。
-
-**系统从哪一步开始接管了所有中断服务？**  
-从 **start_kernel() 阶段 2 的 init_IRQ() 完成之后**开始。具体是 **idt_setup_apic_and_irq_gates()** 中执行完 **load_idt(&idt_descr)** 之后：此时完整 IDT 已加载到 CPU，所有向量（CPU 异常、硬件 IRQ、INT 0x80 等）都指向内核处理程序，CPU 发生中断/异常时查 IDT 只会进入内核，不再进入 BIOS。因此“接管所有中断服务”的起点是 **init_IRQ() 返回之后**。硬件 IRQ 是否真正交付给 CPU 还受 **IF 标志**控制，要等 **local_irq_enable()** 之后硬件中断才会被响应，但中断的**路由权**（由谁处理）在 init_IRQ() 完成后已完全在内核。
-
-## 系统调用初始化
-
-系统调用是用户空间程序与内核交互的主要方式。在 x86_64 上，系统调用通过 `syscall` 指令实现。
-
-### syscall 初始化流程
-
-系统调用在 CPU 初始化阶段设置，由 `setup_arch()` → `cpu_init()` 调用链完成。
-
-**调用链：**
-
-```
-start_kernel()
-    ↓
-setup_arch(&command_line)
-    ↓
-... (CPU 初始化)
-    ↓
-cpu_init()                      [arch/x86/kernel/cpu/common.c:2380]
-    ↓
-syscall_init()                  [arch/x86/kernel/cpu/common.c:2234]
-    ↓
-idt_syscall_init()              [arch/x86/kernel/cpu/common.c:2198]
-```
-
-### syscall_init() 源代码分析
-
-**源代码位置：** `linux/arch/x86/kernel/cpu/common.c:2234-2248`
-
-```c
-// 系统调用初始化（每个 CPU 都会调用）
-void syscall_init(void)
-{
-    // 设置 MSR_STAR 寄存器
-    // 高 16 位：用户态返回时使用的段选择子（__USER32_CS）
-    // 低 16 位：内核态使用的段选择子（__KERNEL_CS）
-    wrmsr(MSR_STAR, 0, (__USER32_CS << 16) | __KERNEL_CS);
-
-    // 如果不是 FRED（Flexible Return and Event Delivery）模式
-    // 则设置传统的 syscall/sysenter MSR
-    if (!cpu_feature_enabled(X86_FEATURE_FRED))
-        idt_syscall_init();
-}
-```
-
-### idt_syscall_init() 源代码分析
-
-**源代码位置：** `linux/arch/x86/kernel/cpu/common.c:2198-2231`
-
-```c
-static inline void idt_syscall_init(void)
-{
-    // ⚠️ 关键：设置 64 位系统调用入口点
-    // MSR_LSTAR 保存 syscall 指令跳转的目标地址
-    wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);
-
-    // 32 位兼容模式的系统调用
-    if (ia32_enabled()) {
-        // CSTAR: 兼容模式 syscall 入口点
-        wrmsrq_cstar((unsigned long)entry_SYSCALL_compat);
-        
-        // SYSENTER 相关 MSR（仅 Intel CPU 使用）
-        wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)__KERNEL_CS);
-        wrmsrq_safe(MSR_IA32_SYSENTER_ESP,
-                    (unsigned long)(cpu_entry_stack(smp_processor_id()) + 1));
-        wrmsrq_safe(MSR_IA32_SYSENTER_EIP, (u64)entry_SYSENTER_compat);
-    } else {
-        // 禁用 32 位兼容模式
-        wrmsrq_cstar((unsigned long)entry_SYSCALL32_ignore);
-        wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)GDT_ENTRY_INVALID_SEG);
-        wrmsrq_safe(MSR_IA32_SYSENTER_ESP, 0ULL);
-        wrmsrq_safe(MSR_IA32_SYSENTER_EIP, 0ULL);
-    }
-
-    // ⚠️ 设置 syscall 时清除的标志位
-    // 进入内核时自动清除这些标志，提高安全性
-    wrmsrq(MSR_SYSCALL_MASK,
-           X86_EFLAGS_CF|X86_EFLAGS_PF|X86_EFLAGS_AF|
-           X86_EFLAGS_ZF|X86_EFLAGS_SF|X86_EFLAGS_TF|
-           X86_EFLAGS_IF|X86_EFLAGS_DF|X86_EFLAGS_OF|
-           X86_EFLAGS_IOPL|X86_EFLAGS_NT|X86_EFLAGS_RF|
-           X86_EFLAGS_AC|X86_EFLAGS_ID);
-}
-```
-
-### 关键 MSR 寄存器
-
-| MSR 寄存器 | 作用 |
-|-----------|------|
-| `MSR_STAR` | syscall/sysret 使用的段选择子 |
-| `MSR_LSTAR` | **64 位 syscall 入口点地址**（`entry_SYSCALL_64`） |
-| `MSR_CSTAR` | 32 位兼容模式 syscall 入口点 |
-| `MSR_SYSCALL_MASK` | syscall 时自动清除的 EFLAGS 位 |
-| `MSR_IA32_SYSENTER_*` | SYSENTER 指令使用的 MSR（Intel 特有） |
-
-### entry_SYSCALL_64 入口点
-
-**源代码位置：** `linux/arch/x86/entry/entry_64.S:87-137`
-
-```asm
-SYM_CODE_START(entry_SYSCALL_64)
-    ENDBR
-    
-    swapgs                              ; 切换 GS 段（用户 GS ↔ 内核 GS）
-    movq    %rsp, PER_CPU_VAR(...)      ; 保存用户栈指针
-    SWITCH_TO_KERNEL_CR3                ; 切换到内核页表（KPTI）
-    movq    PER_CPU_VAR(cpu_current_top_of_stack), %rsp  ; 切换到内核栈
-    
-    ; 构建 pt_regs 结构（保存用户态寄存器）
-    pushq   $__USER_DS                  ; pt_regs->ss
-    pushq   用户栈指针                   ; pt_regs->sp
-    pushq   %r11                        ; pt_regs->flags（syscall 保存在 r11）
-    pushq   $__USER_CS                  ; pt_regs->cs
-    pushq   %rcx                        ; pt_regs->ip（syscall 保存在 rcx）
-    pushq   %rax                        ; pt_regs->orig_ax（系统调用号）
-    
-    PUSH_AND_CLEAR_REGS                 ; 保存其他寄存器
-    
-    movq    %rsp, %rdi                  ; 第一个参数：pt_regs 指针
-    movslq  %eax, %rsi                  ; 第二个参数：系统调用号
-    
-    call    do_syscall_64               ; ⚠️ 调用 C 函数处理系统调用
-    
-    ; 返回用户空间
-    ; 尝试使用 SYSRET（快速路径），否则使用 IRET
-    ...
-SYM_CODE_END(entry_SYSCALL_64)
-```
-
-### 系统调用处理流程
-
-```
-用户空间程序调用 syscall 指令
-    │
-    ├─ CPU 自动执行：
-    │   ├─ RCX = 下一条指令地址（返回地址）
-    │   ├─ R11 = RFLAGS
-    │   ├─ RFLAGS &= ~MSR_SYSCALL_MASK（清除指定标志）
-    │   ├─ CS = __KERNEL_CS（从 MSR_STAR 读取）
-    │   └─ RIP = MSR_LSTAR（跳转到 entry_SYSCALL_64）
-    │
-    ↓
-entry_SYSCALL_64（汇编入口）
-    ├─ swapgs                           ; 切换到内核 GS
-    ├─ 保存用户态寄存器到 pt_regs
-    └─ call do_syscall_64
-            ↓
-do_syscall_64()（C 函数）
-    ├─ 从系统调用表查找处理函数
-    │   sys_call_table[syscall_nr]
-    ├─ 调用对应的 sys_xxx() 函数
-    └─ 返回结果
-            ↓
-entry_SYSCALL_64（返回路径）
-    ├─ 恢复用户态寄存器
-    ├─ swapgs                           ; 切换回用户 GS
-    └─ sysret 或 iret                   ; 返回用户空间
-            ↓
-用户空间程序继续执行
-```
-
-### 系统调用表
-
-**源代码位置：** `linux/arch/x86/entry/syscall_64.c`
-
-```c
-// 系统调用表定义
-const sys_call_ptr_t sys_call_table[] = {
-    [0]   = sys_read,
-    [1]   = sys_write,
-    [2]   = sys_open,
-    [3]   = sys_close,
-    // ... 更多系统调用
-};
-```
-
-系统调用号定义在 `linux/arch/x86/include/generated/uapi/asm/unistd_64.h`。
-
-### 系统调用示例
-
-以 `write()` 系统调用为例：
-
-```
-用户程序：write(fd, buf, count)
-    │
-    ├─ glibc 包装函数
-    │   ├─ RAX = 1（write 的系统调用号）
-    │   ├─ RDI = fd
-    │   ├─ RSI = buf
-    │   ├─ RDX = count
-    │   └─ syscall 指令
-    │
-    ↓
-entry_SYSCALL_64
-    ↓
-do_syscall_64(regs, 1)
-    ↓
-sys_call_table[1] = sys_write
-    ↓
-sys_write(fd, buf, count)
-    ↓
-内核执行写操作
-    ↓
-返回写入的字节数（RAX）
-    ↓
-sysret 返回用户空间
-```
-
-## 相关文档
-
-- [BOOT_FLOW.md](BOOT_FLOW.md) - 完整启动流程概述
-- [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) - GRUB 加载内核详解
-- [VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md) - vmlinuz 文件结构分析
-- [INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md) - initramfs 分析

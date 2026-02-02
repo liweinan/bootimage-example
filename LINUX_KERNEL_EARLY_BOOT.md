@@ -6,7 +6,7 @@
 > - **从扇区 0 启动的 Setup 流程**：见 [LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md)
 > - **后续阶段**：`start_kernel()` 之后见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)；启动概述见 [BOOT_FLOW.md](BOOT_FLOW.md)
 >
-> **阅读说明**：本系列三篇文档按启动顺序为 EARLY_BOOT → INTERRUPT_TAKEOVER → INIT；时间线简表见 [BOOT_FLOW.md 相关文档索引](BOOT_FLOW.md#相关文档索引)。
+> **阅读说明**：启动主线为 EARLY_BOOT → INIT（中断接管已合并入 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md#中断系统接管详细流程)）；时间线简表见 [BOOT_FLOW.md 相关文档索引](BOOT_FLOW.md#相关文档索引)。
 
 ## 内核早期启动（64 位）
 
@@ -78,7 +78,7 @@ x86_64_start_kernel（head64.c）：早期 IDT、TDX、copy_bootdata、微码、
     → x86_64_start_reservations → start_kernel()
 ```
 
-（早期 IDT 详见 [LINUX_KERNEL_INTERRUPT_TAKEOVER.md](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)；start_kernel() 详见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)）
+（早期 IDT 详见 [LINUX_KERNEL_INIT 中断系统接管详细流程](LINUX_KERNEL_INIT.md#中断系统接管详细流程)；start_kernel() 详见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)）
 
 **Linux 内核切换到 64 位长模式的详细代码：**
 
