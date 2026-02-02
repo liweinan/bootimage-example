@@ -185,15 +185,15 @@ void __init idt_setup_early_handler(void)
 start_kernel()
     ├─ 阶段 1: 早期初始化（中断禁用）
     │   ├─ boot_cpu_init(), page_address_init()
-    │   ├─ setup_arch(&command_line)     // 内存接管：e820/memblock、init_mem_mapping、paging_init
+    │   ├─ setup_arch(&command_line)     【内核接管内存】e820/memblock、init_mem_mapping、paging_init
     │   └─ parse_early_param() 等
     ├─ 阶段 2: 核心子系统
     │   ├─ mm_core_init(), sched_init()
-    │   ├─ trap_init()                  // → cpu_init() → syscall_init()
-    │   ├─ early_irq_init(), init_IRQ() // 完整 IDT、PIC、APIC、INT 0x80
+    │   ├─ trap_init()→cpu_init()→syscall_init()  【内核接管 syscall】
+    │   ├─ early_irq_init(), init_IRQ()  【内核接管 INT（完整）】完整 IDT、PIC、APIC、INT 0x80
     │   └─ local_irq_enable()
     ├─ 阶段 3: 设备与文件系统（console_init, vfs_caches_init, fork_init 等）
-    └─ 阶段 4: rest_init()              // kernel_init(PID 1)、kthreadd(PID 2)、idle
+    └─ 阶段 4: rest_init()              【创建 PID 1/2、PID 0 进入 idle】kernel_init、kthreadd、idle
 ```
 
 ### 1. setup_arch() 与内核接管内存
@@ -208,9 +208,9 @@ start_kernel()
 
 ```
 start_kernel()（main.c:898）
-    └─ trap_init()（main.c:958 → arch/x86/kernel/traps.c:1561）
-        └─ cpu_init()（arch/x86/kernel/cpu/common.c:2384）
-            └─ syscall_init()（arch/x86/kernel/cpu/common.c:2234）
+    └─ trap_init()（main.c:958 → traps.c:1561）  【内核接管 syscall】
+        └─ cpu_init()（cpu/common.c:2384）
+            └─ syscall_init()（cpu/common.c:2234）
                 └─ idt_syscall_init()（同文件:2198）
                     └─ MSR_STAR、MSR_LSTAR(entry_SYSCALL_64)、MSR_SYSCALL_MASK 等
 ```
@@ -252,7 +252,7 @@ entry_SYSCALL_64 在 `arch/x86/entry/entry_64.S`，保存 pt_regs 后调用 do_s
 
 ```
 x86_64_start_kernel()（head64.c，早于 start_kernel()）
-    └─ idt_setup_early_handler()（linux/arch/x86/kernel/idt.c:318）
+    └─ idt_setup_early_handler()（idt.c:318）  【内核接管 INT（早期）】
         ├─ early_idt_handler_array 填充 IDT 异常向量
         └─ load_idt(&idt_descr)  → CPU 使用内核 IDT 取代 BIOS IVT
             （仅 CPU 异常 #PF、#DE 等；尚无硬件 IRQ 门、INT 0x80）
@@ -262,7 +262,7 @@ x86_64_start_kernel()（head64.c，早于 start_kernel()）
 
 ```
 start_kernel() 阶段 2（main.c）
-    └─ init_IRQ()（在 trap_init、early_irq_init 之后）
+    └─ init_IRQ()（在 trap_init、early_irq_init 之后）  【内核接管 INT（完整）】
         ├─ idt_setup_traps()（linux/arch/x86/kernel/idt.c）
         │   └─ def_idts 等补全/更新 IDT 异常门
         ├─ init_8259A()（linux/arch/x86/kernel/i8259.c:349）
@@ -372,7 +372,7 @@ static int __ref kernel_init(void *unused)
 
 ```
 start_kernel() [PID 0: swapper/idle]
-    └─ rest_init()
+    └─ rest_init()  【创建 PID 1/2、PID 0 进入 idle】
         ├─ user_mode_thread(kernel_init) ──→ [PID 1: init] ──→ execve("/init") 或 "/sbin/init"
         ├─ kernel_thread(kthreadd)       ──→ [PID 2: kthreadd] ──→ 管理所有内核线程
         └─ cpu_startup_entry()           ──→ PID 0 进入 idle 循环
