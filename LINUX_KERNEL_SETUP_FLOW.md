@@ -1,9 +1,9 @@
 # Linux 内核 Setup 流程（从扇区 0 启动）
 
-本文档详细说明 **仅从扇区 0 启动时**执行的 Linux 内核 Setup 流程：从实模式入口 `header.S` 经 `main()`、`go_to_protected_mode()`、`protected_mode_jump()` 切换到保护模式，并跳转到压缩内核入口（startup_32）。**从 GRUB 或 UEFI 启动时不执行本流程**，参见 [Linux 内核早期启动详细流程（不走 Setup）](LINUX_KERNEL_EARLY_BOOT.md)。
+本文档详细说明 **仅从扇区 0 启动时**执行的 Linux 内核 Setup 流程：从实模式入口 `header.S` 经 `main()`、`go_to_protected_mode()`、`protected_mode_jump()` 切换到保护模式，并跳转到压缩内核入口（startup_32）。**从 GRUB 或 UEFI 启动时不执行本流程**，参见 [Linux 内核启动与初始化（不走 Setup）](LINUX_KERNEL_INIT.md)。
 
 > **相关文档**：
-> - **不走 Setup 的路径**：GRUB 按 code32_start 跳转、UEFI 按 PE 入口跳转，见 [LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)
+> - **不走 Setup 的路径**：GRUB 按 code32_start 跳转、UEFI 按 PE 入口跳转，见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)
 > - 启动流程概述见 [BOOT_FLOW.md](BOOT_FLOW.md)
 
 ## 调用链（仅从扇区 0 启动时）
@@ -189,4 +189,4 @@ GLOBAL(protected_mode_jump)
 32 位保护模式（startup_32，压缩内核）
 ```
 
-此后流程与“不走 Setup”路径汇合：压缩内核 startup_32 解压并切换到 64 位长模式，详见 [LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)。
+此后流程与“不走 Setup”路径汇合：压缩内核 startup_32 解压并切换到 64 位长模式，详见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)。

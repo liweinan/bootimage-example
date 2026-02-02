@@ -170,10 +170,9 @@ DISPLAY=:1 make run-gui
 
 ### Linux 内核相关文档
 
-- **[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)** - Linux 内核初始化详解（start_kernel、中断接管：早期 IDT/PIC/APIC/INT 0x80、系统调用、PID 0/1/2、init 进程）
+- **[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)** - Linux 内核启动与初始化（64 位，不走 Setup）（GRUB/压缩内核、模式切换、startup_32/startup_64、x86_64_start_kernel、start_kernel、中断接管、系统调用、PID 0/1/2、核心进程）
 - **[VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md)** - vmlinuz（bzImage）文件详细结构分析（boot_params、setup code、压缩内核等）
 - **[VMLINUZ_INITRD_RELATIONSHIP.md](VMLINUZ_INITRD_RELATIONSHIP.md)** - vmlinuz 和 initrd 的关系详解（定义、作用机制、使用场景、必要性分析）
-- **[LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)** - Linux 内核早期启动详细流程（64 位）（Setup 代码、模式切换、startup_32、startup_64 源代码分析）
 - **[INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md)** - Initramfs 内容分析与 BusyBox 启动设置（initramfs 分析工具、BusyBox 工作原理、/init 和 /sbin/init 的关系）
 - **[INITRAMFS_ANALYSIS_RESULT.md](INITRAMFS_ANALYSIS_RESULT.md)** - Alpine Linux Initramfs 实际分析结果（基于 initrd-alpine-v3.19.img 的实际分析）
 - **[ALPINE_INIT_PROCESS_ANALYSIS.md](ALPINE_INIT_PROCESS_ANALYSIS.md)** - Alpine Linux Initramfs Init 启动过程详细分析（基于 mkinitfs 源代码的完整流程分析）

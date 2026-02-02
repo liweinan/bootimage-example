@@ -2,7 +2,7 @@
 
 本文档展开说明 `start_kernel()` 中 **setup_arch(&command_line)** 与**内核对物理内存的接管**相关的步骤，基于 x86（含 x86_64）内核源码：`arch/x86/kernel/setup.c`、`arch/x86/kernel/e820.c`、`arch/x86/mm/init.c`、`arch/x86/mm/init_64.c` 等。
 
-> **相关文档**：setup_arch() 在启动链中的位置见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)；早期启动（页表、身份映射）见 [LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)。
+> **相关文档**：setup_arch() 及完整启动链见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)。
 
 ## 1. 调用顺序概览
 
