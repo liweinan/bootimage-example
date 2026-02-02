@@ -23,14 +23,16 @@ GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
     └─ 进入 C 代码
         ↓
 x86_64_start_kernel()（linux/arch/x86/kernel/head64.c）
-    ├─ idt_setup_early_handler()  // 早期 IDT，load_idt(&idt_descr)，取代 BIOS IVT
+    ├─ idt_setup_early_handler()  【内核接管 INT（早期）】早期 IDT，load_idt，取代 BIOS IVT
     ├─ TDX、copy_bootdata、load_ucode_bsp、高地址映射等
     └─ x86_64_start_reservations() → start_kernel()
         ↓
 start_kernel()（linux/init/main.c:898-1111）
-    ├─ 阶段 1: boot_cpu_init(), page_address_init(), setup_arch(&command_line), parse_early_param() 等
-    ├─ 阶段 2: mm_core_init(), sched_init(), trap_init()→cpu_init()→syscall_init(),
-    │          early_irq_init(), init_IRQ()（完整 IDT、PIC、APIC、INT 0x80）, local_irq_enable()
+    ├─ 阶段 1: boot_cpu_init(), page_address_init(), setup_arch(&command_line)【内核接管内存】, parse_early_param() 等
+    ├─ 阶段 2: mm_core_init(), sched_init(),
+    │          trap_init()→cpu_init()→syscall_init()  【内核接管 syscall】
+    │          early_irq_init(), init_IRQ()  【内核接管 INT（完整）】完整 IDT、PIC、APIC、INT 0x80
+    │          local_irq_enable()
     ├─ 阶段 3: console_init(), vfs_caches_init(), fork_init() 等
     └─ 阶段 4: rest_init()
             ├─ user_mode_thread(kernel_init, ...)  → PID 1（init）
@@ -272,6 +274,16 @@ start_kernel() 阶段 2（main.c）
         └─ idt_setup_ia32_syscall_gate()（若 CONFIG_IA32_EMULATION）
             └─ IDT[0x80]=entry_INT80_32  → INT 0x80 → do_int80_syscall_32 → ia32_sys_call
 ```
+
+**两步区别（早期 INT vs 完整 INT）**
+
+| 对比项 | 早期 INT（idt_setup_early_handler） | 完整 INT（init_IRQ） |
+|--------|-------------------------------------|----------------------|
+| **时机** | x86_64_start_kernel()，早于 start_kernel() | start_kernel() 阶段 2，在 trap_init、early_irq_init 之后 |
+| **覆盖范围** | 仅 **CPU 异常**（#PF、#DE、#GP 等，向量 0–31） | **CPU 异常 + 硬件 IRQ + 软件 INT 0x80**（所有 IDT 向量） |
+| **做的具体工作** | 用 early_idt_handler_array 填 IDT 异常向量，**load_idt(&idt_descr)**，取代 BIOS IVT 对异常的处理 | ① idt_setup_traps() 补全/更新 IDT 异常门；② **init_8259A()** 对 8259A PIC 重编程（IRQ 重映射到 0x20–0x2F）；③ **idt_setup_apic_and_irq_gates()** 设 APIC/IRQ 门并再次 **load_idt**；④ 若启用 32 位兼容则 **idt_setup_ia32_syscall_gate()** 设 INT 0x80 |
+| **尚未具备的能力** | 无硬件 IRQ 门、无 INT 0x80，硬件中断仍走 BIOS/固件 | 无（完整 IDT 已加载，此后 local_irq_enable() 即可响应硬件 IRQ） |
+| **为何需要** | setup_arch() 前就要处理缺页等异常（如 init_mem_mapping 依赖 #PF），必须先让 CPU 查 IDT 时进内核 | 让键盘、时钟等硬件 IRQ 和 INT 0x80 系统调用都由内核处理，完全取代 BIOS IVT |
 
 **何时算“接管了所有中断服务”？**  
 从 **init_IRQ() 返回之后**（具体是 idt_setup_apic_and_irq_gates() 中 **load_idt(&idt_descr)** 执行完毕之后）：所有向量（CPU 异常、硬件 IRQ、INT 0x80）都指向内核处理程序，CPU 查 IDT 只会进入内核。硬件 IRQ 是否真正交付 CPU 还受 **IF** 控制，需等 **local_irq_enable()** 后才会响应，但中断的**路由权**在 init_IRQ() 完成后已完全在内核。
