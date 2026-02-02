@@ -410,6 +410,9 @@ int kthreadd(void *unused)
 
 **小结**：早期 INT 服务 = x86_64_start_kernel() 中 idt_setup_early_traps()，只提供 CPU 异常处理；完整 INT 服务 = start_kernel() 阶段 2 的 init_IRQ()（完整 IDT + PIC 重编程 + APIC/IRQ 门 + INT 0x80）。更多细节与源码见 [LINUX_KERNEL_EARLY_BOOT.md](LINUX_KERNEL_EARLY_BOOT.md)、[LINUX_KERNEL_INTERRUPT_TAKEOVER.md](LINUX_KERNEL_INTERRUPT_TAKEOVER.md)。
 
+**系统从哪一步开始接管了所有中断服务？**  
+从 **start_kernel() 阶段 2 的 init_IRQ() 完成之后**开始。具体是 **idt_setup_apic_and_irq_gates()** 中执行完 **load_idt(&idt_descr)** 之后：此时完整 IDT 已加载到 CPU，所有向量（CPU 异常、硬件 IRQ、INT 0x80 等）都指向内核处理程序，CPU 发生中断/异常时查 IDT 只会进入内核，不再进入 BIOS。因此“接管所有中断服务”的起点是 **init_IRQ() 返回之后**。硬件 IRQ 是否真正交付给 CPU 还受 **IF 标志**控制，要等 **local_irq_enable()** 之后硬件中断才会被响应，但中断的**路由权**（由谁处理）在 init_IRQ() 完成后已完全在内核。
+
 ## 系统调用初始化
 
 系统调用是用户空间程序与内核交互的主要方式。在 x86_64 上，系统调用通过 `syscall` 指令实现。
