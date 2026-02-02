@@ -79,7 +79,8 @@ startup_32（linux/arch/x86/boot/compressed/head_64.S）
     ├─ movl %eax, %cr3                 // CR3 = 页表基址
     ├─ rdmsr; btsl $_EFER_LME, %eax; wrmsr       // EFER.LME = 1
     ├─ orl $X86_CR0_PG, %eax; movl %eax, %cr0    // CR0.PG = 1，激活长模式
-    └─ ljmp $__KERNEL_CS, $startup_64  // 跳转 64 位段
+    ├─ ljmp $__KERNEL_CS, $startup_64  // 跳转 64 位段（同文件内 64 位代码）
+    └─ startup_64：设置栈/GDT → extract_kernel() 解压 → 跳转主内核 startup_64（见下「解压内核过程」）
 ```
 
 **startup_32 切换到长模式的关键代码（linux/arch/x86/boot/compressed/head_64.S）**：
@@ -106,6 +107,47 @@ startup_64:
 	// 压缩内核内 64 位代码：解压、跳转主内核
 SYM_FUNC_END(startup_32)
 ```
+
+**解压内核过程（压缩内核内 64 位代码）**
+
+进入长模式后仍在**压缩内核**的 `head_64.S` 中：先设置段寄存器、栈与 GDT，再调用 C 函数 **extract_kernel()** 完成解压与跳转。
+
+**调用链与解压步骤**：
+
+```
+压缩内核 startup_64（arch/x86/boot/compressed/head_64.S，.code64）
+    ├─ 计算解压目标 %rbp（如 LOAD_PHYSICAL_ADDR）与重定位目标 %rbx（见下）
+    ├─ 设置栈、GDT、5-level 分页等
+    ├─ 【重定位拷贝】将压缩内核（startup_32～_bss）整段拷贝到 %rbx 处，再 jmp 到 .Lrelocated（新地址）  ← head_64.S:415-442
+    └─ .Lrelocated 中 call extract_kernel()（misc.c）
+            ├─ choose_random_location()（可选 KASLR，kaslr.c:861）更新 output 物理地址
+            ├─ decompress_kernel() 解压到 output（通常 0x100000）
+            ├─ 解析解压后 ELF，handle_relocations()
+            └─ 跳转到主内核入口（arch/x86/kernel/head_64.S 的 startup_64），不返回
+```
+
+**重定位拷贝的代码位置（“又一次 copy”对应实现）**：**先重定位**这一步在 **head_64.S** 中完成，早于 extract_kernel()。解压目标与重定位目标在 64 位路径中由 `head_64.S` 计算：解压目标存入 **%rbp**（如 LOAD_PHYSICAL_ADDR，即 0x100000）；重定位目标 **%rbx** = %rbp + BP_init_size − rva(_end)（见 `head_64.S:327-329`）。随后（`head_64.S:415-426`）用 **rep movsq** 将整段压缩内核（从 startup_32 到 _bss）从当前地址拷贝到 **%rbx** 所指安全地址，再（`head_64.S:440-442`）**jmp** 到该处的 .Lrelocated；此后执行流在新地址运行，再调用 extract_kernel()。因此解压写入 0x100000 时，运行中的代码已在 %rbx，不会覆盖自身。之后 extract_kernel() 返回并 **jmp 到主内核 startup_64** 时，执行该跳转的也是这份已搬迁到 %rbx 的 head_64.S 副本，而不是 0x100000 处的原始加载位置。
+
+**head_64.S 中重定位拷贝片段（linux/arch/x86/boot/compressed/head_64.S:415-442）**：
+
+```asm
+/* Copy the compressed kernel to the end of our buffer
+ * where decompression in place becomes safe. */
+	leaq	(_bss-8)(%rip), %rsi          /* 源：当前运行位置 */
+	leaq	rva(_bss-8)(%rbx), %rdi       /* 目标：%rbx 处（安全地址） */
+	movl	$(_bss - startup_32), %ecx
+	shrl	$3, %ecx
+	std
+	rep	movsq                         /* 拷贝整段压缩内核 */
+	cld
+	/* ... 重设 GDTR 指向新位置 ... */
+	leaq	rva(.Lrelocated)(%rbx), %rax
+	jmp	*%rax                          /* 跳转到新地址的 .Lrelocated，此后 call extract_kernel */
+```
+
+**extract_kernel()（linux/arch/x86/boot/compressed/misc.c:405 起）**：在 **head_64.S 已完成重定位** 的前提下被调用；根据 bzImage 头部与布局找到压缩负载（input_data/input_len），调用 choose_random_location()（可选）、decompress_kernel() 解压到 output，再解析 ELF、做 handle_relocations()，最后跳转到主内核入口。解压目标通常为 **0x100000**（1MB）；启用 KASLR 时由 choose_random_location()（`kaslr.c:861`）更新 output。
+
+**与主内核的衔接**：extract_kernel() 返回时已跳转到**主内核**的 `startup_64`（`arch/x86/kernel/head_64.S`），不再是压缩目录下的代码；主内核入口处 %rsi 为 boot_params（或由 boot protocol 约定传递）。
 
 ---
 
