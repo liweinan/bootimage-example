@@ -128,6 +128,8 @@ SYM_FUNC_END(startup_32)
 
 **重定位拷贝的代码位置（“又一次 copy”对应实现）**：**先重定位**这一步在 **head_64.S** 中完成，早于 extract_kernel()。解压目标与重定位目标在 64 位路径中由 `head_64.S` 计算：解压目标存入 **%rbp**（如 LOAD_PHYSICAL_ADDR，即 0x100000）；重定位目标 **%rbx** = %rbp + BP_init_size − rva(_end)（见 `head_64.S:327-329`）。随后（`head_64.S:415-426`）用 **rep movsq** 将整段压缩内核（从 startup_32 到 _bss）从当前地址拷贝到 **%rbx** 所指安全地址，再（`head_64.S:440-442`）**jmp** 到该处的 .Lrelocated；此后执行流在新地址运行，再调用 extract_kernel()。因此解压写入 0x100000 时，运行中的代码已在 %rbx，不会覆盖自身。之后 extract_kernel() 返回并 **jmp 到主内核 startup_64** 时，执行该跳转的也是这份已搬迁到 %rbx 的 head_64.S 副本，而不是 0x100000 处的原始加载位置。
 
+**这次拷贝搬了哪些内容？** 只搬 **压缩内核** 这一段（startup_32～_bss，即解压器代码 + 紧跟的压缩数据），**不包含 initrd**。initrd 由引导程序（如 GRUB）单独加载到另一块内存，不在 bzImage 的这段镜像里，因此不会被这次 rep movsq 挪动。
+
 **head_64.S 中重定位拷贝片段（linux/arch/x86/boot/compressed/head_64.S:415-442）**：
 
 ```asm
