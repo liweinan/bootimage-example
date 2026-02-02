@@ -6,6 +6,42 @@
 >
 > **执行顺序**：GRUB/入口 → startup_32（模式切换与解压）→ startup_64（主内核）→ x86_64_start_kernel（早期 IDT）→ start_kernel() → setup_arch → trap_init/syscall → init_IRQ → rest_init → 核心进程。
 
+### 完整流程图（按执行顺序）
+
+```
+GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
+    │   EIP = boot_params.hdr.code32_start，ESI = boot_params
+    ↓
+压缩内核 startup_32（linux/arch/x86/boot/compressed/head_64.S）
+    ├─ 32 位保护模式 → 64 位长模式：身份映射、CR4.PAE、CR3、EFER.LME、CR0.PG、ljmp 64 位段
+    ├─ 解压内核（gzip），解压目标 0x100000+
+    └─ 跳转到主内核 startup_64
+        ↓
+主内核 startup_64（linux/arch/x86/kernel/head_64.S）
+    ├─ 保存 boot_params（%RSI→%R15）、设栈、GS_BASE、GDT/早期 IDT、lretq 切 __KERNEL_CS
+    ├─ 可选 SEV/SME、verify_cpu
+    └─ 进入 C 代码
+        ↓
+x86_64_start_kernel()（linux/arch/x86/kernel/head64.c）
+    ├─ idt_setup_early_handler()  // 早期 IDT，load_idt(&idt_descr)，取代 BIOS IVT
+    ├─ TDX、copy_bootdata、load_ucode_bsp、高地址映射等
+    └─ x86_64_start_reservations() → start_kernel()
+        ↓
+start_kernel()（linux/init/main.c:898-1111）
+    ├─ 阶段 1: boot_cpu_init(), page_address_init(), setup_arch(&command_line), parse_early_param() 等
+    ├─ 阶段 2: mm_core_init(), sched_init(), trap_init()→cpu_init()→syscall_init(),
+    │          early_irq_init(), init_IRQ()（完整 IDT、PIC、APIC、INT 0x80）, local_irq_enable()
+    ├─ 阶段 3: console_init(), vfs_caches_init(), fork_init() 等
+    └─ 阶段 4: rest_init()
+            ├─ user_mode_thread(kernel_init, ...)  → PID 1（init）
+            ├─ kernel_thread(kthreadd, ...)        → PID 2（kthreadd）
+            ├─ complete(&kthreadd_done)
+            └─ cpu_startup_entry(CPUHP_ONLINE)     → PID 0 进入 idle 循环
+                    ↓
+kernel_init()（main.c:1465-1528）：wait_for_completion(&kthreadd_done)→kernel_init_freeable()→free_initmem()
+    → system_state=SYSTEM_RUNNING → run_init_process("/init") 或 "/sbin/init" 等
+```
+
 ---
 
 ## 一、从 GRUB 到压缩内核入口
@@ -32,7 +68,42 @@ startup_32：设置身份映射页表 → 启用 PAE（CR4）→ 加载 CR3 → 
 
 **关键寄存器**：CR4.PAE=1；CR3=页表基址；EFER.LME=1；CR0.PG=1。
 
-**startup_32 关键步骤（head_64.S 压缩内核）**：`call setup_identity_mapping` → `orl $X86_CR4_PAE, %eax` 写 CR4 → `movl %eax, %cr3` 写 CR3 → `rdmsr`/`btsl $_EFER_LME`/`wrmsr` 设 EFER.LME → `orl $X86_CR0_PG, %eax` 写 CR0 → `ljmp $__KERNEL_CS, $startup_64`。
+**startup_32 关键步骤（head_64.S 压缩内核）**：
+
+```
+startup_32（linux/arch/x86/boot/compressed/head_64.S）
+    ├─ call setup_identity_mapping     // 身份映射页表
+    ├─ orl $X86_CR4_PAE, %eax; movl %eax, %cr4   // CR4.PAE = 1
+    ├─ movl %eax, %cr3                 // CR3 = 页表基址
+    ├─ rdmsr; btsl $_EFER_LME, %eax; wrmsr       // EFER.LME = 1
+    ├─ orl $X86_CR0_PG, %eax; movl %eax, %cr0    // CR0.PG = 1，激活长模式
+    └─ ljmp $__KERNEL_CS, $startup_64  // 跳转 64 位段
+```
+
+**startup_32 切换到长模式的关键代码（linux/arch/x86/boot/compressed/head_64.S）**：
+
+```asm
+SYM_FUNC_START(startup_32)
+	.code32
+	call setup_identity_mapping    // 步骤 1: 身份映射页表
+	movl	%cr4, %eax
+	orl	$X86_CR4_PAE, %eax       // 步骤 2: CR4.PAE = 1
+	movl	%eax, %cr4
+	leal	pgtable(%ebx), %eax
+	movl	%eax, %cr3              // 步骤 3: CR3 = 页表基址
+	movl	$MSR_EFER, %ecx
+	rdmsr
+	btsl	$_EFER_LME, %eax         // 步骤 4: EFER.LME = 1
+	wrmsr
+	movl	%cr0, %eax
+	orl	$X86_CR0_PG, %eax        // 步骤 5: CR0.PG = 1，激活长模式
+	movl	%eax, %cr0
+	ljmp	$__KERNEL_CS, $startup_64  // 步骤 6: 跳转 64 位段
+	.code64
+startup_64:
+	// 压缩内核内 64 位代码：解压、跳转主内核
+SYM_FUNC_END(startup_32)
+```
 
 ---
 
@@ -40,7 +111,44 @@ startup_32：设置身份映射页表 → 启用 PAE（CR4）→ 加载 CR3 → 
 
 **主内核 startup_64**（`linux/arch/x86/kernel/head_64.S`）：保存 boot_params（%RSI→%R15）、设置初始栈与 GS 基址、**设置 GDT 和早期 IDT**（`__pi_startup_64_setup_gdt_idt`）、切换到 __KERNEL_CS、可选 SEV/SME、verify_cpu，然后进入 C 代码。
 
-**主内核 startup_64 关键步骤（head_64.S）**：`mov %rsi, %r15` 保存 boot_params → `leaq __top_init_kernel_stack(%rip), %rsp` 设栈 → `wrmsr` 设 GS_BASE → `call __pi_startup_64_setup_gdt_idt`（GDT/早期 IDT）→ `pushq $__KERNEL_CS`/`lretq` 切到内核 CS → 可选 `__pi_sme_enable`、`verify_cpu`，然后进入 C 代码。
+**主内核 startup_64 关键步骤（head_64.S）**：
+
+```
+startup_64（linux/arch/x86/kernel/head_64.S）
+    ├─ mov %rsi, %r15                  // 保存 boot_params
+    ├─ leaq __top_init_kernel_stack(%rip), %rsp // 初始内核栈
+    ├─ wrmsr（MSR_GS_BASE）             // GS 基址
+    ├─ call __pi_startup_64_setup_gdt_idt       // GDT 与早期 IDT
+    ├─ pushq $__KERNEL_CS; lretq       // 切换到内核代码段
+    └─ 可选 __pi_sme_enable、verify_cpu  → 进入 C 代码（x86_64_start_kernel）
+```
+
+**主内核 startup_64 源代码（linux/arch/x86/kernel/head_64.S）**：
+
+```asm
+SYM_CODE_START_NOALIGN(startup_64)
+	mov	%rsi, %r15                    // 保存 boot_params
+	leaq	__top_init_kernel_stack(%rip), %rsp  // 初始内核栈
+	movl	$MSR_GS_BASE, %ecx
+	xorl	%eax, %eax
+	xorl	%edx, %edx
+	wrmsr                              // GS_BASE = 0
+	call	__pi_startup_64_setup_gdt_idt  // GDT 与早期 IDT
+	pushq	$__KERNEL_CS
+	leaq	.Lon_kernel_cs(%rip), %rax
+	pushq	%rax
+	lretq                              // 切换到内核代码段
+.Lon_kernel_cs:
+#ifdef CONFIG_AMD_MEM_ENCRYPT
+	movq	%r15, %rdi
+	call	__pi_sme_enable
+#endif
+	call	verify_cpu
+	// 随后进入 x86_64_start_kernel
+SYM_CODE_END(startup_64)
+```
+
+**64 位长模式代码特征**：使用 64 位寄存器（%RSI、%R15、%RSP 等）、`movq`/`leaq`/`pushq`/`lretq`、`%rip` 相对寻址、`__KERNEL_CS`（CS.L=1）、wrmsr 写 GS_BASE。
 
 **x86_64_start_kernel()**（`head64.c`）：调用 **idt_setup_early_handler()**，用 early_idt_handler_array 填充 IDT 并 **load_idt(&idt_descr)**，此后 CPU 使用内核 IDT 取代 BIOS IVT（仅 CPU 异常，尚无硬件 IRQ 与 INT 0x80）。随后 TDX、copy_bootdata、load_ucode_bsp、高地址映射等，最终 **x86_64_start_reservations() → start_kernel()**。
 
@@ -56,11 +164,14 @@ void __init idt_setup_early_handler(void)
 
 **GDT 与 IDT**：GDT 定义段（代码/数据/栈）；IDT 定义中断/异常时跳转目标。早期 IDT 在此阶段设置，完整 IRQ/INT 0x80 在 start_kernel() 的 init_IRQ() 中设置（见下）。
 
-| 特性 | GDT | IDT |
-|------|-----|-----|
-| 用途 | 段（代码/数据/栈） | 中断/异常处理程序 |
-| 访问 | 段选择子 | 向量号 0–255 |
-| 寄存器 | GDTR | IDTR |
+| 特性 | GDT（全局描述符表） | IDT（中断描述符表） |
+|------|---------------------|---------------------|
+| 用途 | 定义内存段（代码段、数据段等） | 定义中断/异常处理程序 |
+| 访问方式 | 段选择子（Segment Selector） | 中断向量号（0–255） |
+| 寄存器 | GDTR（GDT 基址与界限） | IDTR（IDT 基址与界限） |
+| 加载指令 | LGDT | LIDT |
+| 条目内容 | 段描述符（基址、界限、权限等） | 中断门/陷阱门（处理程序地址） |
+| 主要功能 | 内存分段和保护 | 中断与异常处理 |
 
 ---
 
@@ -89,52 +200,221 @@ start_kernel()
 
 ### 2. trap_init() 与 syscall
 
-**cpu_init()** 在 **trap_init()** 中调用（非 setup_arch）。trap_init() → cpu_init() → **syscall_init()**：写 MSR_STAR、MSR_LSTAR（entry_SYSCALL_64）、MSR_SYSCALL_MASK 等，用户态 `syscall` 即跳转到 entry_SYSCALL_64 → do_syscall_64 → sys_call_table[nr]。源码：`arch/x86/kernel/cpu/common.c`（syscall_init/idt_syscall_init）、`arch/x86/entry/entry_64.S`、`syscall_64.c`。
+**cpu_init()** 在 **trap_init()** 中调用（非 setup_arch）。用户态 `syscall` 跳转到 entry_SYSCALL_64 → do_syscall_64 → sys_call_table[nr]。
 
-### 3. init_IRQ() 与完整 INT 服务
+**调用层级：**
 
-**早期 INT** 已在上文「x86_64_start_kernel」中设置（仅异常）。**完整 INT/IRQ** 在 **init_IRQ()** 中：idt_setup_traps() 补全异常门；init_8259A() 将 PIC IRQ 从 0x08–0x0F/0x70–0x77 重映射到 0x20–0x2F；idt_setup_apic_and_irq_gates() 设置 APIC/IRQ 门并再次 load_idt；若启用 32 位兼容则 idt_setup_ia32_syscall_gate() 设置 INT 0x80。**接管所有中断服务**的起点为 init_IRQ() 返回之后（load_idt 执行完毕）；硬件 IRQ 实际交付需等 local_irq_enable()。
+```
+start_kernel()（main.c:898）
+    └─ trap_init()（main.c:958 → arch/x86/kernel/traps.c:1561）
+        └─ cpu_init()（arch/x86/kernel/cpu/common.c:2384）
+            └─ syscall_init()（arch/x86/kernel/cpu/common.c:2234）
+                └─ idt_syscall_init()（同文件:2198）
+                    └─ MSR_STAR、MSR_LSTAR(entry_SYSCALL_64)、MSR_SYSCALL_MASK 等
+```
 
-- **8259A PIC**：`i8259.c`，ICW2 重映射到 0x20–0x2F。
-- **APIC/IRQ 门**：`idt.c` 中 idt_setup_apic_and_irq_gates()。
-- **INT 0x80**：entry_INT80_32 → do_int80_syscall_32 → ia32_sys_call。
+**syscall_init()（linux/arch/x86/kernel/cpu/common.c:2234）**：
+
+```c
+void syscall_init(void)
+{
+	wrmsr(MSR_STAR, 0, (__USER32_CS << 16) | __KERNEL_CS);
+	if (!cpu_feature_enabled(X86_FEATURE_FRED))
+		idt_syscall_init();
+}
+```
+
+**idt_syscall_init()（linux/arch/x86/kernel/cpu/common.c:2198）**：
+
+```c
+static inline void idt_syscall_init(void)
+{
+	wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);  // 64 位 syscall 入口
+	if (ia32_enabled()) {
+		wrmsrq_cstar((unsigned long)entry_SYSCALL_compat);
+		wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)__KERNEL_CS);
+		wrmsrq_safe(MSR_IA32_SYSENTER_ESP, ...);
+		wrmsrq_safe(MSR_IA32_SYSENTER_EIP, (u64)entry_SYSENTER_compat);
+	}
+	wrmsrq(MSR_SYSCALL_MASK, X86_EFLAGS_CF|...|X86_EFLAGS_ID);  // syscall 时清除的 RFLAGS
+}
+```
+
+entry_SYSCALL_64 在 `arch/x86/entry/entry_64.S`，保存 pt_regs 后调用 do_syscall_64；系统调用表在 `arch/x86/entry/syscall_64.c`（sys_call_table）。
+
+### 3. init_IRQ() 与接管 INT 服务的过程
+
+**“接管 INT 服务”** 指：CPU 发生中断或异常时，按向量号查 **IDT** 跳转到内核注册的处理函数，而不再交给 BIOS/固件（IVT）。分两段完成：
+
+**阶段一：早期 INT（仅 CPU 异常）**
+
+```
+x86_64_start_kernel()（head64.c，早于 start_kernel()）
+    └─ idt_setup_early_handler()（linux/arch/x86/kernel/idt.c:318）
+        ├─ early_idt_handler_array 填充 IDT 异常向量
+        └─ load_idt(&idt_descr)  → CPU 使用内核 IDT 取代 BIOS IVT
+            （仅 CPU 异常 #PF、#DE 等；尚无硬件 IRQ 门、INT 0x80）
+```
+
+**阶段二：完整 INT/IRQ（异常 + 硬件 IRQ + INT 0x80）**
+
+```
+start_kernel() 阶段 2（main.c）
+    └─ init_IRQ()（在 trap_init、early_irq_init 之后）
+        ├─ idt_setup_traps()（linux/arch/x86/kernel/idt.c）
+        │   └─ def_idts 等补全/更新 IDT 异常门
+        ├─ init_8259A()（linux/arch/x86/kernel/i8259.c:349）
+        │   └─ PIC 重编程：硬件 IRQ 0x08–0x0F/0x70–0x77 → 0x20–0x2F
+        │       （主 PIC ICW2=ISA_IRQ_VECTOR(0)，从 PIC ICW2=ISA_IRQ_VECTOR(8)）
+        ├─ idt_setup_apic_and_irq_gates()（linux/arch/x86/kernel/idt.c）
+        │   ├─ apic_idts 表设置 APIC 相关门，IRQ 向量 → irq_entries_start 等
+        │   └─ load_idt(&idt_descr)  → 完整 IDT 已加载，BIOS IVT 被完全取代
+        └─ idt_setup_ia32_syscall_gate()（若 CONFIG_IA32_EMULATION）
+            └─ IDT[0x80]=entry_INT80_32  → INT 0x80 → do_int80_syscall_32 → ia32_sys_call
+```
+
+**何时算“接管了所有中断服务”？**  
+从 **init_IRQ() 返回之后**（具体是 idt_setup_apic_and_irq_gates() 中 **load_idt(&idt_descr)** 执行完毕之后）：所有向量（CPU 异常、硬件 IRQ、INT 0x80）都指向内核处理程序，CPU 查 IDT 只会进入内核。硬件 IRQ 是否真正交付 CPU 还受 **IF** 控制，需等 **local_irq_enable()** 后才会响应，但中断的**路由权**在 init_IRQ() 完成后已完全在内核。
+
+- **8259A PIC**：`linux/arch/x86/kernel/i8259.c`，ICW2 重映射到 0x20–0x2F。  
+- **APIC/IRQ 门**：`linux/arch/x86/kernel/idt.c` 中 idt_setup_apic_and_irq_gates()。  
+- **INT 0x80**：entry_INT80_32 → do_int80_syscall_32 → ia32_sys_call（系统调用号在 %eax）。
 
 > 运行时中断模型见 [LINUX_INTERRUPT_HANDLING.md](LINUX_INTERRUPT_HANDLING.md)；BIOS IVT 与 Kernel IDT 见 [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)。
 
-### start_kernel() 关键代码（节选）
+### start_kernel() 关键代码（linux/init/main.c:898-1111）
 
 ```c
 void start_kernel(void)
 {
+	set_task_stack_end_magic(&init_task);
+	smp_setup_processor_id();
+	cgroup_init_early();
+	local_irq_disable();
+	early_boot_irqs_disabled = true;
+
 	boot_cpu_init();
-	setup_arch(&command_line);
-	// ...
-	trap_init();      // cpu_init() → syscall_init()
-	mm_core_init();
+	page_address_init();
+	setup_arch(&command_line);        // 阶段 1：内存接管等
+	setup_command_line(command_line);
+	setup_per_cpu_areas();
+	parse_early_param();
+
+	mm_core_init();                   // 阶段 2
 	sched_init();
 	early_irq_init();
-	init_IRQ();
-	// ...
+	init_IRQ();                       // 完整 IDT、PIC、APIC、INT 0x80
+	tick_init();
+	timekeeping_init();
 	local_irq_enable();
-	// ...
-	rest_init();
+	early_boot_irqs_disabled = false;
+
+	console_init();                   // 阶段 3
+	vfs_caches_init();
+	fork_init();
+	// ... 其他子系统 ...
+
+	rest_init();                      // 阶段 4：PID 1/2、idle
 }
 ```
 
 ### 4. rest_init() 与 kernel_init()
 
-**rest_init()**（`main.c:699-746`）：`user_mode_thread(kernel_init, ...)` → PID 1；`kernel_thread(kthreadd, ...)` → PID 2；`complete(&kthreadd_done)`；`cpu_startup_entry(CPUHP_ONLINE)` → 当前进程（PID 0）进入 idle 循环。
+**rest_init()（linux/init/main.c:699-746）**：
 
-**kernel_init()**（`main.c:1465-1528`）：`wait_for_completion(&kthreadd_done)`；`kernel_init_freeable()`；`free_initmem()`；`system_state = SYSTEM_RUNNING`；`run_init_process(ramdisk_execute_command)` 或 execute_command、"/sbin/init" 等，失败则 panic。
+```c
+static noinline void __ref __noreturn rest_init(void)
+{
+	pid = user_mode_thread(kernel_init, NULL, CLONE_FS);   // PID 1
+	pid = kernel_thread(kthreadd, NULL, NULL, CLONE_FS | CLONE_FILES);  // PID 2
+	complete(&kthreadd_done);
+	cpu_startup_entry(CPUHP_ONLINE);   // 当前进程（PID 0）进入 idle 循环
+}
+```
+
+**kernel_init()（linux/init/main.c:1465-1528）**：
+
+```c
+static int __ref kernel_init(void *unused)
+{
+	wait_for_completion(&kthreadd_done);
+	kernel_init_freeable();
+	free_initmem();
+	system_state = SYSTEM_RUNNING;
+
+	if (ramdisk_execute_command)
+		ret = run_init_process(ramdisk_execute_command);  // 优先 /init
+	if (execute_command)
+		ret = run_init_process(execute_command);
+	if (!try_to_run_init_process("/sbin/init") || ...)
+		return 0;
+	panic("No working init found.");
+}
+```
 
 ---
 
 ## 五、核心进程详解
 
-- **PID 0（swapper/idle）**：`init_task` 静态定义（`init_task.c`），mm=NULL，执行 start_kernel/rest_init 后 `cpu_startup_entry()` → `do_idle()`（need_resched() 为假时 `cpuidle_idle_call()`，hlt/mwait）。每 CPU 一个（swapper/0, swapper/1, …）。
-- **PID 1（init）**：kernel_init → execve("/init") 或 "/sbin/init"，用户空间进程祖先，孤儿收养、僵尸回收，不可 kill -9。
-- **PID 2（kthreadd）**：`kthread.c` 中循环处理 `kthread_create_list`，创建 kworker、ksoftirqd、migration、watchdog、kswapd 等内核线程。
+### 进程关系图
 
-**层次**：PID 0 → rest_init 创建 PID 1、PID 2；PID 0 进入 idle；PID 1 启动用户空间；PID 2 管理内核线程。
+```
+start_kernel() [PID 0: swapper/idle]
+    └─ rest_init()
+        ├─ user_mode_thread(kernel_init) ──→ [PID 1: init] ──→ execve("/init") 或 "/sbin/init"
+        ├─ kernel_thread(kthreadd)       ──→ [PID 2: kthreadd] ──→ 管理所有内核线程
+        └─ cpu_startup_entry()           ──→ PID 0 进入 idle 循环
+```
+
+### PID 0（swapper/idle）
+
+**静态定义（linux/init/init_task.c）**：`init_task` 是编译时静态定义的 task_struct，mm=NULL，stack=init_stack，comm="swapper"，thread_pid 对应 PID 0。不是 fork() 创建。
+
+**进入 idle（linux/kernel/sched/idle.c:417）**：
+
+```c
+void cpu_startup_entry(enum cpuhp_state state)
+{
+	current->flags |= PF_IDLE;
+	arch_cpu_idle_prepare();
+	cpuhp_online_idle(state);
+	while (1)
+		do_idle();
+}
+```
+
+**do_idle()**：在 `!need_resched()` 时调用 `cpuidle_idle_call()`（hlt/mwait 等），否则调度其他进程。每 CPU 一个（swapper/0, swapper/1, …）。
+
+### PID 1（init）
+
+kernel_init() 经 run_init_process 执行 execve("/init") 或 "/sbin/init"，成为用户空间 init（systemd/SysVinit 等）。职责：第一个用户空间进程、所有用户进程祖先、孤儿收养、僵尸回收、不可 kill -9。
+
+### PID 2（kthreadd）
+
+**源代码（linux/kernel/kthread.c:818）**：
+
+```c
+int kthreadd(void *unused)
+{
+	for (;;) {
+		if (list_empty(&kthread_create_list))
+			schedule();
+		while (!list_empty(&kthread_create_list)) {
+			create = list_entry(kthread_create_list.next, ...);
+			create_kthread(create);
+		}
+	}
+}
+```
+
+职责：处理 kthread_create() 请求，创建 kworker、ksoftirqd、migration、watchdog、kswapd、kblockd、irq/* 等内核线程。
+
+### 完整进程层次结构
+
+```
+[PID 0: swapper/idle]
+    ├─ [PID 1: init] → systemd/init → 所有用户进程
+    └─ [PID 2: kthreadd] → kworker/*, ksoftirqd/*, migration/*, watchdog/*, kswapd*, ...
+```
 
 > **更多**：[BOOT_FLOW.md](BOOT_FLOW.md)、[GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)、[VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md)、[INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md)。
