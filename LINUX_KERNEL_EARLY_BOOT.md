@@ -78,7 +78,7 @@ x86_64_start_kernel（head64.c）：早期 IDT、TDX、copy_bootdata、微码、
     → x86_64_start_reservations → start_kernel()
 ```
 
-（早期 IDT 详见 [LINUX_KERNEL_INIT 中断系统接管详细流程](LINUX_KERNEL_INIT.md#中断系统接管详细流程)；start_kernel() 详见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)）
+（早期 IDT、start_kernel() 及后续流程均见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)）
 
 **Linux 内核切换到 64 位长模式的详细代码：**
 
