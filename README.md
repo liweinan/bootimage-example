@@ -122,6 +122,7 @@ DISPLAY=:1 make run-gui
 
 - **[GUIDE.md](GUIDE.md)** - 计算机中断机制完全指南：从汇编到硬件实现
 - **[X86_CPU_MODES.md](X86_CPU_MODES.md)** - x86 CPU 运行模式详解（实模式、保护模式、长模式）
+- **[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md)** - x86 near jump 与 long jump（far jump）区别，long mode 下 CS 的作用（CPL、L/D 位）
 - **[A20_ADDRESS_LINE.md](A20_ADDRESS_LINE.md)** - A20 地址线详解
 
 ### BIOS 相关文档
