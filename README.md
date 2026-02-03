@@ -193,6 +193,7 @@ DISPLAY=:1 make run-gui
 
 ### 内存管理文档
 
+- **[MMU_AND_PAGING.md](MMU_AND_PAGING.md)** - x86 MMU、分页与 Linux 内核页表管理（Flat Model、多级页表、内核与 MMU 分工）
 - **[LINUX_USERSPACE_MEMORY.md](LINUX_USERSPACE_MEMORY.md)** - Linux 用户空间内存管理
 - **[FILL.md](FILL.md)** - 内存填充相关文档
 
