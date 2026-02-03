@@ -13,7 +13,7 @@ GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
     │   EIP = boot_params.hdr.code32_start，ESI = boot_params
     ↓
 压缩内核 startup_32（linux/arch/x86/boot/compressed/head_64.S）
-    ├─ 32 位保护模式 → 64 位长模式：身份映射、CR4.PAE、CR3、EFER.LME、CR0.PG、ljmp 64 位段
+    ├─ 32 位保护模式 → 64 位长模式：GDT/栈/段 → CR4.PAE、身份映射页表（内联）、CR3、EFER.LME、CR0.PG、lret 到 startup_64
     ├─ 解压内核（gzip），解压目标 0x100000+
     └─ 跳转到主内核 startup_64
         ↓
@@ -66,46 +66,77 @@ grub_relocator32_boot() → EIP = code32_start
 
 startup_32：设置身份映射页表 → 启用 PAE（CR4）→ 加载 CR3 → 启用长模式（EFER.LME）→ 启用分页（CR0.PG）→ `ljmp` 到 64 位 startup_64（同文件）→ 解压内核 → 跳转到主内核 startup_64。
 
-**模式切换顺序**：32 位保护模式 → 页表(身份映射) → CR4.PAE → CR3 → EFER.LME → CR0.PG（进入长模式）→ ljmp 64 位段 → startup_64。
+**模式切换顺序**：32 位保护模式 → GDT/栈/段、verify_cpu、算 %ebx → CR4.PAE → 构建身份映射页表（内联）→ CR3 → EFER.LME → CR0.PG → **lret** 到 startup_64（64 位）。源码无 `setup_identity_mapping` 调用，页表在 startup_32 内内联构建。
 
-**关键寄存器**：CR4.PAE=1；CR3=页表基址；EFER.LME=1；CR0.PG=1。
+**startup_32 关键步骤（head_64.S 压缩内核，与源码顺序一致）**：关键步骤与关键寄存器用途见下「关键步骤说明」与「关键寄存器用途」表。
 
-**startup_32 关键步骤（head_64.S 压缩内核）**：
+实际源码（`arch/x86/boot/compressed/head_64.S`）中 **无** `setup_identity_mapping` 调用；身份映射页表在 startup_32 内**内联**构建（Build Level 4/3/2），且 **GDT/栈/段** 在 **CR4/页表/CR3/EFER/CR0** 之前。
 
 ```
 startup_32（linux/arch/x86/boot/compressed/head_64.S）
-    ├─ call setup_identity_mapping     // 身份映射页表
-    ├─ orl $X86_CR4_PAE, %eax; movl %eax, %cr4   // CR4.PAE = 1
-    ├─ movl %eax, %cr3                 // CR3 = 页表基址
-    ├─ rdmsr; btsl $_EFER_LME, %eax; wrmsr       // EFER.LME = 1
-    ├─ orl $X86_CR0_PG, %eax; movl %eax, %cr0    // CR0.PG = 1，激活长模式
-    ├─ ljmp $__KERNEL_CS, $startup_64  // 跳转 64 位段（同文件内 64 位代码）
-    └─ startup_64：设置栈/GDT → extract_kernel() 解压 → 跳转主内核 startup_64（见下「解压内核过程」）
+    ├─ cld, cli；算加载偏移 %ebp（call 1f; popl %ebp; subl）
+    ├─ lgdt（GDT）、段寄存器 = __BOOT_DS、栈 = boot_stack_end、lret 切到 __KERNEL32_CS（32 位段）
+    ├─ [CONFIG_AMD_MEM_ENCRYPT] call startup32_load_idt
+    ├─ call verify_cpu；计算重定位目标 %ebx（BP_init_size、_end 等）
+    ├─ CR4.PAE = 1
+    ├─ 构建身份映射页表（内联：pgtable Level 4/3/2，rva(pgtable)(%ebx)）
+    ├─ CR3 = pgtable 基址
+    ├─ EFER.LME = 1；[CONFIG_AMD_MEM_ENCRYPT] call startup32_check_sev_cbit
+    ├─ push rva(startup_64); push __KERNEL_CS；CR0.PG = 1；lret   // 进入长模式并跳到 startup_64（同文件）
+    └─ startup_64：设置栈/GDT、重定位拷贝、extract_kernel() 解压 → 跳转主内核 startup_64（见下「解压内核过程」）
 ```
 
-**startup_32 切换到长模式的关键代码（linux/arch/x86/boot/compressed/head_64.S）**：
+**关键步骤说明**（与源码 head_64.S 对应）：
+
+| 步骤 | 做什么 | 为何需要 |
+|------|--------|----------|
+| cld, cli | 清方向标志、关可屏蔽中断 | 后续用 rep/stosl 和栈，避免中断打断 |
+| 算 %ebp | call 1f; popl %ebp; subl $ rva(1b), %ebp。%esi 为 boot_params（引导传入） | **%ebp = 当前运行地址相对 startup_32 的偏移**（加载基址），后面用 rva(…)(%ebp) 得到 gdt、栈、startup_64 等的运行地址 |
+| lgdt / 段 / 栈 / lret | leal rva(gdt)(%ebp) 填 GDT 描述符并 lgdt；DS/ES/FS/GS/SS = __BOOT_DS；ESP = rva(boot_stack_end)(%ebp)；push __KERNEL32_CS + rva(1f)(%ebp)；lret | 用“当前加载基址”下的 GDT 和栈，并切到 GDT 里的 32 位代码段，为后续 verify_cpu、建页表等提供正确段与栈 |
+| verify_cpu | 检查 CPU 是否支持长模式 | 不支持则跳到 .Lno_longmode，不继续解压 |
+| 算 %ebx | 非 RELOCATABLE：%ebx = LOAD_PHYSICAL_ADDR；RELOCATABLE：%ebx 按 BP_kernel_alignment 对齐；再 %ebx += BP_init_size − rva(_end) | **%ebx = 重定位目标地址**（解压前要把压缩内核拷到这里），同时 pgtable 将建在 rva(pgtable)(%ebx)，以便拷到 %ebx 后 CR3 仍有效 |
+| CR4.PAE | orl $X86_CR4_PAE, %cr4 | 开启物理地址扩展，长模式分页前提 |
+| 构建页表 | 在 rva(pgtable)(%ebx) 处内联建 4 级页表（L4/L3/L2），身份映射前 4G；CONFIG_AMD_MEM_ENCRYPT 时 %edx 为加密位掩码 | 开启分页后需有效页表；身份映射保证当前指令与数据在开 PG 后仍可访问 |
+| CR3 | movl rva(pgtable)(%ebx), %cr3 | 让 CPU 使用刚建好的页表 |
+| EFER.LME | rdmsr MSR_EFER；btsl LME；wrmsr | 允许长模式；与 CR0.PG 一起生效后进入长模式（先为 32 位兼容子模式） |
+| lldt / ltr | 清 LDTR；TR = __BOOT_TSS（GDT 中） | 进入长模式前 TSS 需有效，供后续 64 位栈等使用 |
+| CR0.PG + lret | movl $CR0_STATE, %cr0；此前已 push __KERNEL_CS、rva(startup_64)(%ebp)；lret | 开启分页并进入长模式；lret 弹出 CS:EIP，**CS = __KERNEL_CS（64 位段）** 后真正进入 64 位，EIP = startup_64 |
+
+**关键寄存器用途**（startup_32 阶段）：
+
+| 寄存器 | 含义 | 使用方式 |
+|--------|------|----------|
+| **%esi** | 引导程序传入的 **boot_params** 指针（物理地址） | BP_scratch（临时栈）、BP_init_size、BP_kernel_alignment 等；只读使用 |
+| **%ebp** | **当前加载基址**（startup_32 所在运行地址；由 call/popl/subl 算出） | 所有 rva(…)(%ebp)：GDT、boot_stack_end、startup_64、pgtable 等在当前镜像中的运行地址 |
+| **%ebx** | **重定位目标**（解压前拷贝目标；由 BP_init_size、_end、对齐等算出） | 页表建在 rva(pgtable)(%ebx)，以便拷贝到 %ebx 后 CR3 仍指向有效页表；后续 64 位 startup_64 里 rep movsq 目标也是 %rbx |
+| **CR4** | PAE = 1 | 启用物理地址扩展 |
+| **CR3** | 页表基址 | 指向 rva(pgtable)(%ebx)（当前即 %ebx + rva(pgtable)） |
+| **EFER** | LME = 1 | 长模式使能（与 CR0.PG 同时生效） |
+| **CR0** | PG = 1（CR0_STATE） | 开启分页；与 EFER.LME 一起使 CPU 进入长模式 |
+
+**startup_32 内“构建页表 → CR3 → EFER → CR0 → lret”片段（head_64.S，与源码一致）**：
 
 ```asm
-SYM_FUNC_START(startup_32)
-	.code32
-	call setup_identity_mapping    // 步骤 1: 身份映射页表
+	/* Enable PAE mode */
 	movl	%cr4, %eax
-	orl	$X86_CR4_PAE, %eax       // 步骤 2: CR4.PAE = 1
+	orl	$X86_CR4_PAE, %eax
 	movl	%eax, %cr4
-	leal	pgtable(%ebx), %eax
-	movl	%eax, %cr3              // 步骤 3: CR3 = 页表基址
+	/* Build early 4G boot pagetable (identity mapping, inline) */
+	leal	rva(pgtable)(%ebx), %edi
+	/* ... Level 4/3/2 填入 pgtable ... */
+	leal	rva(pgtable)(%ebx), %eax
+	movl	%eax, %cr3
 	movl	$MSR_EFER, %ecx
 	rdmsr
-	btsl	$_EFER_LME, %eax         // 步骤 4: EFER.LME = 1
+	btsl	$_EFER_LME, %eax
 	wrmsr
-	movl	%cr0, %eax
-	orl	$X86_CR0_PG, %eax        // 步骤 5: CR0.PG = 1，激活长模式
+	/* ... 可选 startup32_check_sev_cbit ... */
+	leal	rva(startup_64)(%ebp), %eax
+	pushl	$__KERNEL_CS
+	pushl	%eax
+	movl	$CR0_STATE, %eax
 	movl	%eax, %cr0
-	ljmp	$__KERNEL_CS, $startup_64  // 步骤 6: 跳转 64 位段
-	.code64
-startup_64:
-	// 压缩内核内 64 位代码：解压、跳转主内核
-SYM_FUNC_END(startup_32)
+	lret                    /* 远返到 startup_64，进入 64 位 */
 ```
 
 **解压内核过程（压缩内核内 64 位代码）**
