@@ -21,11 +21,11 @@ GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
 【阶段2】压缩内核 startup_64（linux/arch/x86/boot/compressed/head_64.S:278-476，64位长模式）
     ├─ 设置64位环境：段寄存器、栈、GDT（290-360行）
     ├─ load_stage1_idt、sev_enable、configure_5level_paging（376-409行）
-    ├─ 【重定位拷贝】rep movsq 将压缩内核拷贝到安全位置 %rbx（419-425行）
-    ├─ 重新加载 GDT、jmp .Lrelocated（432-441行）
+    ├─ 【重定位拷贝】rep movsq 将压缩内核拷贝到安全位置 %rbx（通常 16MB 以上）（419-425行）
+    ├─ 重新加载 GDT、jmp .Lrelocated（432-441行，跳到重定位后的代码）
     ├─ 清除 BSS（450-455行）
     ├─ load_stage2_idt、initialize_identity_maps（457-461行）
-    ├─ 【解压内核】extract_kernel() 解压到 %rbp（通常0x100000）（469行）
+    ├─ 【解压内核】extract_kernel() 解压到 %rbp（通常 0x1000000，即 16MB）（469行）
     └─ jmp *%rax → 【阶段3】主内核 startup_64（475行）
         ↓
 【阶段3】主内核 startup_64（linux/arch/x86/kernel/head_64.S:38）
@@ -113,7 +113,7 @@ startup_32（arch/x86/boot/compressed/head_64.S:82-274）
 | 算 %ebp | call 1f; popl %ebp; subl $ rva(1b), %ebp。%esi 为 boot_params（引导传入） | **%ebp = 当前运行地址相对 startup_32 的偏移**（加载基址），后面用 rva(…)(%ebp) 得到 gdt、栈、startup_64 等的运行地址 |
 | lgdt / 段 / 栈 / lret | leal rva(gdt)(%ebp) 填 GDT 描述符并 lgdt；DS/ES/FS/GS/SS = __BOOT_DS；ESP = rva(boot_stack_end)(%ebp)；push __KERNEL32_CS + rva(1f)(%ebp)；lret | 用“当前加载基址”下的 GDT 和栈，并切到 GDT 里的 32 位代码段，为后续 verify_cpu、建页表等提供正确段与栈 |
 | verify_cpu | 检查 CPU 是否支持长模式 | 不支持则跳到 .Lno_longmode，不继续解压 |
-| 算 %ebx | 非 RELOCATABLE：%ebx = LOAD_PHYSICAL_ADDR；RELOCATABLE：%ebx 按 BP_kernel_alignment 对齐；再 %ebx += BP_init_size − rva(_end) | **%ebx = 重定位目标地址**（解压前要把压缩内核拷到这里），同时 pgtable 将建在 rva(pgtable)(%ebx)，以便拷到 %ebx 后 CR3 仍有效 |
+| 算 %ebx | 非 RELOCATABLE：%ebx = LOAD_PHYSICAL_ADDR；RELOCATABLE：%ebx 按 BP_kernel_alignment 对齐；再 %ebx += BP_init_size − rva(_end) | **%ebx = 重定位目标地址**（通常在 16MB 以上，例如约 22MB），解压前要把压缩内核拷到这里；同时 pgtable 将建在 rva(pgtable)(%ebx)，以便拷到 %ebx 后 CR3 仍有效 |
 | CR4.PAE | orl $X86_CR4_PAE, %cr4 | 开启物理地址扩展，长模式分页前提 |
 | 构建页表 | 在 rva(pgtable)(%ebx) 处内联建 4 级页表（L4/L3/L2），身份映射前 4G；CONFIG_AMD_MEM_ENCRYPT 时 %edx 为加密位掩码 | 开启分页后需有效页表；身份映射保证当前指令与数据在开 PG 后仍可访问。MMU 与分页概念见 [MMU_AND_PAGING.md](MMU_AND_PAGING.md) |
 | CR3 | movl rva(pgtable)(%ebx), %cr3 | 让 CPU 使用刚建好的页表 |
@@ -127,7 +127,7 @@ startup_32（arch/x86/boot/compressed/head_64.S:82-274）
 |--------|------|----------|
 | **%esi** | 引导程序传入的 **boot_params** 指针（物理地址） | BP_scratch（临时栈）、BP_init_size、BP_kernel_alignment 等；只读使用 |
 | **%ebp** | **当前加载基址**（startup_32 所在运行地址；由 call/popl/subl 算出） | 所有 rva(…)(%ebp)：GDT、boot_stack_end、startup_64、pgtable 等在当前镜像中的运行地址 |
-| **%ebx** | **重定位目标**（解压前拷贝目标；由 BP_init_size、_end、对齐等算出） | 页表建在 rva(pgtable)(%ebx)，以便拷贝到 %ebx 后 CR3 仍指向有效页表；后续 64 位 startup_64 里 rep movsq 目标也是 %rbx |
+| **%ebx** | **重定位目标**（解压前拷贝目标；通常在 16MB 以上，例如约 22MB） | 计算公式：%ebx = %rbp + BP_init_size − rva(_end)；页表建在 rva(pgtable)(%ebx)，以便拷贝到 %ebx 后 CR3 仍指向有效页表；后续 64 位 startup_64 里 rep movsq 目标也是 %rbx |
 | **CR4** | PAE = 1 | 启用物理地址扩展 |
 | **CR3** | 页表基址 | 指向 rva(pgtable)(%ebx)（当前即 %ebx + rva(pgtable)） |
 | **EFER** | LME = 1 | 长模式使能（与 CR0.PG 同时生效） |
@@ -178,17 +178,17 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
     ├─ load_stage1_idt（376行）
     ├─ sev_enable（390行，CONFIG_AMD_MEM_ENCRYPT）
     ├─ configure_5level_paging（409行）
-    ├─ 【重定位拷贝】将压缩内核（startup_32～_bss）整段拷贝到 %rbx 处（419-425行）
+    ├─ 【重定位拷贝】将压缩内核（startup_32～_bss）整段拷贝到 %rbx 处（通常 16MB 以上的安全位置）（419-425行）
     ├─ 重新加载 GDT（432-435行）
-    └─ jmp .Lrelocated（440-441行）→ 跳转到新地址继续执行
+    └─ jmp .Lrelocated（440-441行）→ 跳转到同文件内重定位后的 .Lrelocated 标签
         ↓
-.Lrelocated（arch/x86/boot/compressed/head_64.S:445-476）
+.Lrelocated（arch/x86/boot/compressed/head_64.S:445-476，仍在同一文件内）
     ├─ 清除 BSS（450-455行）
     ├─ load_stage2_idt（457行）
     ├─ initialize_identity_maps（461行）
     ├─ 【解压内核】call extract_kernel()（469行）← 关键：在这里解压内核！
     │       ├─ choose_random_location()（可选 KASLR）更新 output 物理地址
-    │       ├─ decompress_kernel() 解压到 output（通常 0x100000）
+    │       ├─ decompress_kernel() 解压到 output（通常 0x1000000，即 16MB）
     │       ├─ 解析解压后 ELF，handle_relocations()
     │       └─ 返回主内核入口地址到 %rax
     └─ jmp *%rax（475行）→ 【阶段3】跳转到主内核 startup_64（arch/x86/kernel/head_64.S）
@@ -196,11 +196,23 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
 
 **重定位拷贝的详细说明**：
 
-**为何需要重定位拷贝？** 解压器需要将压缩的内核数据解压到目标地址（通常是 0x100000），如果解压器代码和压缩数据本身就在目标地址附近，解压过程会覆盖正在执行的代码。因此必须先将整个压缩内核（包括解压器代码和压缩数据）拷贝到一个安全的位置（%rbx），然后从那里执行解压操作。
+**为何需要重定位拷贝？** 解压器需要将压缩的内核数据解压到目标地址（通常是 0x1000000，即 16MB），如果解压器代码和压缩数据本身就在目标地址附近，解压过程会覆盖正在执行的代码。因此必须先将整个压缩内核（包括解压器代码和压缩数据）拷贝到一个安全的位置（%rbx，通常在 16MB 以上，例如约 22MB），然后从那里执行解压操作。
 
 **地址计算**：
-- **解压目标 %rbp**：解压后内核的最终位置（如 LOAD_PHYSICAL_ADDR，即 0x100000）
-- **重定位目标 %rbx**：压缩内核的安全位置 = %rbp + BP_init_size − rva(_end)（见源代码328-331行）
+- **解压目标 %rbp**：解压后内核的最终位置（LOAD_PHYSICAL_ADDR，通常 0x1000000，即 16MB）
+  - 来源：`arch/x86/boot/compressed/head_64.S:325` 设置 `%rbp = LOAD_PHYSICAL_ADDR`
+  - `LOAD_PHYSICAL_ADDR` 由 `CONFIG_PHYSICAL_START` 配置（默认 0x1000000）
+- **重定位目标 %rbx**：压缩内核的安全位置（计算公式见源代码328-331行）
+  ```asm
+  movl    BP_init_size(%rsi), %ebx     # BP_init_size：内核初始化需要的总大小
+  subl    $ rva(_end), %ebx             # 减去压缩内核代码段的大小
+  addq    %rbp, %rbx                    # 加上解压目标地址（16MB）
+  # 结果：%rbx = 0x1000000 + BP_init_size - rva(_end)
+  ```
+  - **具体数值**：通常在 **16MB 以上**（例如：16MB + 8MB - 2MB = 22MB 左右）
+  - **为何这样计算**：将压缩内核放在解压目标地址之后的安全位置，确保解压时不会覆盖正在执行的代码
+  - **BP_init_size**：来自 boot_params，表示内核镜像初始化需要的总内存大小（包括解压后的内核 + BSS + brk）
+  - **rva(_end)**：压缩内核代码段的结束位置（相对地址）
 
 **拷贝过程**（`arch/x86/boot/compressed/head_64.S:419-425`）：
 
@@ -218,6 +230,10 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
 
 **这次拷贝包含什么？** 只拷贝**压缩内核**这一段（startup_32～_bss，即解压器代码 + 压缩的内核数据），**不包含 initrd**。initrd 由引导程序（如 GRUB）单独加载到另一块内存，不在 bzImage 镜像内。
 
+**拷贝到哪里？** %rbx 指向的地址，通常是 **16MB 以上**（具体位置：16MB + BP_init_size - 压缩内核大小，例如约 22MB 左右）。这个位置确保：
+- 解压到 16MB 时不会覆盖正在执行的重定位后的代码
+- 有足够的空间容纳整个压缩内核（几 MB）
+
 **跳转到新位置**（`arch/x86/boot/compressed/head_64.S:432-441`）：
 
 ```asm
@@ -232,19 +248,181 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
 	jmp	*%rax
 ```
 
-之后执行流在新地址（%rbx）运行，调用 extract_kernel() 时，解压写入 0x100000 不会覆盖正在执行的代码。
+**重要说明："新地址"指的是什么？**
+
+这里的 `jmp *%rax` **不是跳转到主内核**，而是跳转到**同一个文件内**（`arch/x86/boot/compressed/head_64.S`）的 `.Lrelocated` 标签（第445行）。
+
+**跳转目标**：`.Lrelocated`（`arch/x86/boot/compressed/head_64.S:445`）
+```asm
+440:    leaq    rva(.Lrelocated)(%rbx), %rax
+441:    jmp    *%rax              ← 跳转到下面的 .Lrelocated
+442: SYM_CODE_END(startup_64)
+443:
+444:    .text
+445: SYM_FUNC_START_LOCAL_NOALIGN(.Lrelocated)  ← 跳转目标在这里！
+446:    /* Clear BSS */
+       ...
+469:    call    extract_kernel      ← 在这里解压内核
+       ...
+475:    jmp    *%rax               ← 这里才跳转到主内核！
+476: SYM_FUNC_END(.Lrelocated)
+```
+
+**为什么需要这次跳转？**
+- 前面的 `rep movsq`（419-425行）已将整个压缩内核拷贝到 %rbx 处（新内存位置）
+- 但当前指令仍在**旧位置**执行
+- 必须跳转到**新位置的 .Lrelocated** 继续执行
+- 这样后续 `call extract_kernel()` 解压到 0x100000 时，不会覆盖正在执行的代码
+
+**"新地址"的含义**：
+- **不是**指主内核（`arch/x86/kernel/head_64.S`）
+- **而是**指重定位后的新内存位置（%rbx 处的 `.Lrelocated`）
+- 只有在 `.Lrelocated` 内执行完 `extract_kernel()` 后的 `jmp *%rax`（第475行）才真正跳转到【阶段3】主内核
 
 **extract_kernel() 函数**（`arch/x86/boot/compressed/misc.c:405`）：
 
 在 **重定位拷贝完成后**被调用，完成以下工作：
 1. 根据 bzImage 布局找到压缩负载（input_data/input_len）
 2. choose_random_location()（可选 KASLR）确定解压目标地址
-3. decompress_kernel() 解压到 output（通常 0x100000）
+3. decompress_kernel() 解压到 output（%rbp 指定，通常 0x1000000，即 16MB）
 4. 解析解压后的 ELF 格式
 5. handle_relocations() 处理重定位
 6. 返回主内核入口地址（通过 %rax）
 
 **与主内核的衔接**：extract_kernel() 返回后，`.Lrelocated` 中执行 `jmp *%rax`（第475行），跳转到**主内核**的 `startup_64`（`arch/x86/kernel/head_64.S:38`），此时 %rsi（即 %r15）仍保存着 boot_params 指针。
+
+### 为什么解压后的内核要放到 0x1000000 (16MB) 而不是原地解压？
+
+**关键理解**：有两个不同的地址概念：
+- **压缩内核加载地址**：0x100000 (1MB) - GRUB 将 bzImage 加载到这里
+- **解压后内核目标地址**：0x1000000 (16MB) - CONFIG_PHYSICAL_START 的默认值
+
+**为什么不能原地解压（在 1MB 处解压）？**
+
+1. **大小问题**：解压后的内核远大于压缩内核
+   - 压缩的 bzImage：通常几 MB
+   - 解压后的 vmlinux：通常几十 MB（包含 .text、.data、.bss、.brk 等）
+   - 如果在 1MB 处原地解压，可能会覆盖其他重要内存区域
+
+2. **安全隔离**：避免覆盖正在执行的代码
+   - 虽然已经通过重定位拷贝将压缩内核移到安全位置
+   - 但如果解压目标也在 1MB 附近，仍可能发生冲突
+
+3. **内核配置**：`CONFIG_PHYSICAL_START` 决定解压目标
+   - **默认值**：`0x1000000` (16MB)（[arch/x86/Kconfig](https://github.com/torvalds/linux/blob/master/arch/x86/Kconfig)）
+   - **配置说明**：
+     ```
+     config PHYSICAL_START
+         hex "Physical address where the kernel is loaded"
+         default "0x1000000"
+         help
+           This gives the physical address where the kernel is loaded.
+
+           If the kernel is not relocatable (CONFIG_RELOCATABLE=n) then
+           bzImage will decompress itself to above physical address and
+           run from there.
+     ```
+   - **LOAD_PHYSICAL_ADDR** 宏定义：
+     - 位置：[arch/x86/include/asm/page_types.h:32](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/page_types.h#L32)
+     - 定义：`LOAD_PHYSICAL_ADDR = __ALIGN_KERNEL_MASK(CONFIG_PHYSICAL_START, CONFIG_PHYSICAL_ALIGN - 1)`
+
+4. **源代码中的体现**（`arch/x86/boot/compressed/head_64.S:314-326`）：
+   ```asm
+   /* Start with the delta to where the kernel will run at. */
+   #ifdef CONFIG_RELOCATABLE
+       leaq    startup_32(%rip), %rbp
+       movl    BP_kernel_alignment(%rsi), %eax
+       decl    %eax
+       addq    %rax, %rbp
+       notq    %rax
+       andq    %rax, %rbp
+       cmpq    $LOAD_PHYSICAL_ADDR, %rbp
+       jae     1f
+   #endif
+       movq    $LOAD_PHYSICAL_ADDR, %rbp    # ← 设置解压目标为 LOAD_PHYSICAL_ADDR
+   1:
+   ```
+   - `%rbp` 被设置为 `LOAD_PHYSICAL_ADDR`（通常 16MB）
+   - 然后传给 `extract_kernel(rmode, output)` 作为 output 参数
+
+5. **原地解压（in-place decompression）的限制**：
+   - 从 `arch/x86/boot/compressed/misc.c:389-404` 的注释可以看到：
+     ```c
+     /*
+      * The compressed kernel image (ZO), has been moved so that its position
+      * is against the end of the buffer used to hold the uncompressed kernel
+      * image (VO) and the execution environment (.bss, .brk), which makes sure
+      * there is room to do the in-place decompression.
+      */
+     ```
+   - 即使支持原地解压，也需要精心计算位置以避免覆盖
+
+**总结**：解压到 16MB 而不是 1MB 是为了：
+- ✅ 提供足够的空间容纳解压后的大内核
+- ✅ 避免与低地址的其他用途冲突
+- ✅ 遵循 `CONFIG_PHYSICAL_START` 的配置约定
+- ✅ 支持可重定位内核（CONFIG_RELOCATABLE）和 KASLR 的灵活性
+
+### 为什么压缩内核必须加载到 0x100000 (1MB)？
+
+**历史约定与内存布局限制**：
+
+根据 **Linux Boot Protocol** 官方文档（[Documentation/arch/x86/boot.rst](https://github.com/torvalds/linux/blob/master/Documentation/arch/x86/boot.rst)），**压缩内核（bzImage）加载到 0x100000** 的原因是：
+
+**1. 前 1MB 内存布局限制**
+
+```
+0x000000 - 0x09FFFF (640KB)  常规 RAM（Conventional Memory）
+    ├─ 0x000000 - 0x003FF：IVT（中断向量表）
+    ├─ 0x000400 - 0x004FF：BDA（BIOS 数据区）
+    ├─ 0x007C00 - 0x007DFF：引导扇区加载位置
+    └─ 其余部分：可用 RAM（但只有约 640KB）
+
+0x0A0000 - 0x0FFFFF (384KB)  I/O 内存洞（I/O Memory Hole）
+    ├─ 0x0A0000 - 0x0BFFFF：显存（VGA Video Memory）
+    ├─ 0x0C0000 - 0x0EFFFF：设备 ROM（如网卡、SCSI 卡等）
+    └─ 0x0F0000 - 0x0FFFFF：BIOS ROM 映射（系统 BIOS）
+
+0x100000+ (1MB 以上)         扩展内存（Extended Memory/High Memory）
+    └─ 第一个可用的大块连续物理内存区域
+```
+
+**2. Boot Protocol 明确规定**（[Documentation/arch/x86/boot.rst:120-125](https://github.com/torvalds/linux/blob/master/Documentation/arch/x86/boot.rst#L120-L125)）
+
+> When using bzImage, the protected-mode kernel was relocated to
+> 0x100000 ("high memory"), and the kernel real-mode block (boot sector,
+> setup, and stack/heap) was made relocatable to any address between
+> 0x10000 and end of low memory.
+>
+> — Linux Boot Protocol 官方文档
+
+**3. 为什么选择 0x100000？**
+
+- ✅ **避开 I/O 内存洞**：0x0A0000-0x0FFFFF 被硬件设备（显卡、ROM）占用，不能用于加载内核
+- ✅ **扩展内存的起始位置**：0x100000 是扩展内存的第一个地址，是第一个可用的大块连续内存
+- ✅ **保护模式可访问**：在保护模式下，0x100000+ 的内存可以被线性访问
+- ✅ **历史约定**：从 Linux 内核早期开始，bzImage 格式就规定保护模式内核必须放在 0x100000
+
+**4. 代码中的定义**
+
+- **内核配置**：`CONFIG_PHYSICAL_START` 通常默认为 `0x1000000` (16MB) 或可配置
+  - 配置文件：[arch/x86/Kconfig](https://github.com/torvalds/linux/blob/master/arch/x86/Kconfig)
+- **加载地址**：`LOAD_PHYSICAL_ADDR` = `__ALIGN_KERNEL_MASK(CONFIG_PHYSICAL_START, CONFIG_PHYSICAL_ALIGN - 1)`
+  - 定义在：[arch/x86/include/asm/page_types.h:32](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/page_types.h#L32)
+- **Boot protocol 约定**：bzImage 的压缩内核部分加载到 `0x100000`（`GRUB_LINUX_BZIMAGE_ADDR`）
+  - GRUB 代码：[grub-core/loader/i386/linux.c](https://github.com/rhboot/grub2/blob/fedora-38/grub-core/loader/i386/linux.c)
+
+**5. 现代内核的灵活性**
+
+- **KASLR（Kernel Address Space Layout Randomization）**：现代内核支持随机化加载地址，但仍以 0x100000 为基准
+- **可重定位内核**：从 Boot Protocol 2.05 开始，内核支持重定位（relocatable_kernel），但默认仍使用 0x100000
+
+**总结**：0x100000 (1MB) 是 x86 架构上**第一个可用的大块连续物理内存地址**，避开了前 640KB 的常规 RAM 和 640KB-1MB 的 I/O 内存洞，因此成为 Linux Boot Protocol 规定的保护模式内核加载地址。
+
+> **相关文档**：
+> - [BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md) - 详细的 BIOS 内存布局说明（包括前 1MB 内存分配、I/O 内存洞等）
+> - [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) - GRUB 如何将内核加载到 0x100000
+> - Linux Boot Protocol: [Documentation/arch/x86/boot.rst](https://github.com/torvalds/linux/blob/master/Documentation/arch/x86/boot.rst)
 
 ---
 
@@ -252,7 +430,7 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
 
 **源代码位置**：`linux/arch/x86/kernel/head_64.S:38`
 
-**重要**：这是第三个 startup_64，与前面压缩内核中的 startup_64（`arch/x86/boot/compressed/head_64.S:278`）是**不同的文件**。
+**重要**：这是第二个 startup_64（【阶段3】主内核），与【阶段2】压缩内核中的 startup_64（`arch/x86/boot/compressed/head_64.S:278`）是**不同的文件**。注：【阶段1】是 startup_32，不是 startup_64。
 
 **主内核 startup_64**：保存 boot_params（%RSI→%R15）、设置初始栈与 GS 基址、**设置 GDT 和早期 IDT**（`startup_64_setup_gdt_idt`）、切换到 __KERNEL_CS、可选 SEV/SME、verify_cpu，然后进入 C 代码。
 
