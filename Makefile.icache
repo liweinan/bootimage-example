@@ -23,10 +23,15 @@ test_icache_v2: test_icache_v2.S
 	gcc -nostdlib -static -Wl,-N -z execstack -o test_icache_v2 test_icache_v2.S
 	@echo "=== Build complete ==="
 
-all: test_icache test_icache_v2
+test_icache_v3: test_icache_v3.S
+	@echo "=== Building I-cache test program v3 (fixed RIP-relative) ==="
+	gcc -nostdlib -static -Wl,-N -z execstack -o test_icache_v3 test_icache_v3.S
+	@echo "=== Build complete ==="
+
+all: test_icache test_icache_v2 test_icache_v3
 
 clean:
-	rm -f test_icache test_icache_v2
+	rm -f test_icache test_icache_v2 test_icache_v3
 
 run: test_icache
 	@echo "=== Running test ==="
@@ -40,4 +45,10 @@ run_v2: test_icache_v2
 	@echo ""
 	@echo "=== Test complete ==="
 
-.PHONY: clean run run_v2 all
+run_v3: test_icache_v3
+	@echo "=== Running test v3 (fixed version) ==="
+	./test_icache_v3
+	@echo ""
+	@echo "=== Test complete ==="
+
+.PHONY: clean run run_v2 run_v3 all
