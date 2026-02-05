@@ -18,8 +18,15 @@ test_icache: test_icache.S
 	@echo "  - If I-cache doesn't work: counter = 1000 (modified code: +100 x 10)"
 	@echo ""
 
+test_icache_v2: test_icache_v2.S
+	@echo "=== Building I-cache test program v2 (verbose debug) ==="
+	gcc -nostdlib -static -Wl,-N -z execstack -o test_icache_v2 test_icache_v2.S
+	@echo "=== Build complete ==="
+
+all: test_icache test_icache_v2
+
 clean:
-	rm -f test_icache
+	rm -f test_icache test_icache_v2
 
 run: test_icache
 	@echo "=== Running test ==="
@@ -27,4 +34,10 @@ run: test_icache
 	@echo ""
 	@echo "=== Test complete ==="
 
-.PHONY: clean run
+run_v2: test_icache_v2
+	@echo "=== Running test v2 (verbose) ==="
+	./test_icache_v2
+	@echo ""
+	@echo "=== Test complete ==="
+
+.PHONY: clean run run_v2 all
