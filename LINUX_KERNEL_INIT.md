@@ -8,25 +8,31 @@
 
 ### 完整流程图（按执行顺序）
 
+**关键地址说明**：
+- **1MB (0x100000)**：GRUB 加载压缩内核的位置，startup_32/startup_64 最初在这里执行
+- **16MB (0x1000000)**：解压后内核的目标位置（CONFIG_PHYSICAL_START 配置）
+- **16MB+ (约 22MB)**：重定位后的压缩内核位置（%rbx），从这里解压内核到 16MB
+
 ```
 GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
-    │   EIP = boot_params.hdr.code32_start，ESI = boot_params
+    │   将压缩内核加载到 0x100000 (1MB)
+    │   EIP = boot_params.hdr.code32_start (0x100000)，ESI = boot_params
     ↓
-【阶段1】压缩内核 startup_32（linux/arch/x86/boot/compressed/head_64.S:82-274，32位保护模式）
+【阶段1】压缩内核 startup_32（在 1MB 处执行，linux/arch/x86/boot/compressed/head_64.S:82-274，32位保护模式）
     ├─ GDT/栈/段设置（106-125行）
     ├─ verify_cpu（132-135行）
     ├─ CR4.PAE、身份映射页表（内联，200-231行）、CR3、EFER.LME、CR0.PG（167-270行）
     └─ lret → 【阶段2】压缩内核 startup_64（273行，同文件278行，仍在压缩内核代码中）
         ↓
 【阶段2】压缩内核 startup_64（linux/arch/x86/boot/compressed/head_64.S:278-476，64位长模式）
-    ├─ 设置64位环境：段寄存器、栈、GDT（290-360行）
-    ├─ load_stage1_idt、sev_enable、configure_5level_paging（376-409行）
-    ├─ 【重定位拷贝】rep movsq 将压缩内核拷贝到安全位置 %rbx（通常 16MB 以上）（419-425行）
-    ├─ 重新加载 GDT、jmp .Lrelocated（432-441行，跳到重定位后的代码）
-    ├─ 清除 BSS（450-455行）
-    ├─ load_stage2_idt、initialize_identity_maps（457-461行）
-    ├─ 【解压内核】extract_kernel() 解压到 %rbp（通常 0x1000000，即 16MB）（469行）
-    └─ jmp *%rax → 【阶段3】主内核 startup_64（475行）
+    ├─ 【仍在 1MB 处执行】设置64位环境：段寄存器、栈、GDT（290-360行）
+    ├─ 【仍在 1MB 处执行】load_stage1_idt、sev_enable、configure_5level_paging（376-409行）
+    ├─ 【重定位拷贝】rep movsq 将压缩内核从 1MB 拷贝到 %rbx（通常 16MB 以上，约 22MB）（419-425行）
+    ├─ 重新加载 GDT、jmp .Lrelocated（432-441行，跳到 %rbx 处的重定位后代码）
+    ├─ 【现在在 %rbx 处执行】清除 BSS（450-455行）
+    ├─ 【在 %rbx 处执行】load_stage2_idt、initialize_identity_maps（457-461行）
+    ├─ 【在 %rbx 处执行，解压到 16MB】extract_kernel() 解压到 %rbp（0x1000000，即 16MB）（469行）
+    └─ jmp *%rax → 【阶段3】主内核 startup_64（跳到 16MB 处的解压后内核）（475行）
         ↓
 【阶段3】主内核 startup_64（linux/arch/x86/kernel/head_64.S:38）
     ├─ 保存 boot_params（%RSI→%R15）、设栈、GS_BASE、startup_64_setup_gdt_idt（59-74行）
@@ -60,7 +66,7 @@ kernel_init()（main.c:1465-1528）：wait_for_completion(&kthreadd_done)→kern
 
 ## 一、从 GRUB 到压缩内核入口
 
-**从 GRUB 启动时**：GRUB 不执行 bzImage 内的 Setup，按 boot_params 中 **code32_start** 所存地址跳转到**压缩内核**入口（startup_32，32 位保护模式）。**关键**：模式切换在压缩内核的 startup_32 中完成，解压在压缩内核的 startup_64 中完成（详见下文三个阶段）。vmlinuz 含 Setup（未压缩）与压缩内核（gzip）；GRUB 将镜像拷到 0x100000、自填 boot_params、**按 code32_start 跳转**，不解压、不执行 Setup。
+**从 GRUB 启动时**：GRUB 不执行 bzImage 内的 Setup，按 boot_params 中 **code32_start** 所存地址跳转到**压缩内核**入口（startup_32，32 位保护模式）。**关键**：模式切换在压缩内核的 startup_32 中完成，解压在压缩内核的 startup_64 中完成（详见下文三个阶段）。vmlinuz 含 Setup（未压缩）与压缩内核（gzip）；GRUB 通过 relocator 机制将镜像复制到 0x100000、自填 boot_params、**按 code32_start 跳转**，不解压、不执行 Setup。GRUB 加载机制详见 [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)（GRUB 先读取到临时缓冲区，boot 时 relocator 复制到目标地址并跳转）。
 
 **入口点**：BIOS/Legacy（如 GRUB）→ code32_start 处即 **startup_32**（x86_64：`arch/x86/boot/compressed/head_64.S:82`，`SYM_FUNC_START(startup_32)`）。UEFI → PE 的 AddressOfEntryPoint 跳转到 EFI stub（`efi_pe_entry` 等）。64 位内核用 `head_64.S`（压缩与主内核各一份，路径不同）；32 位用 `head_32.S`。
 
@@ -196,7 +202,36 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
 
 **重定位拷贝的详细说明**：
 
-**为何需要重定位拷贝？** 解压器需要将压缩的内核数据解压到目标地址（通常是 0x1000000，即 16MB），如果解压器代码和压缩数据本身就在目标地址附近，解压过程会覆盖正在执行的代码。因此必须先将整个压缩内核（包括解压器代码和压缩数据）拷贝到一个安全的位置（%rbx，通常在 16MB 以上，例如约 22MB），然后从那里执行解压操作。
+**压缩内核的位置变化（时间线）**：
+
+```
+T1: GRUB 加载阶段
+    ├─ GRUB 将压缩内核（bzImage）加载到临时缓冲区（prot_mode_mem，通常在 16MB+）
+    ├─ relocator 将其从临时缓冲区复制到 0x100000 (1MB)（prot_mode_target）
+    └─ 跳转到 code32_start（0x100000，即 startup_32）
+    └─ 说明：GRUB 使用 relocator 机制（grub_relocator32_boot）两步完成：
+       先读取到 GRUB 可访问的临时缓冲区，boot 时再复制到目标地址并跳转
+
+T2: startup_32/startup_64 执行阶段（在 1MB 处执行）
+    └─ 压缩内核仍在 1MB (0x100000) 处
+    └─ 计算重定位目标地址 %rbx（通常 16MB 以上，约 22MB）
+
+T3: 重定位拷贝阶段（rep movsq，419-425行）
+    └─ 将压缩内核从 1MB 拷贝到 %rbx（16MB 以上）
+    └─ 跳转到新位置（%rbx 处）继续执行
+
+T4: 解压阶段（在 %rbx 处执行）
+    └─ 从 %rbx 处调用 extract_kernel()
+    └─ 解压内核到 16MB (0x1000000)
+    └─ 跳转到解压后的主内核
+```
+
+**为何需要重定位拷贝？**
+- **初始执行位置**：压缩内核开始执行时在 **1MB (0x100000)**（GRUB relocator 复制后的位置）
+  - 注：GRUB 实际先加载到临时缓冲区（prot_mode_mem，通常 16MB+），boot 时 relocator 复制到 1MB
+- **解压目标**：需要解压到 **16MB (0x1000000)**（CONFIG_PHYSICAL_START 配置）
+- **冲突问题**：如果直接从 1MB 处解压到 16MB，解压器代码和压缩数据本身就在解压路径上，可能被覆盖
+- **解决方案**：先将整个压缩内核（包括解压器代码和压缩数据）从 1MB 拷贝到安全位置（%rbx，通常在 16MB 以上，例如约 22MB），然后从那里执行解压操作
 
 **地址计算**：
 - **解压目标 %rbp**：解压后内核的最终位置（LOAD_PHYSICAL_ADDR，通常 0x1000000，即 16MB）
