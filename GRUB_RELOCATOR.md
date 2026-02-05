@@ -34,7 +34,7 @@ GRUB 保护模式代码（0x100000 (1MB)+）
 
 **说明**：bzImage 内虽有实模式 setup 代码（`arch/x86/boot/`），但从 GRUB 启动时**不执行**该段；GRUB 自填 boot_params 后**直接**跳转到 code32_start（压缩内核的 32 位保护模式入口）。从扇区 0 启动时才会先跑 setup 再切保护模式跳 code32_start。
 
-**内核入口点：BIOS 与 UEFI 不同**——**BIOS/Legacy**：bootloader 跳转到 **code32_start**（32 位保护模式，如 `linux/arch/x86/boot/compressed/head_64.S` 的 startup_32）；**UEFI**：固件按 PE 入口跳转到 **EFI stub**（如 `linux/arch/x86/boot/startup/efi-mixed.S` 的 efi_pe_entry），不经过 code32_start。详见下文「bzImage 必须放在 0x100000 与 UEFI 不矛盾」及「涉及代码一览」。
+**内核入口点：BIOS 与 UEFI 不同**——**BIOS/Legacy**：bootloader 跳转到 **code32_start**（32 位保护模式，如 `linux/arch/x86/boot/compressed/head_64.S` 的 startup_32）；**UEFI**：固件按 PE 入口跳转到 **EFI stub**（如 `linux/arch/x86/boot/startup/efi-mixed.S` 的 efi_pe_entry），不经过 code32_start。详见下文「bzImage 必须放在 0x100000 与 UEFI 不矛盾」及「涉及代码一览」。**UEFI 长模式启动详细实现**见 [GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md)。
 
 ---
 

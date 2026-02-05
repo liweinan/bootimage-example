@@ -4,6 +4,7 @@
 
 > **相关文档**：
 > - **不走 Setup 的路径**：GRUB 按 code32_start 跳转、UEFI 按 PE 入口跳转，见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)
+> - **UEFI 启动详解**：GRUB 和 Linux kernel 的 UEFI 长模式启动实现，见 [GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md)
 > - 启动流程概述见 [BOOT_FLOW.md](BOOT_FLOW.md)
 
 ## 调用链（仅从扇区 0 启动时）

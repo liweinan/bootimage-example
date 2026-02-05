@@ -200,6 +200,7 @@ DISPLAY=:1 make run-gui
 ### UEFI 相关文档
 
 - **[UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md)** - UEFI vs BIOS 启动对比
+- **[GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md)** - GRUB UEFI 长模式启动与 Linux Kernel 配合支持分析
 
 ### 工具与配置文档
 

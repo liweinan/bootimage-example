@@ -2,7 +2,7 @@
 
 本文档详细说明 GRUB 如何加载 Linux 内核镜像并跳转到内核入口点的完整过程，包括源代码分析和实现细节。
 
-**相关文档与对齐**：relocator 机制、BIOS/Legacy 下不执行 Setup、按 boot_params 中 code32_start 字段所存地址跳转、GDT/关分页等与 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 一致；模块加载（core.img、FOR_MODULES）见 [GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)。
+**相关文档与对齐**：relocator 机制、BIOS/Legacy 下不执行 Setup、按 boot_params 中 code32_start 字段所存地址跳转、GDT/关分页等与 [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) 一致；模块加载（core.img、FOR_MODULES）见 [GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)；UEFI 长模式启动详细实现见 [GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md)。
 
 ## 流程概述
 

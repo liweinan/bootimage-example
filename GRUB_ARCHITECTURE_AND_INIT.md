@@ -339,6 +339,8 @@ grub_machine_init (void)
   - 时间服务封装（虽然 BIOS 提供 INT 1Ah）
   - CPU 特性检测（TSC 等）
 
+> **UEFI 长模式启动详解**：关于 GRUB 在 UEFI 模式下的完整实现和 Linux kernel 的配合机制，请参见 [GRUB UEFI 长模式启动分析](GRUB_UEFI_LONG_MODE_ANALYSIS.md)
+
 ## grub_main() 中的其他初始化函数
 
 ### grub_load_config() - 加载配置文件

@@ -95,6 +95,7 @@
 - [GRUB Core 镜像结构与构建](GRUB_CORE_IMG_STRUCTURE.md) - core.img 结构、块列表、内存布局
 - [GRUB 模式切换机制](GRUB_MODE_SWITCHING.md) - real_to_prot、prot_to_real 实现
 - [GRUB BIOS 中断使用场景](GRUB_BIOS_INTERRUPT_USAGE.md) - 保护模式下调用 BIOS 服务
+- [GRUB UEFI 长模式启动分析](GRUB_UEFI_LONG_MODE_ANALYSIS.md) - GRUB 和 Linux kernel 的 UEFI 长模式启动详细实现
 
 **Linux 内核：**
 - [Linux 内核中断处理机制](LINUX_INTERRUPT_HANDLING.md) - Top Half 和 Bottom Half

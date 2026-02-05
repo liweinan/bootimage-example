@@ -85,3 +85,11 @@
 
 因此，上述引导扇区程序的设计模式（固定大小、固定地址、实模式等）**仅适用于 BIOS 模式**，UEFI 模式采用了更现代、更灵活的引导机制。
 
+---
+
+## 相关文档
+
+- [GRUB UEFI 长模式启动分析](GRUB_UEFI_LONG_MODE_ANALYSIS.md) - GRUB 和 Linux kernel 的 UEFI 长模式启动详细实现
+- [GRUB 模式切换](GRUB_MODE_SWITCHING.md) - GRUB 在不同模式间的切换机制
+- [x86 CPU 模式](X86_CPU_MODES.md) - x86 CPU 的实模式、保护模式和长模式详解
+
