@@ -2,11 +2,17 @@
 
 本文档按**实际执行顺序**描述从 GRUB（或 UEFI）进入压缩内核到 `start_kernel()` 及之后的完整流程：**不走 Setup**（GRUB 按 code32_start 跳转、UEFI 按 PE 入口跳转，直接进入压缩内核）。**从扇区 0 启动时的 Setup 流程**见 [LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md)。
 
-> **相关文档**：[BOOT_FLOW.md](BOOT_FLOW.md) 启动概述；[GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) GRUB 加载内核；[GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md) GRUB UEFI 长模式启动分析；[UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md) UEFI 与 BIOS 引导机制差异；[LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md) 从扇区 0 启动的 Setup；[LINUX_KERNEL_SETUP_ARCH_MEMORY.md](LINUX_KERNEL_SETUP_ARCH_MEMORY.md) setup_arch 内存接管详解；[MMU_AND_PAGING.md](MMU_AND_PAGING.md) x86 MMU、分页与内核页表管理；[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md) near/long jump 与 long mode 下 CS 的作用。
+> **相关文档**：
+> - 启动流程：[BOOT_FLOW.md](BOOT_FLOW.md) 启动概述；[GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) GRUB 加载内核；[GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md) GRUB UEFI 长模式启动分析
+> - UEFI vs BIOS：[UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md) UEFI 与 BIOS 引导机制差异
+> - Setup 流程：[LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md) 从扇区 0 启动的 Setup
+> - 内存管理：[LINUX_KERNEL_SETUP_ARCH_MEMORY.md](LINUX_KERNEL_SETUP_ARCH_MEMORY.md) setup_arch 内存接管详解；[MMU_AND_PAGING.md](MMU_AND_PAGING.md) x86 MMU、分页与内核页表管理
+> - 架构细节：[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md) near/long jump 与 long mode 下 CS 的作用
+> - **原地解压专题**：[SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md) 解压代码为何不被覆盖的完整解答；[WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) 为什么要重定位压缩内核（KASLR 分析）；[INVESTIGATION_SUMMARY.md](INVESTIGATION_SUMMARY.md) I-cache 理论验证与调查报告
 >
 > **执行顺序（BIOS/GRUB 路径）**：GRUB/入口 → 【阶段1】压缩内核 startup_32（32位模式切换）→ 【阶段2】压缩内核 startup_64（重定位拷贝、解压）→ 【阶段3】主内核 startup_64 → x86_64_start_kernel（早期 IDT）→ start_kernel() → setup_arch → trap_init/syscall → init_IRQ → rest_init → 核心进程。
 >
-> **执行顺序（UEFI 路径）**：UEFI 固件 → efi_pe_entry → efi_stub_entry → efi_decompress_kernel（解压）→ enter_kernel → 【阶段3】主内核 startup_64（直接跳到这里，跳过阶段1和2）→ 后续与 BIOS 路径相同。
+> **执行顺序（UEFI 路径）**：UEFI 固件 → efi_pe_entry → efi_stub_entry → efi_decompress_kernel（解压）→ enter_kernel → 【阶段3】主内核 startup_64（直接跳到这里，跳过阶段1和2）→ 后续与 BIOS 路径相同。详细的 UEFI 启动流程、代码分析和与 BIOS 路径的对比，请参阅 **[UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md)**。
 
 ### 完整流程图（按执行顺序）
 
@@ -14,8 +20,8 @@
 
 **关键地址说明**（BIOS/GRUB 路径）：
 - **1MB (0x100000)**：GRUB 加载压缩内核的位置，startup_32/startup_64 最初在这里执行
-- **16MB (0x1000000)**：解压后内核的目标位置（CONFIG_PHYSICAL_START 配置）
-- **16MB+ (约 22MB)**：重定位后的压缩内核位置（%rbx），从这里解压内核到 16MB
+- **16MB (0x1000000)**：解压后内核的目标位置（CONFIG_PHYSICAL_START 配置，或 KASLR 随机地址）
+- **16MB+ (约 38MB)**：重定位后的压缩内核位置（%rbx），从这里解压内核到 16MB（详见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
 
 ```
 GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
@@ -31,7 +37,7 @@ GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
 【阶段2】压缩内核 startup_64（linux/arch/x86/boot/compressed/head_64.S:278-476，64位长模式）
     ├─ 【仍在 1MB 处执行】设置64位环境：段寄存器、栈、GDT（290-360行）
     ├─ 【仍在 1MB 处执行】load_stage1_idt、sev_enable、configure_5level_paging（376-409行）
-    ├─ 【重定位拷贝】rep movsq 将压缩内核从 1MB 拷贝到 %rbx（通常 16MB 以上，约 22MB）（419-425行）
+    ├─ 【重定位拷贝】rep movsq 将压缩内核从 1MB 拷贝到 %rbx（通常 38MB，详见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）（419-425行）
     ├─ 重新加载 GDT、jmp .Lrelocated（432-441行，跳到 %rbx 处的重定位后代码）
     ├─ 【现在在 %rbx 处执行】清除 BSS（450-455行）
     ├─ 【在 %rbx 处执行】load_stage2_idt、initialize_identity_maps（457-461行）
@@ -139,7 +145,7 @@ startup_32（arch/x86/boot/compressed/head_64.S:82-274）
 |--------|------|----------|
 | **%esi** | 引导程序传入的 **boot_params** 指针（物理地址） | BP_scratch（临时栈）、BP_init_size、BP_kernel_alignment 等；只读使用 |
 | **%ebp** | **当前加载基址**（startup_32 所在运行地址；由 call/popl/subl 算出） | 所有 rva(…)(%ebp)：GDT、boot_stack_end、startup_64、pgtable 等在当前镜像中的运行地址 |
-| **%ebx** | **重定位目标**（解压前拷贝目标；通常在 16MB 以上，例如约 22MB） | 计算公式：%ebx = %rbp + BP_init_size − rva(_end)；页表建在 rva(pgtable)(%ebx)，以便拷贝到 %ebx 后 CR3 仍指向有效页表；后续 64 位 startup_64 里 rep movsq 目标也是 %rbx |
+| **%ebx** | **重定位目标**（解压前拷贝目标；通常约 38MB，参见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)） | 计算公式：%ebx = %rbp + BP_init_size − rva(_end)；页表建在 rva(pgtable)(%ebx)，以便拷贝到 %ebx 后 CR3 仍指向有效页表；后续 64 位 startup_64 里 rep movsq 目标也是 %rbx |
 | **CR4** | PAE = 1 | 启用物理地址扩展 |
 | **CR3** | 页表基址 | 指向 rva(pgtable)(%ebx)（当前即 %ebx + rva(pgtable)） |
 | **EFER** | LME = 1 | 长模式使能（与 CR0.PG 同时生效） |
@@ -223,7 +229,7 @@ T2: startup_32/startup_64 执行阶段（在 1MB 处执行）
     └─ 计算重定位目标地址 %rbx（通常 16MB 以上，约 22MB）
 
 T3: 重定位拷贝阶段（rep movsq，419-425行）
-    └─ 将压缩内核从 1MB 拷贝到 %rbx（16MB 以上）
+    └─ 将压缩内核从 1MB 拷贝到 %rbx（通常 38MB，为什么？见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
     └─ 跳转到新位置（%rbx 处）继续执行
 
 T4: 解压阶段（在 %rbx 处执行）
@@ -341,6 +347,11 @@ T4: 解压阶段（在 %rbx 处执行）
 **与主内核的衔接**：extract_kernel() 返回后，`.Lrelocated` 中执行 `jmp *%rax`（第475行），跳转到**主内核**的 `startup_64`（`arch/x86/kernel/head_64.S:38`），此时 %rsi（即 %r15）仍保存着 boot_params 指针。
 
 ### 原地解压（In-Place Decompression）的精妙设计
+
+> **📖 完整解答**：本节简要说明原地解压的设计，详细分析请参阅：
+> - [SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md) - extract_kernel 代码为何不被覆盖的完整答案
+> - [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) - 为什么要重定位压缩内核（KASLR 分析）
+> - [INVESTIGATION_SUMMARY.md](INVESTIGATION_SUMMARY.md) - I-cache 理论验证与完整调查过程
 
 #### 问题的提出
 
@@ -566,7 +577,10 @@ vmlinuz 结构：
 **参考资料**：
 - Linux 源代码：`arch/x86/boot/compressed/misc.c:389-403`
 - Linux 源代码：`arch/x86/boot/header.S:428-509`
-- 详细分析：[SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md)
+- 详细分析专题：
+  - [SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md) - 完整答案：为什么 extract_kernel 不被覆盖
+  - [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) - KASLR 与重定位的必要性
+  - [INVESTIGATION_SUMMARY.md](INVESTIGATION_SUMMARY.md) - 调查过程与实验验证
 
 ### BIOS vs UEFI 两条完全不同的启动路径
 
@@ -586,11 +600,11 @@ arch/x86/boot/compressed/head_64.S::startup_32 ← 32位保护模式入口
     └─ lret → startup_64（压缩内核）
     ↓
 arch/x86/boot/compressed/head_64.S::startup_64 ← 64位长模式，在 1MB 处执行
-    ├─ 计算 %rbp（解压目标，通常 16MB）
-    ├─ 计算 %rbx（重定位目标，通常 22MB）
-    ├─ rep movsq：拷贝压缩内核从 1MB → %rbx (22MB)
+    ├─ 计算 %rbp（解压目标，通常 16MB 或 KASLR 随机地址）
+    ├─ 计算 %rbx（重定位目标，通常 38MB）
+    ├─ rep movsq：拷贝压缩内核从 1MB → %rbx (38MB)（为什么？见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
     ├─ jmp .Lrelocated：跳到 %rbx 处继续执行
-    ├─ call extract_kernel()：从 %rbx 处解压到 %rbp (16MB)
+    ├─ call extract_kernel()：从 %rbx 处解压到 %rbp (16MB)（不覆盖执行代码，见 [SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md)）
     │       ├─ input_data 在 %rbx 处（重定位后的压缩数据）
     │       ├─ outbuf = %rbp (16MB)
     │       ├─ __decompress(input_data, ..., outbuf, ...)
@@ -649,9 +663,9 @@ arch/x86/kernel/head_64.S::startup_64 ← 主内核入口
 | **压缩内核初始位置** | 1MB (0x100000)，GRUB relocator 复制到此 | 任意地址（如 300MB），UEFI 固件直接加载 PE 文件 |
 | **是否经过 compressed/head_64.S** | ✅ 是，startup_32 → startup_64 | ❌ **否**，完全跳过 |
 | **模式切换** | startup_32 中从 32位切换到 64位 | UEFI 固件已在 64位长模式，无需切换 |
-| **是否需要重定位拷贝** | ✅ 需要（rep movsq 从 1MB → %rbx） | ❌ 不需要，EFI stub 直接分配内存并解压 |
+| **是否需要重定位拷贝** | ✅ 需要（rep movsq 从 1MB → %rbx，参见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)） | ❌ 不需要，EFI stub 直接分配内存并解压 |
 | **解压器在哪里** | compressed/head_64.S::startup_64 调用 extract_kernel() | efi_stub_entry() 调用 efi_decompress_kernel() |
-| **解压函数** | arch/x86/boot/compressed/misc.c::extract_kernel() | 同一个 decompress_kernel()，但由 EFI stub 调用 |
+| **解压函数** | arch/x86/boot/compressed/misc.c::extract_kernel() | 同一个 decompress_kernel()，但由 EFI stub 调用（详见 [UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md)） |
 | **input_data 位置** | 重定位后的 %rbx 处（22MB） | 原始 PE 文件中（300MB） |
 | **outbuf 位置** | %rbp (16MB，或 KASLR 随机) | EFI 分配的 addr (16MB~512MB) |
 | **跳转到主内核** | jmp *%rax（从 .Lrelocated） | jmp *kernel_entry（从 enter_kernel） |
