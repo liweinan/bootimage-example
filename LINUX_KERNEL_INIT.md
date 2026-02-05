@@ -4,7 +4,7 @@
 
 > **相关文档**：[BOOT_FLOW.md](BOOT_FLOW.md) 启动概述；[GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) GRUB 加载内核；[GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md) GRUB UEFI 长模式启动分析；[LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md) 从扇区 0 启动的 Setup；[LINUX_KERNEL_SETUP_ARCH_MEMORY.md](LINUX_KERNEL_SETUP_ARCH_MEMORY.md) setup_arch 内存接管详解；[MMU_AND_PAGING.md](MMU_AND_PAGING.md) x86 MMU、分页与内核页表管理；[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md) near/long jump 与 long mode 下 CS 的作用。
 >
-> **执行顺序**：GRUB/入口 → startup_32（模式切换与解压）→ startup_64（主内核）→ x86_64_start_kernel（早期 IDT）→ start_kernel() → setup_arch → trap_init/syscall → init_IRQ → rest_init → 核心进程。
+> **执行顺序**：GRUB/入口 → 【阶段1】压缩内核 startup_32（32位模式切换）→ 【阶段2】压缩内核 startup_64（重定位拷贝、解压）→ 【阶段3】主内核 startup_64 → x86_64_start_kernel（早期 IDT）→ start_kernel() → setup_arch → trap_init/syscall → init_IRQ → rest_init → 核心进程。
 
 ### 完整流程图（按执行顺序）
 
@@ -12,14 +12,26 @@
 GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
     │   EIP = boot_params.hdr.code32_start，ESI = boot_params
     ↓
-压缩内核 startup_32（linux/arch/x86/boot/compressed/head_64.S）
-    ├─ 32 位保护模式 → 64 位长模式：GDT/栈/段 → CR4.PAE、身份映射页表（内联）、CR3、EFER.LME、CR0.PG、lret 到 startup_64
-    ├─ 解压内核（gzip），解压目标 0x100000+
-    └─ 跳转到主内核 startup_64
+【阶段1】压缩内核 startup_32（linux/arch/x86/boot/compressed/head_64.S:82-274，32位保护模式）
+    ├─ GDT/栈/段设置（106-125行）
+    ├─ verify_cpu（132-135行）
+    ├─ CR4.PAE、身份映射页表（内联，200-231行）、CR3、EFER.LME、CR0.PG（167-270行）
+    └─ lret → 【阶段2】压缩内核 startup_64（273行，同文件278行，仍在压缩内核代码中）
         ↓
-主内核 startup_64（linux/arch/x86/kernel/head_64.S）
-    ├─ 保存 boot_params（%RSI→%R15）、设栈、GS_BASE、GDT/早期 IDT、lretq 切 __KERNEL_CS
-    ├─ 可选 SEV/SME、verify_cpu
+【阶段2】压缩内核 startup_64（linux/arch/x86/boot/compressed/head_64.S:278-476，64位长模式）
+    ├─ 设置64位环境：段寄存器、栈、GDT（290-360行）
+    ├─ load_stage1_idt、sev_enable、configure_5level_paging（376-409行）
+    ├─ 【重定位拷贝】rep movsq 将压缩内核拷贝到安全位置 %rbx（419-425行）
+    ├─ 重新加载 GDT、jmp .Lrelocated（432-441行）
+    ├─ 清除 BSS（450-455行）
+    ├─ load_stage2_idt、initialize_identity_maps（457-461行）
+    ├─ 【解压内核】extract_kernel() 解压到 %rbp（通常0x100000）（469行）
+    └─ jmp *%rax → 【阶段3】主内核 startup_64（475行）
+        ↓
+【阶段3】主内核 startup_64（linux/arch/x86/kernel/head_64.S:38）
+    ├─ 保存 boot_params（%RSI→%R15）、设栈、GS_BASE、startup_64_setup_gdt_idt（59-74行）
+    ├─ pushq/lretq 切 __KERNEL_CS（77-80行）
+    ├─ 可选 SEV/SME、verify_cpu（86-98行）
     └─ 进入 C 代码
         ↓
 x86_64_start_kernel()（linux/arch/x86/kernel/head64.c）
@@ -48,42 +60,49 @@ kernel_init()（main.c:1465-1528）：wait_for_completion(&kthreadd_done)→kern
 
 ## 一、从 GRUB 到压缩内核入口
 
-**从 GRUB 启动时**：GRUB 不执行 bzImage 内的 Setup，按 boot_params 中 **code32_start** 所存地址跳转到**压缩内核**入口（startup_32，32 位保护模式）。解压与模式切换在压缩内核内完成。vmlinuz 含 Setup（未压缩）与压缩内核（gzip）；GRUB 将镜像拷到 0x100000、自填 boot_params、**按 code32_start 跳转**，不解压、不执行 Setup。
+**从 GRUB 启动时**：GRUB 不执行 bzImage 内的 Setup，按 boot_params 中 **code32_start** 所存地址跳转到**压缩内核**入口（startup_32，32 位保护模式）。**关键**：模式切换在压缩内核的 startup_32 中完成，解压在压缩内核的 startup_64 中完成（详见下文三个阶段）。vmlinuz 含 Setup（未压缩）与压缩内核（gzip）；GRUB 将镜像拷到 0x100000、自填 boot_params、**按 code32_start 跳转**，不解压、不执行 Setup。
 
-**入口点**：BIOS/Legacy（如 GRUB）→ code32_start 处即 **startup_32**（x86_64：`arch/x86/boot/compressed/head_64.S`，`SYM_FUNC_START(startup_32)`）。UEFI → PE 的 AddressOfEntryPoint 跳转到 EFI stub（`efi_pe_entry` 等）。64 位内核用 `head_64.S`（压缩与主内核各一）；32 位用 `head_32.S`。
+**入口点**：BIOS/Legacy（如 GRUB）→ code32_start 处即 **startup_32**（x86_64：`arch/x86/boot/compressed/head_64.S:82`，`SYM_FUNC_START(startup_32)`）。UEFI → PE 的 AddressOfEntryPoint 跳转到 EFI stub（`efi_pe_entry` 等）。64 位内核用 `head_64.S`（压缩与主内核各一份，路径不同）；32 位用 `head_32.S`。
 
 ```
 grub_relocator32_boot() → EIP = code32_start
     ↓
-压缩内核 startup_32（32 位保护模式）
+【阶段1】压缩内核 startup_32（32 位保护模式，arch/x86/boot/compressed/head_64.S:82）
 ```
 
 ---
 
-## 二、压缩内核：startup_32 → 模式切换与解压
+## 二、压缩内核的三个阶段（源代码位置：arch/x86/boot/compressed/head_64.S）
 
-**源代码位置**：`linux/arch/x86/boot/compressed/head_64.S`
+**重要**：从 GRUB 到主内核需经过压缩内核的**三个阶段**，前两个阶段都在 `arch/x86/boot/compressed/head_64.S` 中：
 
-startup_32：设置身份映射页表 → 启用 PAE（CR4）→ 加载 CR3 → 启用长模式（EFER.LME）→ 启用分页（CR0.PG）→ `ljmp` 到 64 位 startup_64（同文件）→ 解压内核 → 跳转到主内核 startup_64。
+- **【阶段1】startup_32（32位保护模式）**：模式切换，从32位切换到64位长模式
+- **【阶段2】压缩内核 startup_64（64位长模式）**：重定位拷贝、解压内核
+- **【阶段3】主内核 startup_64（64位长模式）**：主内核初始化（在 `arch/x86/kernel/head_64.S`）
 
-**模式切换顺序**：32 位保护模式 → GDT/栈/段、verify_cpu、算 %ebx → CR4.PAE → 构建身份映射页表（内联）→ CR3 → EFER.LME → CR0.PG → **lret** 到 startup_64（64 位）。源码无 `setup_identity_mapping` 调用，页表在 startup_32 内内联构建。
+### 【阶段1】压缩内核 startup_32 → 32位到64位的模式切换
 
-**startup_32 关键步骤（head_64.S 压缩内核，与源码顺序一致）**：关键步骤与关键寄存器用途见下「关键步骤说明」与「关键寄存器用途」表。
+**源代码位置**：`arch/x86/boot/compressed/head_64.S:82-274`
 
-实际源码（`arch/x86/boot/compressed/head_64.S`）中 **无** `setup_identity_mapping` 调用；身份映射页表在 startup_32 内**内联**构建（Build Level 4/3/2），且 **GDT/栈/段** 在 **CR4/页表/CR3/EFER/CR0** 之前。
+**模式切换顺序**：32 位保护模式 → GDT/栈/段、verify_cpu、算 %ebx → CR4.PAE → 构建身份映射页表（内联）→ CR3 → EFER.LME → CR0.PG → **lret** 到【阶段2】压缩内核 startup_64（64 位，同文件）。源码无 `setup_identity_mapping` 调用，页表在 startup_32 内内联构建（200-231行）。
+
+**startup_32 关键步骤（head_64.S 压缩内核，与源码顺序一致）**：
+
+实际源码中 **无** `setup_identity_mapping` 调用；身份映射页表在 startup_32 内**内联**构建（Build Level 4/3/2），且 **GDT/栈/段** 在 **CR4/页表/CR3/EFER/CR0** 之前。
 
 ```
-startup_32（linux/arch/x86/boot/compressed/head_64.S）
-    ├─ cld, cli；算加载偏移 %ebp（call 1f; popl %ebp; subl）
-    ├─ lgdt（GDT）、段寄存器 = __BOOT_DS、栈 = boot_stack_end、lret 切到 __KERNEL32_CS（32 位段）
-    ├─ [CONFIG_AMD_MEM_ENCRYPT] call startup32_load_idt
-    ├─ call verify_cpu；计算重定位目标 %ebx（BP_init_size、_end 等）
-    ├─ CR4.PAE = 1
-    ├─ 构建身份映射页表（内联：pgtable Level 4/3/2，rva(pgtable)(%ebx)）
-    ├─ CR3 = pgtable 基址
-    ├─ EFER.LME = 1；[CONFIG_AMD_MEM_ENCRYPT] call startup32_check_sev_cbit
-    ├─ push rva(startup_64); push __KERNEL_CS；CR0.PG = 1；lret   // 进入长模式并跳到 startup_64（同文件）
-    └─ startup_64：设置栈/GDT、重定位拷贝、extract_kernel() 解压 → 跳转主内核 startup_64（见下「解压内核过程」）
+startup_32（arch/x86/boot/compressed/head_64.S:82-274）
+    ├─ cld, cli；算加载偏移 %ebp（89-103行）
+    ├─ lgdt（GDT）、段寄存器 = __BOOT_DS、栈 = boot_stack_end、lretl 切到 __KERNEL32_CS（106-125行）
+    ├─ [CONFIG_AMD_MEM_ENCRYPT] call startup32_load_idt（128-130行）
+    ├─ call verify_cpu；计算重定位目标 %ebx（132-161行）
+    ├─ CR4.PAE = 1（167-170行）
+    ├─ 构建身份映射页表（内联：pgtable Level 4/3/2，rva(pgtable)(%ebx)）（200-231行）
+    ├─ CR3 = pgtable 基址（234-235行）
+    ├─ EFER.LME = 1；[CONFIG_AMD_MEM_ENCRYPT] call startup32_check_sev_cbit（237-252行）
+    ├─ lldt/ltr（244-247行）
+    ├─ push rva(startup_64); push __KERNEL_CS；CR0.PG = 1（264-270行）
+    └─ lret → 【阶段2】压缩内核 startup_64（273行，跳转到同文件278行）
 ```
 
 **关键步骤说明**（与源码 head_64.S 对应）：
@@ -141,142 +160,207 @@ startup_32（linux/arch/x86/boot/compressed/head_64.S）
 
 Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D 位）见 [X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md)。
 
-**解压内核过程（压缩内核内 64 位代码）**
+### 【阶段2】压缩内核 startup_64 → 重定位拷贝与解压
 
-进入长模式后仍在**压缩内核**的 `head_64.S` 中：先设置段寄存器、栈与 GDT，再调用 C 函数 **extract_kernel()** 完成解压与跳转。
+**源代码位置**：`arch/x86/boot/compressed/head_64.S:278-476`
 
-**调用链与解压步骤**：
+**关键**：阶段1通过 lret 跳转到这里时，仍在**压缩内核代码**中（`arch/x86/boot/compressed/head_64.S`），还没有解压，也还没有跳转到主内核。这个阶段完成：设置64位环境、重定位拷贝压缩内核到安全位置、解压内核、跳转到主内核。
+
+**压缩内核 startup_64 关键步骤**：
 
 ```
-压缩内核 startup_64（arch/x86/boot/compressed/head_64.S，.code64）
-    ├─ 计算解压目标 %rbp（如 LOAD_PHYSICAL_ADDR）与重定位目标 %rbx（见下）
-    ├─ 设置栈、GDT、5-level 分页等
-    ├─ 【重定位拷贝】将压缩内核（startup_32～_bss）整段拷贝到 %rbx 处，再 jmp 到 .Lrelocated（新地址）  ← head_64.S:415-442
-    └─ .Lrelocated 中 call extract_kernel()（misc.c）
-            ├─ choose_random_location()（可选 KASLR，kaslr.c:861）更新 output 物理地址
-            ├─ decompress_kernel() 解压到 output（通常 0x100000）
-            ├─ 解析解压后 ELF，handle_relocations()
-            └─ 跳转到主内核入口（arch/x86/kernel/head_64.S 的 startup_64），不返回
+压缩内核 startup_64（arch/x86/boot/compressed/head_64.S:278-476，.code64）
+    ├─ cld, cli；设置段寄存器（290-299行）
+    ├─ 计算解压目标 %rbp（如 LOAD_PHYSICAL_ADDR）与重定位目标 %rbx（314-331行）
+    ├─ 设置栈（334行）
+    ├─ 加载 GDT、lretq 切换到 __KERNEL_CS（357-366行）
+    ├─ 保存 boot_params 到 %r15（374行）
+    ├─ load_stage1_idt（376行）
+    ├─ sev_enable（390行，CONFIG_AMD_MEM_ENCRYPT）
+    ├─ configure_5level_paging（409行）
+    ├─ 【重定位拷贝】将压缩内核（startup_32～_bss）整段拷贝到 %rbx 处（419-425行）
+    ├─ 重新加载 GDT（432-435行）
+    └─ jmp .Lrelocated（440-441行）→ 跳转到新地址继续执行
+        ↓
+.Lrelocated（arch/x86/boot/compressed/head_64.S:445-476）
+    ├─ 清除 BSS（450-455行）
+    ├─ load_stage2_idt（457行）
+    ├─ initialize_identity_maps（461行）
+    ├─ 【解压内核】call extract_kernel()（469行）← 关键：在这里解压内核！
+    │       ├─ choose_random_location()（可选 KASLR）更新 output 物理地址
+    │       ├─ decompress_kernel() 解压到 output（通常 0x100000）
+    │       ├─ 解析解压后 ELF，handle_relocations()
+    │       └─ 返回主内核入口地址到 %rax
+    └─ jmp *%rax（475行）→ 【阶段3】跳转到主内核 startup_64（arch/x86/kernel/head_64.S）
 ```
 
-**重定位拷贝的代码位置（“又一次 copy”对应实现）**：**先重定位**这一步在 **head_64.S** 中完成，早于 extract_kernel()。解压目标与重定位目标在 64 位路径中由 `head_64.S` 计算：解压目标存入 **%rbp**（如 LOAD_PHYSICAL_ADDR，即 0x100000）；重定位目标 **%rbx** = %rbp + BP_init_size − rva(_end)（见 `head_64.S:327-329`）。随后（`head_64.S:415-426`）用 **rep movsq** 将整段压缩内核（从 startup_32 到 _bss）从当前地址拷贝到 **%rbx** 所指安全地址，再（`head_64.S:440-442`）**jmp** 到该处的 .Lrelocated；此后执行流在新地址运行，再调用 extract_kernel()。因此解压写入 0x100000 时，运行中的代码已在 %rbx，不会覆盖自身。之后 extract_kernel() 返回并 **jmp 到主内核 startup_64** 时，执行该跳转的也是这份已搬迁到 %rbx 的 head_64.S 副本，而不是 0x100000 处的原始加载位置。
+**重定位拷贝的详细说明**：
 
-**这次拷贝搬了哪些内容？** 只搬 **压缩内核** 这一段（startup_32～_bss，即解压器代码 + 紧跟的压缩数据），**不包含 initrd**。initrd 由引导程序（如 GRUB）单独加载到另一块内存，不在 bzImage 的这段镜像里，因此不会被这次 rep movsq 挪动。
+**为何需要重定位拷贝？** 解压器需要将压缩的内核数据解压到目标地址（通常是 0x100000），如果解压器代码和压缩数据本身就在目标地址附近，解压过程会覆盖正在执行的代码。因此必须先将整个压缩内核（包括解压器代码和压缩数据）拷贝到一个安全的位置（%rbx），然后从那里执行解压操作。
 
-**head_64.S 中重定位拷贝片段（linux/arch/x86/boot/compressed/head_64.S:415-442）**：
+**地址计算**：
+- **解压目标 %rbp**：解压后内核的最终位置（如 LOAD_PHYSICAL_ADDR，即 0x100000）
+- **重定位目标 %rbx**：压缩内核的安全位置 = %rbp + BP_init_size − rva(_end)（见源代码328-331行）
+
+**拷贝过程**（`arch/x86/boot/compressed/head_64.S:419-425`）：
 
 ```asm
 /* Copy the compressed kernel to the end of our buffer
  * where decompression in place becomes safe. */
 	leaq	(_bss-8)(%rip), %rsi          /* 源：当前运行位置 */
 	leaq	rva(_bss-8)(%rbx), %rdi       /* 目标：%rbx 处（安全地址） */
-	movl	$(_bss - startup_32), %ecx
-	shrl	$3, %ecx
-	std
-	rep	movsq                         /* 拷贝整段压缩内核 */
-	cld
-	/* ... 重设 GDTR 指向新位置 ... */
-	leaq	rva(.Lrelocated)(%rbx), %rax
-	jmp	*%rax                          /* 跳转到新地址的 .Lrelocated，此后 call extract_kernel */
+	movl	$(_bss - startup_32), %ecx    /* 大小：整个压缩内核 */
+	shrl	$3, %ecx                      /* 转换为8字节单位 */
+	std                                   /* 方向标志：向下拷贝（避免覆盖） */
+	rep	movsq                             /* 执行拷贝 */
+	cld                                   /* 清除方向标志 */
 ```
 
-**extract_kernel()（linux/arch/x86/boot/compressed/misc.c:405 起）**：在 **head_64.S 已完成重定位** 的前提下被调用；根据 bzImage 头部与布局找到压缩负载（input_data/input_len），调用 choose_random_location()（可选）、decompress_kernel() 解压到 output，再解析 ELF、做 handle_relocations()，最后跳转到主内核入口。解压目标通常为 **0x100000**（1MB）；启用 KASLR 时由 choose_random_location()（`kaslr.c:861`）更新 output。
+**这次拷贝包含什么？** 只拷贝**压缩内核**这一段（startup_32～_bss，即解压器代码 + 压缩的内核数据），**不包含 initrd**。initrd 由引导程序（如 GRUB）单独加载到另一块内存，不在 bzImage 镜像内。
 
-**与主内核的衔接**：extract_kernel() 返回时已跳转到**主内核**的 `startup_64`（`arch/x86/kernel/head_64.S`），不再是压缩目录下的代码；主内核入口处 %rsi 为 boot_params（或由 boot protocol 约定传递）。
+**跳转到新位置**（`arch/x86/boot/compressed/head_64.S:432-441`）：
+
+```asm
+	/* 重新加载 GDT，指向新位置 */
+	leaq	rva(gdt64)(%rbx), %rax
+	leaq	rva(gdt)(%rbx), %rdx
+	movq	%rdx, 2(%rax)
+	lgdt	(%rax)
+
+	/* 跳转到新地址的 .Lrelocated */
+	leaq	rva(.Lrelocated)(%rbx), %rax
+	jmp	*%rax
+```
+
+之后执行流在新地址（%rbx）运行，调用 extract_kernel() 时，解压写入 0x100000 不会覆盖正在执行的代码。
+
+**extract_kernel() 函数**（`arch/x86/boot/compressed/misc.c:405`）：
+
+在 **重定位拷贝完成后**被调用，完成以下工作：
+1. 根据 bzImage 布局找到压缩负载（input_data/input_len）
+2. choose_random_location()（可选 KASLR）确定解压目标地址
+3. decompress_kernel() 解压到 output（通常 0x100000）
+4. 解析解压后的 ELF 格式
+5. handle_relocations() 处理重定位
+6. 返回主内核入口地址（通过 %rax）
+
+**与主内核的衔接**：extract_kernel() 返回后，`.Lrelocated` 中执行 `jmp *%rax`（第475行），跳转到**主内核**的 `startup_64`（`arch/x86/kernel/head_64.S:38`），此时 %rsi（即 %r15）仍保存着 boot_params 指针。
 
 ---
 
-## 三、主内核 startup_64 → x86_64_start_kernel → start_kernel()
+## 三、【阶段3】主内核 startup_64 → x86_64_start_kernel → start_kernel()
 
-**主内核 startup_64**（`linux/arch/x86/kernel/head_64.S`）：保存 boot_params（%RSI→%R15）、设置初始栈与 GS 基址、**设置 GDT 和早期 IDT**（`__pi_startup_64_setup_gdt_idt`）、切换到 __KERNEL_CS、可选 SEV/SME、verify_cpu，然后进入 C 代码。
+**源代码位置**：`linux/arch/x86/kernel/head_64.S:38`
 
-**主内核 startup_64 关键步骤（head_64.S）**：
+**重要**：这是第三个 startup_64，与前面压缩内核中的 startup_64（`arch/x86/boot/compressed/head_64.S:278`）是**不同的文件**。
+
+**主内核 startup_64**：保存 boot_params（%RSI→%R15）、设置初始栈与 GS 基址、**设置 GDT 和早期 IDT**（`startup_64_setup_gdt_idt`）、切换到 __KERNEL_CS、可选 SEV/SME、verify_cpu，然后进入 C 代码。
+
+**主内核 startup_64 关键步骤**：
 
 ```
-startup_64（linux/arch/x86/kernel/head_64.S）
-    ├─ mov %rsi, %r15                  // 保存 boot_params
-    ├─ leaq __top_init_kernel_stack(%rip), %rsp // 初始内核栈
-    ├─ wrmsr（MSR_GS_BASE）             // GS 基址
-    ├─ call __pi_startup_64_setup_gdt_idt       // GDT 与早期 IDT
-    ├─ pushq $__KERNEL_CS; lretq       // 切换到内核代码段
-    └─ 可选 __pi_sme_enable、verify_cpu  → 进入 C 代码（x86_64_start_kernel）
+startup_64（arch/x86/kernel/head_64.S:38-98）
+    ├─ mov %rsi, %r15                           // 保存 boot_params（59行）
+    ├─ leaq __top_init_kernel_stack(%rip), %rsp // 初始内核栈（62行）
+    ├─ wrmsr（MSR_GS_BASE）                      // GS 基址清零（69-72行）
+    ├─ call startup_64_setup_gdt_idt            // GDT 与早期 IDT（74行）
+    ├─ pushq $__KERNEL_CS; lretq                // 切换到内核代码段（77-80行）
+    ├─ 可选 sme_enable（86-95行，CONFIG_AMD_MEM_ENCRYPT）
+    ├─ call verify_cpu（98行）
+    └─ 后续进入 C 代码（x86_64_start_kernel）
 ```
 
-**主内核 startup_64 源代码（linux/arch/x86/kernel/head_64.S）**：
+**主内核 startup_64 源代码**（`arch/x86/kernel/head_64.S:38-98`）：
 
 ```asm
+	.code64
 SYM_CODE_START_NOALIGN(startup_64)
+	UNWIND_HINT_END_OF_STACK
+	/*
+	 * At this point the CPU runs in 64bit mode CS.L = 1 CS.D = 0,
+	 * and someone has loaded an identity mapped page table
+	 * for us.  These identity mapped page tables map all of the
+	 * kernel pages and possibly all of memory.
+	 *
+	 * %RSI holds the physical address of the boot_params structure
+	 * provided by the bootloader. Preserve it in %R15 so C function calls
+	 * will not clobber it.
+	 *
+	 * We come here either directly from a 64bit bootloader, or from
+	 * arch/x86/boot/compressed/head_64.S.
+	 */
 	mov	%rsi, %r15                    // 保存 boot_params
+
+	/* Set up the stack for verify_cpu() */
 	leaq	__top_init_kernel_stack(%rip), %rsp  // 初始内核栈
+
+	/* Set up GSBASE. */
 	movl	$MSR_GS_BASE, %ecx
 	xorl	%eax, %eax
 	xorl	%edx, %edx
 	wrmsr                              // GS_BASE = 0
-	call	__pi_startup_64_setup_gdt_idt  // GDT 与早期 IDT
+
+	call	startup_64_setup_gdt_idt  // GDT 与早期 IDT
+
+	/* Now switch to __KERNEL_CS so IRET works reliably */
 	pushq	$__KERNEL_CS
 	leaq	.Lon_kernel_cs(%rip), %rax
 	pushq	%rax
 	lretq                              // 切换到内核代码段
+
 .Lon_kernel_cs:
+	ANNOTATE_NOENDBR
+	UNWIND_HINT_END_OF_STACK
+
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 	movq	%r15, %rdi
-	call	__pi_sme_enable
+	call	sme_enable
 #endif
-	call	verify_cpu
+
+	/* Sanitize CPU configuration */
+	call verify_cpu
 	// 随后进入 x86_64_start_kernel
 SYM_CODE_END(startup_64)
 ```
 
-**__pi_startup_64_setup_gdt_idt 的实现**（`linux/arch/x86/boot/startup/gdt_idt.c`）：主内核入口在切换到虚拟地址和 C 环境之前需要可用的 GDT 与一个最小 IDT。`__pi_` 前缀表示该符号在链接时使用位置无关形式（KASLR 时需 rip 相对寻址）。
+**startup_64_setup_gdt_idt 的实现**（`arch/x86/boot/startup/gdt_idt.c`）：主内核入口在切换到虚拟地址和 C 环境之前需要可用的 GDT 与一个最小 IDT。
 
-**为何说这里是“早期/初步”的 GDT/IDT**：**时机**上，这次 lgdt/lidt 发生在 head_64.S，尚在**切到虚拟地址之前**、**进入完整 C 内核**（setup_arch、trap_init、init_IRQ 等）之前，因而是启动顺序里**最早**的一次 GDT/IDT 设置。**GDT**：加载的是 cpu/common.c 里定义的 **gdt_page**（内核正式 GDT），之后内核一直沿用，这里只是**第一次**让 CPU 用上这张表，并非“临时表再换”。**IDT**：加载的是 **bringup_idt_table**，仅作占位或只填 #VC，属于**最小 IDT**；要等到 x86_64_start_kernel() → idt_setup_early_handler() 用 early_idt_handler_array 填满异常向量并再次 load_idt，才算“早期异常处理就绪”。因此“初步”主要指**时机最早**，以及 IDT 是**最小、后续被 early IDT 取代**；GDT 则是**一次加载、后续沿用**。
+**为何说这里是"早期/初步"的 GDT/IDT**：
+- **时机**：这次 lgdt/lidt 发生在 head_64.S，尚在**切到虚拟地址之前**、**进入完整 C 内核**（setup_arch、trap_init、init_IRQ 等）之前，因而是启动顺序里**最早**的一次 GDT/IDT 设置。
+- **GDT**：加载的是 cpu/common.c 里定义的 **gdt_page**（内核正式 GDT），之后内核一直沿用，这里只是**第一次**让 CPU 用上这张表，并非"临时表再换"。
+- **IDT**：加载的是 **bringup_idt_table**，仅作占位或只填 #VC，属于**最小 IDT**；要等到 x86_64_start_kernel() → idt_setup_early_handler() 用 early_idt_handler_array 填满异常向量并再次 load_idt，才算"早期异常处理就绪"。
 
-**汇编如何跳到 C 实现**：由源码与链接流程确认如下。
+因此"初步"主要指**时机最早**，以及 IDT 是**最小、后续被 early IDT 取代**；GDT 则是**一次加载、后续沿用**。
 
-**实际代码依据**：
+**汇编如何调用 C 函数**：通过链接时的符号解析。
 
-| 步骤 | 文件 | 内容 |
-|------|------|------|
-| 汇编引用 | `arch/x86/kernel/head_64.S:74` | `call startup_64_setup_gdt_idt`（符号名即 `startup_64_setup_gdt_idt`，当前内核未对该符号使用 SYM_PIC_ALIAS） |
-| C 声明 | `arch/x86/include/asm/setup.h:54` | `extern void startup_64_setup_gdt_idt(void);` |
-| C 定义 | `arch/x86/boot/startup/gdt_idt.c:49` | `void __head startup_64_setup_gdt_idt(void) { ... }` |
-| 参与链接 | `arch/x86/Makefile` | `core-y += arch/x86/boot/startup/`，与 `arch/x86/kernel/` 下 head_64.o 等一起链接进 vmlinux |
-
-**流程树**：
+**调用流程**：
 
 ```
-【源码与编译】
-arch/x86/kernel/head_64.S
-    └─ call startup_64_setup_gdt_idt   (head_64.S:74)
-    └─ 汇编 → head_64.o，产生未定义符号 startup_64_setup_gdt_idt
+【源码】
+arch/x86/kernel/head_64.S:74
+    └─ call startup_64_setup_gdt_idt   ← 汇编中的 call 指令
 
-arch/x86/include/asm/setup.h
-    └─ extern void startup_64_setup_gdt_idt(void);   (setup.h:54，供 C 编译可见)
-
-arch/x86/boot/startup/gdt_idt.c
-    └─ void __head startup_64_setup_gdt_idt(void) { ... }   (gdt_idt.c:49)
-    └─ 编译 → gdt_idt.o，提供符号 startup_64_setup_gdt_idt 的定义
+arch/x86/boot/startup/gdt_idt.c:49
+    └─ void __head startup_64_setup_gdt_idt(void) { ... }   ← C 函数定义
 
 【链接】
-arch/x86/Makefile: core-y += arch/x86/boot/startup/
-    └─ head_64.o（kernel 目录）+ gdt_idt.o（boot/startup 目录）等 → 链接为 vmlinux
-    └─ 链接器：将 head_64.o 中对 startup_64_setup_gdt_idt 的引用解析为 gdt_idt.o 中该函数的地址
-    └─ call 指令在 vmlinux 中变为“跳转到 C 函数入口”的机器码
+链接器将 head_64.o 和 gdt_idt.o 链接时：
+    └─ 将 call 指令的目标地址解析为 C 函数的入口地址
 
 【运行】
-startup_64（head_64.S）
+startup_64（arch/x86/kernel/head_64.S）
     ├─ mov %rsi, %r15
     ├─ leaq __top_init_kernel_stack(%rip), %rsp
     ├─ wrmsr（MSR_GS_BASE）
-    ├─ call startup_64_setup_gdt_idt   ← 跳转到 C 函数（gdt_idt.c 中实现）
-    │       └─ startup_64_setup_gdt_idt() 执行（lgdt、movl %eax,%ds/%ss/%es、lidt 等）
-    │       └─ ret   → 返回到 head_64.S 的下一句
+    ├─ call startup_64_setup_gdt_idt   ← 直接跳转到 C 函数
+    │       └─ startup_64_setup_gdt_idt() 执行（lgdt、设置段寄存器、lidt）
+    │       └─ ret   → 返回到下一条指令
     ├─ pushq $__KERNEL_CS
-    ├─ lretq
-    └─ .Lon_kernel_cs: ...
+    └─ lretq
 ```
 
-结论：汇编中的 **call** 在链接时被绑定到 C 函数地址，运行时直接跳转到 C 实现；返回时 C 函数的 **ret** 回到 head_64.S 的 **pushq $__KERNEL_CS**。无跳转表或运行时符号解析。
+结论：汇编中的 **call** 在链接时绑定到 C 函数地址，运行时直接跳转；C 函数执行 **ret** 后返回到汇编的下一条指令。
 
 **gdt_idt.c 概览**（`arch/x86/boot/startup/gdt_idt.c`）：该文件仅含一张静态 IDT 表和两个函数，在 head_64.S 切到虚拟地址之前为 boot CPU 建立 GDT 与最小 IDT（bringup IDT 在 x86_64_start_kernel() → idt_setup_early_handler() 之前一直有效；早期不能用 idt.c 的 idt_table，因可能被 KASAN/tracing 等插桩）。
 
