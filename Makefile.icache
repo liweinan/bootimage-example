@@ -1,0 +1,30 @@
+# Makefile for I-cache test program
+
+# 编译选项说明：
+# -nostdlib: 不链接标准库
+# -static: 静态链接
+# -Wl,-N: 设置代码段可写（允许自我修改）
+# -z execstack: 允许执行栈上的代码（非必需，但增加权限）
+
+test_icache: test_icache.S
+	@echo "=== Building I-cache test program ==="
+	gcc -nostdlib -static -Wl,-N -z execstack -o test_icache test_icache.S
+	@echo "=== Build complete ==="
+	@echo ""
+	@echo "Run with: ./test_icache"
+	@echo ""
+	@echo "Expected results:"
+	@echo "  - If I-cache works: counter = 10 (original code: +1 x 10)"
+	@echo "  - If I-cache doesn't work: counter = 1000 (modified code: +100 x 10)"
+	@echo ""
+
+clean:
+	rm -f test_icache
+
+run: test_icache
+	@echo "=== Running test ==="
+	./test_icache
+	@echo ""
+	@echo "=== Test complete ==="
+
+.PHONY: clean run
