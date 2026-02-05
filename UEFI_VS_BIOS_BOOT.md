@@ -141,6 +141,185 @@ efi_status_t __efiapi efi_pe_entry(efi_handle_t handle,
 - 这是 vmlinuz 的 PE 入口点（PE header 中指定）
 - 立即调用 `efi_stub_entry()` 进行实际工作
 
+##### efi_pe_entry 的本质：PE 标准入口点，不是 UEFI 协议
+
+> **重要说明**：`efi_pe_entry` **不是** UEFI 协议（Protocol），而是 **PE（Portable Executable）文件格式的标准入口点**。
+
+**PE 格式的入口点机制**：
+
+UEFI 固件加载 Linux 内核（vmlinuz）时，将其作为标准的 PE 格式可执行文件处理：
+
+```
+1. 内核构建时（arch/x86/boot/header.S）
+   ├─ 构造 PE 头结构
+   ├─ PE Optional Header 中设置：
+   │  AddressOfEntryPoint = setup_size + ZO_efi_pe_entry
+   └─ ZO_efi_pe_entry 是编译后 efi_pe_entry() 函数的偏移量
+    ↓
+2. UEFI 固件加载 PE 文件时
+   ├─ 解析 PE 头（验证 "MZ" / "PE\0\0" 签名）
+   ├─ 读取 AddressOfEntryPoint 字段
+   ├─ 将文件加载到内存（任意地址，如 300MB）
+   └─ 跳转到 (加载地址 + AddressOfEntryPoint) 执行
+    ↓
+3. 执行 efi_pe_entry(handle, sys_table)
+   └─ 传递 EFI 句柄和系统表指针
+```
+
+**PE 头的构造**（源代码：`arch/x86/boot/header.S`）：
+
+```assembly
+#ifdef CONFIG_EFI_STUB
+pe_header:
+	.long	0x00004550              # PE 签名 "PE\0\0"
+
+optional_header:
+#ifdef CONFIG_X86_32
+	.word	0x10b                   # PE32 format
+#else
+	.word	0x20b                   # PE32+ format (64位)
+#endif
+	.byte	0x02                    # MajorLinkerVersion
+	.byte	0x14                    # MinorLinkerVersion
+
+	# ... 各种大小字段 ...
+
+	# 关键：入口点地址
+	.long	setup_size + ZO_efi_pe_entry    # AddressOfEntryPoint
+
+	# ... 其他 PE 头字段 ...
+#endif
+```
+
+**UEFI 固件的加载流程**：
+
+```
+GRUB (UEFI 模式)
+    ↓
+grub_efi_load_image(addr, size, &image_handle)
+    ├─ 调用 UEFI Boot Services: LoadImage()
+    ├─ UEFI 固件读取 PE 头
+    ├─ 验证 PE 签名
+    ├─ 读取 AddressOfEntryPoint = setup_size + ZO_efi_pe_entry
+    ├─ 分配内存并加载镜像
+    └─ 返回 image_handle
+    ↓
+grub_efi_start_image(image_handle)
+    ├─ 调用 UEFI Boot Services: StartImage()
+    ├─ UEFI 固件跳转到 AddressOfEntryPoint
+    └─ 执行 efi_pe_entry(handle, sys_table)
+        ├─ handle: EFI_HANDLE（镜像句柄）
+        └─ sys_table: EFI_SYSTEM_TABLE*（系统表指针）
+```
+
+**参考文档**：
+- [GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md) - GRUB 如何加载和启动 PE 格式内核
+- [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) - GRUB relocator 中 UEFI vs BIOS 路径的对比
+
+**efi_pe_entry vs UEFI 协议**：
+
+| 概念 | efi_pe_entry | UEFI 协议（Protocol）|
+|------|--------------|---------------------|
+| **本质** | PE 文件入口点（函数地址） | 服务/接口抽象 |
+| **定义方式** | PE 头的 AddressOfEntryPoint 字段 | GUID + 接口结构体 |
+| **发现方式** | PE 加载器自动读取 | `LocateProtocol()` / `HandleProtocol()` |
+| **标准化** | ✅ PE 标准（Windows、UEFI 通用） | ✅ UEFI 规范 |
+| **示例** | `efi_pe_entry()` | `EFI_BOOT_SERVICES_PROTOCOL`<br>`EFI_LOADED_IMAGE_PROTOCOL`<br>`EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` |
+| **类比** | C 程序的 `main()`<br>ELF 的 `e_entry` | Java 的接口<br>COM 接口 |
+
+**真正的 UEFI 协议示例**：
+
+```c
+// EFI Boot Services Protocol（固件提供的服务）
+struct _EFI_BOOT_SERVICES {
+    EFI_TABLE_HEADER                 Hdr;
+
+    // 任务优先级服务
+    EFI_RAISE_TPL                    RaiseTPL;
+    EFI_RESTORE_TPL                  RestoreTPL;
+
+    // 内存服务
+    EFI_ALLOCATE_PAGES               AllocatePages;
+    EFI_FREE_PAGES                   FreePages;
+    EFI_GET_MEMORY_MAP               GetMemoryMap;
+    EFI_ALLOCATE_POOL                AllocatePool;
+    EFI_FREE_POOL                    FreePool;
+
+    // 镜像服务
+    EFI_IMAGE_LOAD                   LoadImage;     // ← GRUB 调用这个加载内核
+    EFI_IMAGE_START                  StartImage;    // ← GRUB 调用这个启动内核
+    EFI_EXIT                         Exit;
+    // ...
+};
+
+// EFI Loaded Image Protocol（描述已加载的镜像）
+#define EFI_LOADED_IMAGE_PROTOCOL_GUID \
+    {0x5B1B31A1,0x9562,0x11d2,\
+     {0x8E,0x3F,0x00,0xA0,0xC9,0x69,0x72,0x3B}}
+
+struct _EFI_LOADED_IMAGE_PROTOCOL {
+    UINT32                           Revision;
+    EFI_HANDLE                       ParentHandle;
+    EFI_SYSTEM_TABLE                 *SystemTable;
+
+    // 源位置
+    EFI_HANDLE                       DeviceHandle;
+    EFI_DEVICE_PATH_PROTOCOL         *FilePath;
+    VOID                             *Reserved;
+
+    // 镜像加载选项
+    UINT32                           LoadOptionsSize;
+    VOID                             *LoadOptions;
+
+    // 镜像在内存中的位置
+    VOID                             *ImageBase;
+    UINT64                           ImageSize;
+    EFI_MEMORY_TYPE                  ImageCodeType;
+    EFI_MEMORY_TYPE                  ImageDataType;
+    EFI_IMAGE_UNLOAD                 Unload;
+};
+```
+
+**EFI Handover Protocol（已废弃的内核特有协议）**：
+
+除了标准的 PE 入口点，Linux 内核曾经支持一个 **GRUB 特有的非标准协议**：
+
+```c
+// drivers/firmware/efi/libstub/x86-stub.c:950-955
+#ifdef CONFIG_EFI_HANDOVER_PROTOCOL
+void efi_handover_entry(efi_handle_t handle,
+                        efi_system_table_t *sys_table_arg,
+                        struct boot_params *boot_params)
+{
+    memset(_bss, 0, _ebss - _bss);
+    efi_stub_entry(handle, sys_table_arg, boot_params);
+}
+#endif
+```
+
+**EFI Handover Protocol vs efi_pe_entry 对比**：
+
+| 特性 | efi_pe_entry（标准） | EFI Handover Protocol（废弃） |
+|------|---------------------|------------------------------|
+| **性质** | PE 格式标准入口点 | GRUB 内部约定（非 UEFI 标准） |
+| **标准化** | ✅ PE/COFF 标准 | ❌ GRUB 特有，非标准 |
+| **发现方式** | PE 头的 AddressOfEntryPoint | GRUB 硬编码固定偏移 |
+| **函数签名** | `(handle, sys_table)` | `(handle, sys_table, boot_params)` |
+| **boot_params** | NULL（需要自己分配） | GRUB 已分配好 |
+| **状态** | ✅ 当前标准方法 | ⚠️ 已废弃（从内核 5.x 开始） |
+| **配置** | `CONFIG_EFI_STUB` | `CONFIG_EFI_HANDOVER_PROTOCOL` |
+
+**为什么废弃 Handover Protocol？**
+1. 非标准化：只有 GRUB 支持，其他 UEFI bootloader 不知道
+2. 维护负担：需要维护两套入口点
+3. 标准 PE 入口点足够：`efi_pe_entry` 完全满足需求
+
+**总结**：
+- `efi_pe_entry` 是 **PE 文件格式的标准入口点**，类似 ELF 的 `e_entry` 或 C 的 `main()`
+- UEFI 固件按 **PE 加载器**的方式加载内核，读取 `AddressOfEntryPoint` 并跳转
+- **不是** UEFI 协议，不需要 GUID 查找或 `LocateProtocol()`
+- 真正的 UEFI 协议是像 `EFI_BOOT_SERVICES`、`EFI_LOADED_IMAGE_PROTOCOL` 这样的服务接口
+
 #### 3. efi_stub_entry() - EFI Stub 主函数
 
 **源代码**：`drivers/firmware/efi/libstub/x86-stub.c:808-941`
@@ -453,7 +632,8 @@ x86_64_start_kernel() → start_kernel()
 ## 相关文档
 
 - [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) - Linux 内核启动与初始化（BIOS/GRUB 详细流程）
-- [GRUB UEFI 长模式启动分析](GRUB_UEFI_LONG_MODE_ANALYSIS.md) - GRUB 和 Linux kernel 的 UEFI 长模式启动详细实现
+- [GRUB UEFI 长模式启动分析](GRUB_UEFI_LONG_MODE_ANALYSIS.md) - GRUB 和 Linux kernel 的 UEFI 长模式启动详细实现、PE 头结构和入口点机制
+- [GRUB Relocator](GRUB_RELOCATOR.md) - GRUB relocator 中 UEFI vs BIOS 加载路径对比、PE 入口点 vs Legacy 入口点
 - [GRUB 模式切换](GRUB_MODE_SWITCHING.md) - GRUB 在不同模式间的切换机制
 - [X86_CPU_MODES.md](X86_CPU_MODES.md) - x86 CPU 的实模式、保护模式和长模式详解
 - [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) - 为什么 BIOS 路径需要重定位（UEFI 路径不需要）
