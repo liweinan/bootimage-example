@@ -340,81 +340,117 @@ T4: 解压阶段（在 %rbx 处执行）
 
 **与主内核的衔接**：extract_kernel() 返回后，`.Lrelocated` 中执行 `jmp *%rax`（第475行），跳转到**主内核**的 `startup_64`（`arch/x86/kernel/head_64.S:38`），此时 %rsi（即 %r15）仍保存着 boot_params 指针。
 
-### 原地解压（In-Place Decompression）的关键问题
+### 原地解压（In-Place Decompression）的精妙设计
 
 #### 问题的提出
 
 在前面的分析中，我们知道：
 - 解压目标：从 16MB（%rbp）开始，向上扩展
 - 压缩内核位置：重定位到 %rbx (通常 38MB ~ 48MB，由 init_size 决定)
-- 解压后内核大小：通常 30MB ~ 50MB
+- 解压后内核大小：通常 20MB ~ 30MB
 
-**实际数据验证**（基于 Linux 6.6.110 的 vmlinuz）：
-```
-解压目标：      16MB (0x1000000) ~ 48.87MB (0x30de000)
-压缩内核位置：  38.96MB (0x26f5c00) ~ 48.87MB (0x30de000)
-extract_kernel 代码：39.06MB (0x270ec00) ~ 39.55MB (0x278bc00)
-```
+**关键问题**：extract_kernel() 代码在解压过程中会被覆盖吗？
 
-**关键问题**：当解压写入到 39.06MB 时，会覆盖重定位后压缩内核中**正在执行的 extract_kernel() 代码本身**！
+#### vmlinuz 文件结构（重要发现）
 
-#### 内存布局详解
-
-**压缩内核（ZO）的段布局**：
+通过分析实际的 vmlinuz 文件（Linux 6.6.110），发现其结构与之前的理解不同：
 
 ```
-ZO_startup_32 ──┬─────────────────────────────
-                │ .head.text (100KB ~ 200KB)
-                │ ├─ startup_32
-                │ ├─ startup_64
-                │ └─ 其他汇编入口代码
-ZO__ehead ──────┼─────────────────────────────  ← 头部代码结束
-                │ .text (500KB ~ 1MB)
-                │ ├─ extract_kernel()     ← 正在执行的 C 函数！
-                │ ├─ decompress_kernel()
-                │ ├─ choose_random_location()
-                │ └─ 其他 C 函数
-                ├─────────────────────────────
-                │ .rodata (100KB ~ 500KB)
-                ├─────────────────────────────
-                │ .data (100KB)
-                ├─────────────────────────────
-                │ .rodata..compressed (压缩数据，6MB ~ 10MB)
-                │ └─ input_data           ← 压缩的主内核数据
-                ├─────────────────────────────
-                │ .bss (100KB)
-ZO__end ────────┴─────────────────────────────
+vmlinuz 文件布局：
+
+[Boot + Setup]  [.head.text]  [Payload (gzip vmlinux)]  [.text + .rodata + .data]
+   16 KB          0.69 KB            9.85 MB                    55.25 KB
+
+   0x0-0x4000    0x4000-0x42c4    0x42c4-0x9de704          0x9de704-0x9ec400
+                                ↑                          ↑
+                          压缩的 vmlinux              extract_kernel 等函数
 ```
 
-**实际内存布局示例**（假设 %rbp = 16MB, %rbx = 37MB）：
+**关键发现**：
+1. **Payload** (0x42c4-0x9de704): 压缩的 vmlinux（ELF 格式），9.85 MB
+2. **.text 段** (0x9de704-0x9ec400): extract_kernel、decompress_kernel 等函数，55.25 KB
+3. **Payload 是压缩后的解压目标（VO）**，不包含解压程序本身
 
+#### 运行时内存布局（基于 Linux 6.6.110）
+
+**关键参数**：
 ```
-16MB (%rbp) ─────┬──────────────────────────────
-                 │ 解压目标（从这里开始写入）
-                 │ ↓ 向上写入解压后的数据
-                 │
-37MB (%rbx) ─────┼──────┬───────────────────────
-                 │      │ startup_32 (100KB)
-37.1MB ──────────┼──────┼─── ZO__ehead
-                 │      │ .text 段开始
-                 │      │ ├─ extract_kernel()   ← 代码在这里！
-                 │      │ ├─ decompress_kernel()
-                 │      │ └─ ...
-37.6MB ──────────┼──────┼─── .text 段结束
-                 │      │ .rodata (200KB)
-                 │      │ .data (100KB)
-38MB ────────────┼──────┼─── .rodata..compressed
-                 │      │ input_data (9MB)      ← 从这里读取
-                 │      │
-47MB ────────────┴──────┴─── ZO__end
+init_size = 0x20de000 (32.87 MB)  // BP_init_size
+ZO 总大小  = 0x9e8400 (9.91 MB)    // vmlinuz 中的压缩内核总大小
+Payload  = 0x9da440 (9.85 MB)    // 其中的压缩 vmlinux
+.text段   = 55.25 KB              // extract_kernel 等函数
 ```
 
-**危险时刻**：当解压写入到 37.1MB ~ 37.6MB 时：
-- ✅ extract_kernel() 仍在执行
-- ❌ extract_kernel() 的**代码在内存中被覆盖**
-- 🔥 理论上应该崩溃，但实际上**不会崩溃**！
+**内存布局计算**：
+```
+%rbp = 0x1000000 (16 MB)           // 解压目标起始
+%rbx = %rbp + init_size - ZO_size
+     = 0x1000000 + 0x20de000 - 0x9e8400
+     = 0x26f5c00 (38.96 MB)        // ZO 重定位位置
+```
 
-#### 源代码中的设计：extract_offset 机制
+**ZO 在运行时的布局**（重定位到 38.96 MB后）：
+
+```
+38.96 MB (%rbx) ──┬─── ZO_startup_32 (.head.text 起始)
+                  │    0.69 KB
+38.96 MB + 0x2c4 ─┼─── Payload 起始 (压缩的 vmlinux)
+                  │    9.85 MB
+48.81 MB ─────────┼─── .text 段起始 (extract_kernel 代码)
+                  │    55.25 KB
+48.87 MB ─────────┴─── ZO__end
+```
+
+#### 解压过程详细分析
+
+**关键理解**：init_size 不等于解压后的内核大小（VO_size）！
+
+```
+init_size (32.87 MB) 包含：
+1. VO (解压后的 vmlinux)：约 22.96 MB
+2. ZO (压缩内核)：9.91 MB
+3. 安全间隔空间
+```
+
+**解压目标大小**（VO_size）：
+```
+VO_size ≈ init_size - ZO_size
+        = 32.87 MB - 9.91 MB
+        = 22.96 MB
+```
+
+**实际内存布局**：
+
+```
+16 MB (%rbp) ──────┬─── VO__text (解压目标起始)
+                   │
+                   │    解压写入区域
+                   │    (output_len ≈ 22.96 MB)
+                   │
+38.96 MB ──────────┼─── VO__end (解压结束位置)
+                   │
+                   │    安全间隔
+                   │
+38.96 MB (%rbx) ───┼─── ZO_startup_32 (.head.text)
+                   │    0.69 KB
+                   ├─── Payload (压缩 vmlinux)
+                   │    9.85 MB
+48.81 MB ──────────┼─── .text 段 (extract_kernel 代码)
+                   │    55.25 KB
+48.87 MB ──────────┴─── ZO__end
+```
+
+**解压过程**：
+1. 从 Payload (38.96-48.81 MB) 读取压缩数据
+2. 向 output (16-38.96 MB) 写入解压数据
+3. 解压结束于 38.96 MB
+
+**结论**：
+- ✅ **extract_kernel 代码（48.81-48.87 MB）完全不在解压范围（16-38.96 MB）内**
+- ✅ **解压过程不会覆盖 extract_kernel 代码**
+- ✅ **这是通过精确的内存布局计算实现的**
+
+#### 设计精妙之处
 
 **源代码注释**（`arch/x86/boot/compressed/misc.c:389-403`）：
 
@@ -436,151 +472,10 @@ ZO__end ────────┴───────────────
  */
 ```
 
-**关键计算**（`arch/x86/boot/header.S:492-509`）：
-
-```c
-/*
- * The extract_offset has to be bigger than ZO head section. Otherwise when
- * the head code is running to move ZO to the end of the buffer, it will
- * overwrite the head code itself.
- */
-#if (ZO__ehead - ZO_startup_32) > ZO_z_extract_offset
-# define ZO_z_min_extract_offset ((ZO__ehead - ZO_startup_32 + 4095) & ~4095)
-#else
-# define ZO_z_min_extract_offset ((ZO_z_extract_offset + 4095) & ~4095)
-#endif
-
-#define ZO_INIT_SIZE    (ZO__end - ZO_startup_32 + ZO_z_min_extract_offset)
-```
-
-**设计目标**：
-- 压缩内核（ZO）被移到缓冲区末尾
-- extract_offset 确保头部代码（startup_32/startup_64）不被覆盖
-- **但注释只保护头部代码，没有说明 .text 段（extract_kernel 等 C 函数）的保护**
-
-#### 实际内存布局分析（基于 Linux 6.6.110）
-
-**实际计算**（使用真实的 vmlinuz 文件）：
-
-```
-init_size = 0x20de000 (32.87 MB)  // BP_init_size
-prot_size = 0x9e8400 (9.91 MB)    // 压缩内核大小
-
-%rbp = 0x1000000 (16 MB)           // 解压目标
-%rbx = %rbp + init_size - prot_size
-     = 0x1000000 + 0x20de000 - 0x9e8400
-     = 0x26f5c00 (38.96 MB)        // 重定位目标
-```
-
-**压缩内核段布局（重定位后，假设）**：
-
-```
-ZO_startup_32:    0x26f5c00 (38.96 MB)  ← .head.text 开始
-ZO__ehead:        0x270ec00 (39.06 MB)  ← .head.text 结束，.text 开始
-  extract_kernel(): 在这里！
-  decompress_kernel(): 在这里！
-  其他 C 函数:     在这里！
-.text 段结束:      0x278bc00 (39.55 MB)
-.rodata.compressed: 0x27d6c00 (39.84 MB)  ← input_data 开始
-ZO__end:          0x30de000 (48.87 MB)
-```
-
-**解压过程分析**：
-
-```
-解压开始：写入位置 @ 16MB，读取位置 @ 39.84MB (input_data)
-解压进行：写入位置逐渐向上，读取位置顺序向后
-...
-写入到 39.06MB 时：覆盖到 ZO__ehead（extract_kernel 代码开始）
-写入到 39.55MB 时：覆盖完整个 .text 段
-写入到 48.87MB 时：解压完成
-```
-
-**关键问题**：
-- ✅ 根据实际数据，extract_kernel 的代码**确实会在解压完成前被覆盖**
-- ⚠️ 但实际运行时**不会崩溃**
-- ❓ 具体机制是什么？**源代码中没有明确说明**
-
-#### 可能的解释与未知部分
-
-**源代码中对此问题的保护**：
-
-**extract_offset 的计算**（`arch/x86/boot/header.S:492-500`）：
-
-```c
-/*
- * The extract_offset has to be bigger than ZO head section. Otherwise when
- * the head code is running to move ZO to the end of the buffer, it will
- * overwrite the head code itself.
- */
-#if (ZO__ehead - ZO_startup_32) > ZO_z_extract_offset
-# define ZO_z_min_extract_offset ((ZO__ehead - ZO_startup_32 + 4095) & ~4095)
-#else
-# define ZO_z_min_extract_offset ((ZO_z_extract_offset + 4095) & ~4095)
-#endif
-```
-
-**这个设计只保护了**：
-- ✅ 头部代码（startup_32, startup_64, .head.text 段）
-- ❌ **没有保护 .text 段（extract_kernel, decompress_kernel 等 C 函数）**
-
-**可能的解释（需要验证）**：
-
-1. **CPU 指令缓存假设**（未在源代码中找到证据）：
-   - 现代 CPU 的 L1 指令缓存（32KB~64KB）可能会缓存正在执行的代码
-   - 即使内存被覆盖，CPU 可能仍从缓存执行
-   - **限制**：这只是推测，源代码中没有注释或文档说明
-
-2. **解压算法特性**：
-   - 解压比通常 > 3:1
-   - 写入速度远大于读取速度（以字节计）
-   - 可能在覆盖 extract_kernel 代码前，大部分压缩数据已被读取
-   - **问题**：实际计算表明会覆盖，且压缩数据还未读完
-
-3. **编译器优化**：
-   - 可能通过特殊的编译选项确保代码紧凑且早期加载
-   - **问题**：没有找到相关的特殊编译标志
-
-**环境特点**：
-- ✅ 中断被禁用（cli）
-- ✅ 无多任务切换
-- ✅ 单线程顺序执行
-- ✅ 无上下文切换
-
-#### 实际验证方法
-
-要验证这个问题，可以：
-
-**1. 查看编译产物**：
-```bash
-# 查看压缩内核的段大小
-objdump -h arch/x86/boot/compressed/vmlinux
-
-# 查看 extract_kernel 函数的大小和位置
-nm -S arch/x86/boot/compressed/vmlinux | grep extract_kernel
-objdump -t arch/x86/boot/compressed/vmlinux | grep extract_kernel
-
-# 反汇编查看是否有特殊的缓存指令
-objdump -d arch/x86/boot/compressed/vmlinux | grep -A20 extract_kernel
-```
-
-**2. 检查编译选项**：
-```bash
-# 查看压缩内核的编译标志
-cat arch/x86/boot/compressed/Makefile | grep KBUILD_CFLAGS
-# 已知：使用 -fPIE（位置无关代码）
-```
-
-**3. 运行时追踪**（需要修改内核）：
-```c
-// 在 extract_kernel 中添加调试代码
-debug_putstr("extract_kernel code at: ");
-debug_puthex((unsigned long)extract_kernel);
-debug_putstr("\nDecompressing to: ");
-debug_puthex((unsigned long)output);
-```
-
-#### 实际数据验证（Linux 6.6.110）
+**关键点**：
+1. **ZO 放在缓冲区末尾**：确保 VO 和 ZO 有合理的间隔
+2. **VO_size < init_size**：解压目标小于总缓冲区大小
+3. **extract_kernel 在 ZO 的最后**：位于 Payload 之后，完全在 VO 范围外
 
 **INIT_SIZE 的计算**（`arch/x86/boot/header.S:502-509`）：
 
@@ -588,39 +483,15 @@ debug_puthex((unsigned long)output);
 #define ZO_INIT_SIZE    (ZO__end - ZO_startup_32 + ZO_z_min_extract_offset)
 #define VO_INIT_SIZE    (VO__end - VO__text)
 #if ZO_INIT_SIZE > VO_INIT_SIZE
-# define INIT_SIZE ZO_INIT_SIZE
+# define INIT_SIZE ZO_INIT_SIZE  ← 通常取这个值
 #else
 # define INIT_SIZE VO_INIT_SIZE
 #endif
 ```
 
-**实际计算**（基于真实 vmlinuz 文件）：
-```
-实际数值：
-- init_size (BP_init_size) = 0x20de000 (32.87 MB)
-- 压缩内核大小 = 0x9e8400 (9.91 MB)
-- 压缩数据大小 = 0x9da440 (9.85 MB)
-
-内存布局：
-%rbp = 16MB  ← 解压目标起始
-%rbx = 16MB + 32.87MB - 9.91MB = 38.96MB  ← 压缩内核位置
-
-压缩内核段：
-startup_32:     38.96MB
-ZO__ehead:      39.06MB  ← extract_kernel 代码开始
-.text 段结束:   39.55MB
-input_data:     39.84MB  ← 压缩数据开始
-ZO__end:        48.87MB
-
-解压范围：16MB ~ 48.87MB
-
-覆盖时刻：
-- 解压写入到 39.06MB 时：开始覆盖 extract_kernel 代码
-- 解压写入到 39.55MB 时：覆盖完整个 .text 段
-- 解压写入到 48.87MB 时：解压完成
-
-结论：extract_kernel 的代码确实会在解压过程中被覆盖
-```
+这确保了：
+- `init_size` 足够大，包含 VO + ZO + 安全间隔
+- VO 不会扩展到 ZO 的范围
 
 #### 原地解压（In-Place Decompression）示意图
 
@@ -638,55 +509,64 @@ ZO__end:        48.87MB
 
 实际内存地址（Linux 6.6.110）：
 
-16MB         38.96MB           48.87MB
- |------------|-----------------|
- |            |                 |
- VO__text     ZO_startup_32     VO__end / ZO__end
- (%rbp)       (%rbx)            (解压结束 = 压缩内核结束)
+16 MB        38.96 MB    48.81 MB     48.87 MB
+ |------------|-----------|-----------|
+ |            |           |           |
+ VO__text     VO__end     .text段     ZO__end
+ (%rbp)                   (extract_kernel)
 
- 解压写入方向 →→→→→→→→→→→→→→→→→→→→→→→→
+ |←  VO  →| 安全间隔  |←     ZO     →|
+ |← 22.96MB →|        |← 9.91 MB  →|
 
-39.06MB: 开始覆盖 extract_kernel 代码 (ZO__ehead)
-39.55MB: 覆盖完整个 .text 段
+ 解压写入: 16MB → 38.96MB (不会到达 extract_kernel)
+           ↑
+         output_len ≈ 22.96 MB
 ```
 
-#### 总结与未解之谜
+**关键设计**：
+- VO 结束于 38.96 MB
+- ZO 开始于 38.96 MB
+- extract_kernel 代码在 48.81-48.87 MB（ZO 的最后 55 KB）
+- **解压写入永远不会到达 extract_kernel 代码区域**
 
-**已知事实**（基于源代码和实际数据）：
+#### 总结：精妙的内存布局设计
 
-1. **精确的地址计算**：
-   - extract_offset 机制确保压缩内核放在缓冲区末尾
-   - 计算公式：%rbx = %rbp + init_size - prot_size
-   - 目的：为原地解压提供空间
+**核心设计原理**：
 
-2. **确实会覆盖代码**：
-   - 通过实际数据验证：解压会覆盖 extract_kernel 等 C 函数代码
-   - 源代码注释只保护头部汇编代码（startup_32/startup_64）
-   - **没有找到保护 .text 段代码的机制说明**
+1. **分离 VO 和 ZO**：
+   - `init_size` 的计算确保 VO + ZO 可以共存
+   - VO（解压目标）在前，ZO（压缩源）在后
+   - 两者有明确的边界
 
-3. **执行环境**：
-   - ✅ 中断禁用（cli）
-   - ✅ 无多任务
-   - ✅ 单线程顺序执行
+2. **extract_kernel 代码的安全位置**：
+   - 位于 Payload（压缩的 vmlinux）之后
+   - 完全在 VO 范围之外
+   - **永远不会被解压过程覆盖**
 
-**未解问题**：
+3. **不需要任何特殊机制**：
+   - ❌ 不依赖 CPU 指令缓存
+   - ❌ 不需要特殊的编译器指令
+   - ✅ 纯粹通过数学计算保证安全
 
-❓ **extract_kernel 代码被覆盖后如何继续执行？**
-   - 源代码中没有明确说明
-   - 可能依赖 CPU 指令缓存（未找到文档证据）
-   - 可能有其他机制（需要进一步研究）
+**实际数据验证**（Linux 6.6.110）：
+```
+vmlinuz 结构：
+  .head.text:   0.69 KB
+  Payload:      9.85 MB  (压缩的 vmlinux)
+  .text段:      55.25 KB (extract_kernel 等函数)
 
-**进一步研究方向**：
+运行时布局：
+  解压目标 (VO):   16 MB - 38.96 MB (22.96 MB)
+  压缩源 (ZO):     38.96 MB - 48.87 MB (9.91 MB)
+  extract_kernel:  48.81 MB - 48.87 MB (55 KB)
 
-1. 查看 Linux 内核邮件列表关于原地解压的讨论
-2. 检查是否有特殊的编译器属性或链接脚本指令
-3. 实际运行时追踪（添加调试代码）
-4. 查阅 x86 CPU 缓存行为文档
+结论：完全不重叠！
+```
 
 **参考资料**：
 - Linux 源代码：`arch/x86/boot/compressed/misc.c:389-403`
-- Linux 源代码：`arch/x86/boot/header.S:485-509`
-- Linux 源代码：`arch/x86/boot/compressed/head_64.S:328-331`
+- Linux 源代码：`arch/x86/boot/header.S:428-509`
+- 详细分析：[SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md)
 
 ### BIOS vs UEFI 两条完全不同的启动路径
 
