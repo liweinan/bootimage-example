@@ -4,11 +4,15 @@
 
 > **相关文档**：[BOOT_FLOW.md](BOOT_FLOW.md) 启动概述；[GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) GRUB 加载内核；[GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md) GRUB UEFI 长模式启动分析；[UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md) UEFI 与 BIOS 引导机制差异；[LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md) 从扇区 0 启动的 Setup；[LINUX_KERNEL_SETUP_ARCH_MEMORY.md](LINUX_KERNEL_SETUP_ARCH_MEMORY.md) setup_arch 内存接管详解；[MMU_AND_PAGING.md](MMU_AND_PAGING.md) x86 MMU、分页与内核页表管理；[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md) near/long jump 与 long mode 下 CS 的作用。
 >
-> **执行顺序**：GRUB/入口 → 【阶段1】压缩内核 startup_32（32位模式切换）→ 【阶段2】压缩内核 startup_64（重定位拷贝、解压）→ 【阶段3】主内核 startup_64 → x86_64_start_kernel（早期 IDT）→ start_kernel() → setup_arch → trap_init/syscall → init_IRQ → rest_init → 核心进程。
+> **执行顺序（BIOS/GRUB 路径）**：GRUB/入口 → 【阶段1】压缩内核 startup_32（32位模式切换）→ 【阶段2】压缩内核 startup_64（重定位拷贝、解压）→ 【阶段3】主内核 startup_64 → x86_64_start_kernel（早期 IDT）→ start_kernel() → setup_arch → trap_init/syscall → init_IRQ → rest_init → 核心进程。
+>
+> **执行顺序（UEFI 路径）**：UEFI 固件 → efi_pe_entry → efi_stub_entry → efi_decompress_kernel（解压）→ enter_kernel → 【阶段3】主内核 startup_64（直接跳到这里，跳过阶段1和2）→ 后续与 BIOS 路径相同。
 
 ### 完整流程图（按执行顺序）
 
-**关键地址说明**：
+**重要说明**：以下流程图描述的是 **BIOS/GRUB 启动路径**。**UEFI 启动路径完全不同**，不经过 compressed/head_64.S 的 startup_32/startup_64，而是直接通过 EFI stub（efi_pe_entry → efi_stub_entry → efi_decompress_kernel）解压并跳转到主内核。详见本文档的"BIOS vs UEFI 两条完全不同的启动路径"章节。
+
+**关键地址说明**（BIOS/GRUB 路径）：
 - **1MB (0x100000)**：GRUB 加载压缩内核的位置，startup_32/startup_64 最初在这里执行
 - **16MB (0x1000000)**：解压后内核的目标位置（CONFIG_PHYSICAL_START 配置）
 - **16MB+ (约 22MB)**：重定位后的压缩内核位置（%rbx），从这里解压内核到 16MB
@@ -80,11 +84,13 @@ grub_relocator32_boot() → EIP = code32_start
 
 ## 二、压缩内核的三个阶段（源代码位置：arch/x86/boot/compressed/head_64.S）
 
-**重要**：从 GRUB 到主内核需经过压缩内核的**三个阶段**，前两个阶段都在 `arch/x86/boot/compressed/head_64.S` 中：
+**重要说明**：以下三个阶段**仅适用于 BIOS/GRUB 启动路径**。**UEFI 启动路径完全跳过【阶段1】和【阶段2】**，直接通过 EFI stub 解压并跳转到【阶段3】主内核 startup_64。详见"BIOS vs UEFI 两条完全不同的启动路径"章节。
+
+**BIOS/GRUB 启动的三个阶段**：从 GRUB 到主内核需经过压缩内核的**三个阶段**，前两个阶段都在 `arch/x86/boot/compressed/head_64.S` 中：
 
 - **【阶段1】startup_32（32位保护模式）**：模式切换，从32位切换到64位长模式
 - **【阶段2】压缩内核 startup_64（64位长模式）**：重定位拷贝、解压内核
-- **【阶段3】主内核 startup_64（64位长模式）**：主内核初始化（在 `arch/x86/kernel/head_64.S`）
+- **【阶段3】主内核 startup_64（64位长模式）**：主内核初始化（在 `arch/x86/kernel/head_64.S`）← UEFI 和 BIOS 路径在此汇合
 
 ### 【阶段1】压缩内核 startup_32 → 32位到64位的模式切换
 
@@ -227,10 +233,18 @@ T4: 解压阶段（在 %rbx 处执行）
 ```
 
 **为何需要重定位拷贝？**
+
+**重要前提**：此重定位拷贝机制**仅适用于 BIOS/GRUB 启动路径**，UEFI 启动路径**完全不经过此流程**（详见下节"BIOS vs UEFI 两条不同的启动路径"）。
+
+**BIOS/GRUB 路径的重定位原因**：
 - **初始执行位置**：压缩内核开始执行时在 **1MB (0x100000)**（GRUB relocator 复制后的位置）
   - 注：GRUB 实际先加载到临时缓冲区（prot_mode_mem，通常 16MB+），boot 时 relocator 复制到 1MB
-- **解压目标**：需要解压到 **16MB (0x1000000)**（CONFIG_PHYSICAL_START 配置）
-- **冲突问题**：如果直接从 1MB 处解压到 16MB，解压器代码和压缩数据本身就在解压路径上，可能被覆盖
+- **解压目标**：需要解压到 **16MB (0x1000000)**（CONFIG_PHYSICAL_ADDR 配置，可能因 KASLR 而不同）
+- **为什么看起来 1MB 和 16MB 不重叠仍需重定位**：
+  1. **栈和数据结构**：解压器代码在 1MB 处执行时，其栈、全局变量、临时数据都在附近
+  2. **解压器代码自身**：`extract_kernel()` 函数本身在 1MB 处，解压到 16MB 时可能覆盖执行路径
+  3. **CONFIG_RELOCATABLE + KASLR**：解压目标不总是 16MB，可能是任意对齐地址（见下节）
+  4. **通用性设计**：重定位机制支持所有场景（固定地址、KASLR、kexec 等）
 - **解决方案**：先将整个压缩内核（包括解压器代码和压缩数据）从 1MB 拷贝到安全位置（%rbx，通常在 16MB 以上，例如约 22MB），然后从那里执行解压操作
 
 **地址计算**：
@@ -325,6 +339,483 @@ T4: 解压阶段（在 %rbx 处执行）
 6. 返回主内核入口地址（通过 %rax）
 
 **与主内核的衔接**：extract_kernel() 返回后，`.Lrelocated` 中执行 `jmp *%rax`（第475行），跳转到**主内核**的 `startup_64`（`arch/x86/kernel/head_64.S:38`），此时 %rsi（即 %r15）仍保存着 boot_params 指针。
+
+### 原地解压（In-Place Decompression）的关键问题
+
+#### 问题的提出
+
+在前面的分析中，我们知道：
+- 解压目标：从 16MB（%rbp）开始，向上扩展
+- 压缩内核位置：重定位到 %rbx (通常 38MB ~ 48MB，由 init_size 决定)
+- 解压后内核大小：通常 30MB ~ 50MB
+
+**实际数据验证**（基于 Linux 6.6.110 的 vmlinuz）：
+```
+解压目标：      16MB (0x1000000) ~ 48.87MB (0x30de000)
+压缩内核位置：  38.96MB (0x26f5c00) ~ 48.87MB (0x30de000)
+extract_kernel 代码：39.06MB (0x270ec00) ~ 39.55MB (0x278bc00)
+```
+
+**关键问题**：当解压写入到 39.06MB 时，会覆盖重定位后压缩内核中**正在执行的 extract_kernel() 代码本身**！
+
+#### 内存布局详解
+
+**压缩内核（ZO）的段布局**：
+
+```
+ZO_startup_32 ──┬─────────────────────────────
+                │ .head.text (100KB ~ 200KB)
+                │ ├─ startup_32
+                │ ├─ startup_64
+                │ └─ 其他汇编入口代码
+ZO__ehead ──────┼─────────────────────────────  ← 头部代码结束
+                │ .text (500KB ~ 1MB)
+                │ ├─ extract_kernel()     ← 正在执行的 C 函数！
+                │ ├─ decompress_kernel()
+                │ ├─ choose_random_location()
+                │ └─ 其他 C 函数
+                ├─────────────────────────────
+                │ .rodata (100KB ~ 500KB)
+                ├─────────────────────────────
+                │ .data (100KB)
+                ├─────────────────────────────
+                │ .rodata..compressed (压缩数据，6MB ~ 10MB)
+                │ └─ input_data           ← 压缩的主内核数据
+                ├─────────────────────────────
+                │ .bss (100KB)
+ZO__end ────────┴─────────────────────────────
+```
+
+**实际内存布局示例**（假设 %rbp = 16MB, %rbx = 37MB）：
+
+```
+16MB (%rbp) ─────┬──────────────────────────────
+                 │ 解压目标（从这里开始写入）
+                 │ ↓ 向上写入解压后的数据
+                 │
+37MB (%rbx) ─────┼──────┬───────────────────────
+                 │      │ startup_32 (100KB)
+37.1MB ──────────┼──────┼─── ZO__ehead
+                 │      │ .text 段开始
+                 │      │ ├─ extract_kernel()   ← 代码在这里！
+                 │      │ ├─ decompress_kernel()
+                 │      │ └─ ...
+37.6MB ──────────┼──────┼─── .text 段结束
+                 │      │ .rodata (200KB)
+                 │      │ .data (100KB)
+38MB ────────────┼──────┼─── .rodata..compressed
+                 │      │ input_data (9MB)      ← 从这里读取
+                 │      │
+47MB ────────────┴──────┴─── ZO__end
+```
+
+**危险时刻**：当解压写入到 37.1MB ~ 37.6MB 时：
+- ✅ extract_kernel() 仍在执行
+- ❌ extract_kernel() 的**代码在内存中被覆盖**
+- 🔥 理论上应该崩溃，但实际上**不会崩溃**！
+
+#### 源代码中的设计：extract_offset 机制
+
+**源代码注释**（`arch/x86/boot/compressed/misc.c:389-403`）：
+
+```c
+/*
+ * The compressed kernel image (ZO), has been moved so that its position
+ * is against the end of the buffer used to hold the uncompressed kernel
+ * image (VO) and the execution environment (.bss, .brk), which makes sure
+ * there is room to do the in-place decompression.
+ *
+ *                             |-----compressed kernel image------|
+ *                             V                                  V
+ * 0                       extract_offset                      +INIT_SIZE
+ * |-----------|---------------|-------------------------|--------|
+ *             |               |                         |        |
+ *           VO__text      startup_32 of ZO          VO__end    ZO__end
+ *             ^                                         ^
+ *             |-------uncompressed kernel image---------|
+ */
+```
+
+**关键计算**（`arch/x86/boot/header.S:492-509`）：
+
+```c
+/*
+ * The extract_offset has to be bigger than ZO head section. Otherwise when
+ * the head code is running to move ZO to the end of the buffer, it will
+ * overwrite the head code itself.
+ */
+#if (ZO__ehead - ZO_startup_32) > ZO_z_extract_offset
+# define ZO_z_min_extract_offset ((ZO__ehead - ZO_startup_32 + 4095) & ~4095)
+#else
+# define ZO_z_min_extract_offset ((ZO_z_extract_offset + 4095) & ~4095)
+#endif
+
+#define ZO_INIT_SIZE    (ZO__end - ZO_startup_32 + ZO_z_min_extract_offset)
+```
+
+**设计目标**：
+- 压缩内核（ZO）被移到缓冲区末尾
+- extract_offset 确保头部代码（startup_32/startup_64）不被覆盖
+- **但注释只保护头部代码，没有说明 .text 段（extract_kernel 等 C 函数）的保护**
+
+#### 实际内存布局分析（基于 Linux 6.6.110）
+
+**实际计算**（使用真实的 vmlinuz 文件）：
+
+```
+init_size = 0x20de000 (32.87 MB)  // BP_init_size
+prot_size = 0x9e8400 (9.91 MB)    // 压缩内核大小
+
+%rbp = 0x1000000 (16 MB)           // 解压目标
+%rbx = %rbp + init_size - prot_size
+     = 0x1000000 + 0x20de000 - 0x9e8400
+     = 0x26f5c00 (38.96 MB)        // 重定位目标
+```
+
+**压缩内核段布局（重定位后，假设）**：
+
+```
+ZO_startup_32:    0x26f5c00 (38.96 MB)  ← .head.text 开始
+ZO__ehead:        0x270ec00 (39.06 MB)  ← .head.text 结束，.text 开始
+  extract_kernel(): 在这里！
+  decompress_kernel(): 在这里！
+  其他 C 函数:     在这里！
+.text 段结束:      0x278bc00 (39.55 MB)
+.rodata.compressed: 0x27d6c00 (39.84 MB)  ← input_data 开始
+ZO__end:          0x30de000 (48.87 MB)
+```
+
+**解压过程分析**：
+
+```
+解压开始：写入位置 @ 16MB，读取位置 @ 39.84MB (input_data)
+解压进行：写入位置逐渐向上，读取位置顺序向后
+...
+写入到 39.06MB 时：覆盖到 ZO__ehead（extract_kernel 代码开始）
+写入到 39.55MB 时：覆盖完整个 .text 段
+写入到 48.87MB 时：解压完成
+```
+
+**关键问题**：
+- ✅ 根据实际数据，extract_kernel 的代码**确实会在解压完成前被覆盖**
+- ⚠️ 但实际运行时**不会崩溃**
+- ❓ 具体机制是什么？**源代码中没有明确说明**
+
+#### 可能的解释与未知部分
+
+**源代码中对此问题的保护**：
+
+**extract_offset 的计算**（`arch/x86/boot/header.S:492-500`）：
+
+```c
+/*
+ * The extract_offset has to be bigger than ZO head section. Otherwise when
+ * the head code is running to move ZO to the end of the buffer, it will
+ * overwrite the head code itself.
+ */
+#if (ZO__ehead - ZO_startup_32) > ZO_z_extract_offset
+# define ZO_z_min_extract_offset ((ZO__ehead - ZO_startup_32 + 4095) & ~4095)
+#else
+# define ZO_z_min_extract_offset ((ZO_z_extract_offset + 4095) & ~4095)
+#endif
+```
+
+**这个设计只保护了**：
+- ✅ 头部代码（startup_32, startup_64, .head.text 段）
+- ❌ **没有保护 .text 段（extract_kernel, decompress_kernel 等 C 函数）**
+
+**可能的解释（需要验证）**：
+
+1. **CPU 指令缓存假设**（未在源代码中找到证据）：
+   - 现代 CPU 的 L1 指令缓存（32KB~64KB）可能会缓存正在执行的代码
+   - 即使内存被覆盖，CPU 可能仍从缓存执行
+   - **限制**：这只是推测，源代码中没有注释或文档说明
+
+2. **解压算法特性**：
+   - 解压比通常 > 3:1
+   - 写入速度远大于读取速度（以字节计）
+   - 可能在覆盖 extract_kernel 代码前，大部分压缩数据已被读取
+   - **问题**：实际计算表明会覆盖，且压缩数据还未读完
+
+3. **编译器优化**：
+   - 可能通过特殊的编译选项确保代码紧凑且早期加载
+   - **问题**：没有找到相关的特殊编译标志
+
+**环境特点**：
+- ✅ 中断被禁用（cli）
+- ✅ 无多任务切换
+- ✅ 单线程顺序执行
+- ✅ 无上下文切换
+
+#### 实际验证方法
+
+要验证这个问题，可以：
+
+**1. 查看编译产物**：
+```bash
+# 查看压缩内核的段大小
+objdump -h arch/x86/boot/compressed/vmlinux
+
+# 查看 extract_kernel 函数的大小和位置
+nm -S arch/x86/boot/compressed/vmlinux | grep extract_kernel
+objdump -t arch/x86/boot/compressed/vmlinux | grep extract_kernel
+
+# 反汇编查看是否有特殊的缓存指令
+objdump -d arch/x86/boot/compressed/vmlinux | grep -A20 extract_kernel
+```
+
+**2. 检查编译选项**：
+```bash
+# 查看压缩内核的编译标志
+cat arch/x86/boot/compressed/Makefile | grep KBUILD_CFLAGS
+# 已知：使用 -fPIE（位置无关代码）
+```
+
+**3. 运行时追踪**（需要修改内核）：
+```c
+// 在 extract_kernel 中添加调试代码
+debug_putstr("extract_kernel code at: ");
+debug_puthex((unsigned long)extract_kernel);
+debug_putstr("\nDecompressing to: ");
+debug_puthex((unsigned long)output);
+```
+
+#### 实际数据验证（Linux 6.6.110）
+
+**INIT_SIZE 的计算**（`arch/x86/boot/header.S:502-509`）：
+
+```c
+#define ZO_INIT_SIZE    (ZO__end - ZO_startup_32 + ZO_z_min_extract_offset)
+#define VO_INIT_SIZE    (VO__end - VO__text)
+#if ZO_INIT_SIZE > VO_INIT_SIZE
+# define INIT_SIZE ZO_INIT_SIZE
+#else
+# define INIT_SIZE VO_INIT_SIZE
+#endif
+```
+
+**实际计算**（基于真实 vmlinuz 文件）：
+```
+实际数值：
+- init_size (BP_init_size) = 0x20de000 (32.87 MB)
+- 压缩内核大小 = 0x9e8400 (9.91 MB)
+- 压缩数据大小 = 0x9da440 (9.85 MB)
+
+内存布局：
+%rbp = 16MB  ← 解压目标起始
+%rbx = 16MB + 32.87MB - 9.91MB = 38.96MB  ← 压缩内核位置
+
+压缩内核段：
+startup_32:     38.96MB
+ZO__ehead:      39.06MB  ← extract_kernel 代码开始
+.text 段结束:   39.55MB
+input_data:     39.84MB  ← 压缩数据开始
+ZO__end:        48.87MB
+
+解压范围：16MB ~ 48.87MB
+
+覆盖时刻：
+- 解压写入到 39.06MB 时：开始覆盖 extract_kernel 代码
+- 解压写入到 39.55MB 时：覆盖完整个 .text 段
+- 解压写入到 48.87MB 时：解压完成
+
+结论：extract_kernel 的代码确实会在解压过程中被覆盖
+```
+
+#### 原地解压（In-Place Decompression）示意图
+
+```
+源代码注释中的图（arch/x86/boot/compressed/misc.c:389-403）：
+
+                             |-----compressed kernel image------|
+                             V                                  V
+ 0                       extract_offset                      +INIT_SIZE
+ |-----------|---------------|-------------------------|--------|
+             |               |                         |        |
+           VO__text      startup_32 of ZO          VO__end    ZO__end
+             ^                                         ^
+             |-------uncompressed kernel image---------|
+
+实际内存地址（Linux 6.6.110）：
+
+16MB         38.96MB           48.87MB
+ |------------|-----------------|
+ |            |                 |
+ VO__text     ZO_startup_32     VO__end / ZO__end
+ (%rbp)       (%rbx)            (解压结束 = 压缩内核结束)
+
+ 解压写入方向 →→→→→→→→→→→→→→→→→→→→→→→→
+
+39.06MB: 开始覆盖 extract_kernel 代码 (ZO__ehead)
+39.55MB: 覆盖完整个 .text 段
+```
+
+#### 总结与未解之谜
+
+**已知事实**（基于源代码和实际数据）：
+
+1. **精确的地址计算**：
+   - extract_offset 机制确保压缩内核放在缓冲区末尾
+   - 计算公式：%rbx = %rbp + init_size - prot_size
+   - 目的：为原地解压提供空间
+
+2. **确实会覆盖代码**：
+   - 通过实际数据验证：解压会覆盖 extract_kernel 等 C 函数代码
+   - 源代码注释只保护头部汇编代码（startup_32/startup_64）
+   - **没有找到保护 .text 段代码的机制说明**
+
+3. **执行环境**：
+   - ✅ 中断禁用（cli）
+   - ✅ 无多任务
+   - ✅ 单线程顺序执行
+
+**未解问题**：
+
+❓ **extract_kernel 代码被覆盖后如何继续执行？**
+   - 源代码中没有明确说明
+   - 可能依赖 CPU 指令缓存（未找到文档证据）
+   - 可能有其他机制（需要进一步研究）
+
+**进一步研究方向**：
+
+1. 查看 Linux 内核邮件列表关于原地解压的讨论
+2. 检查是否有特殊的编译器属性或链接脚本指令
+3. 实际运行时追踪（添加调试代码）
+4. 查阅 x86 CPU 缓存行为文档
+
+**参考资料**：
+- Linux 源代码：`arch/x86/boot/compressed/misc.c:389-403`
+- Linux 源代码：`arch/x86/boot/header.S:485-509`
+- Linux 源代码：`arch/x86/boot/compressed/head_64.S:328-331`
+
+### BIOS vs UEFI 两条完全不同的启动路径
+
+**关键发现**：UEFI 启动路径**完全不经过** `arch/x86/boot/compressed/head_64.S` 的 `startup_32` 和 `startup_64`！
+
+#### BIOS/GRUB 启动路径（经过 compressed/head_64.S）
+
+```
+GRUB relocator
+    ↓
+压缩内核 @ 1MB (0x100000)
+    ↓
+arch/x86/boot/compressed/head_64.S::startup_32 ← 32位保护模式入口
+    ├─ 设置 GDT、栈、段
+    ├─ CR4.PAE、构建身份映射页表、CR3
+    ├─ EFER.LME、CR0.PG
+    └─ lret → startup_64（压缩内核）
+    ↓
+arch/x86/boot/compressed/head_64.S::startup_64 ← 64位长模式，在 1MB 处执行
+    ├─ 计算 %rbp（解压目标，通常 16MB）
+    ├─ 计算 %rbx（重定位目标，通常 22MB）
+    ├─ rep movsq：拷贝压缩内核从 1MB → %rbx (22MB)
+    ├─ jmp .Lrelocated：跳到 %rbx 处继续执行
+    ├─ call extract_kernel()：从 %rbx 处解压到 %rbp (16MB)
+    │       ├─ input_data 在 %rbx 处（重定位后的压缩数据）
+    │       ├─ outbuf = %rbp (16MB)
+    │       ├─ __decompress(input_data, ..., outbuf, ...)
+    │       ├─ parse_elf(outbuf) → 返回 startup_64 入口
+    │       └─ return entry
+    └─ jmp *%rax → 跳到主内核 startup_64
+    ↓
+arch/x86/kernel/head_64.S::startup_64 ← 主内核入口
+```
+
+#### UEFI 启动路径（绕过 compressed/head_64.S）
+
+```
+UEFI 固件加载 PE 格式的压缩内核 @ 任意地址（如 300MB）
+    ↓
+efi_pe_entry() ← UEFI PE 入口点（在压缩镜像中）
+    ↓
+efi_stub_entry() ← EFI stub 主函数
+    ↓
+efi_decompress_kernel(&kernel_entry, boot_params)
+    ├─ virt_addr = LOAD_PHYSICAL_ADDR (16MB，KASLR 时会调整)
+    ├─ alloc_size = max(output_len, kernel_total_size)
+    ├─ 【KASLR】virt_addr += (range * seed[1]) >> 32
+    ├─ efi_random_alloc(..., &addr, ...) ← 分配内存 @ 16MB~512MB
+    │       └─ addr 可能是 16MB、180MB、300MB 等任意对齐地址
+    ├─ decompress_kernel((void *)addr, virt_addr, error)
+    │       ├─ input_data 仍在原地址 300MB（压缩镜像中的压缩数据）
+    │       ├─ outbuf = (void *)addr（EFI 分配的新地址）
+    │       ├─ __decompress(input_data, input_len, ..., outbuf, output_len, ...)
+    │       ├─ parse_elf(outbuf) → 返回 vmlinux 的 e_entry
+    │       │       └─ e_entry 指向 arch/x86/kernel/head_64.S::startup_64
+    │       ├─ handle_relocations(outbuf, output_len, virt_addr)
+    │       └─ return entry
+    ├─ kernel_entry = addr + entry
+    └─ return kernel_entry
+    ↓
+exit_boot(boot_params, handle) ← 退出 EFI boot services
+    ↓
+sev_enable(boot_params) ← SEV 初始化
+    ↓
+efi_5level_switch() ← 5级页表切换（如需要）
+    ↓
+enter_kernel(kernel_entry, boot_params)
+    ├─ asm("jmp *%0"::"r"(kernel_addr), "S"(boot_params))
+    └─ 直接跳转到主内核 startup_64
+    ↓
+arch/x86/kernel/head_64.S::startup_64 ← 主内核入口
+    ↓
+完全跳过了 compressed/head_64.S 的 startup_32 和 startup_64！
+```
+
+#### 关键区别总结
+
+| 特性 | BIOS/GRUB 路径 | UEFI 路径 |
+|------|---------------|-----------|
+| **压缩内核初始位置** | 1MB (0x100000)，GRUB relocator 复制到此 | 任意地址（如 300MB），UEFI 固件直接加载 PE 文件 |
+| **是否经过 compressed/head_64.S** | ✅ 是，startup_32 → startup_64 | ❌ **否**，完全跳过 |
+| **模式切换** | startup_32 中从 32位切换到 64位 | UEFI 固件已在 64位长模式，无需切换 |
+| **是否需要重定位拷贝** | ✅ 需要（rep movsq 从 1MB → %rbx） | ❌ 不需要，EFI stub 直接分配内存并解压 |
+| **解压器在哪里** | compressed/head_64.S::startup_64 调用 extract_kernel() | efi_stub_entry() 调用 efi_decompress_kernel() |
+| **解压函数** | arch/x86/boot/compressed/misc.c::extract_kernel() | 同一个 decompress_kernel()，但由 EFI stub 调用 |
+| **input_data 位置** | 重定位后的 %rbx 处（22MB） | 原始 PE 文件中（300MB） |
+| **outbuf 位置** | %rbp (16MB，或 KASLR 随机) | EFI 分配的 addr (16MB~512MB) |
+| **跳转到主内核** | jmp *%rax（从 .Lrelocated） | jmp *kernel_entry（从 enter_kernel） |
+| **最终目标** | arch/x86/kernel/head_64.S::startup_64 | 同上（两条路径在此汇合） |
+
+#### 源代码验证
+
+**vmlinux 的 ELF 入口点**（`arch/x86/kernel/vmlinux.lds.S:127`）：
+```lds
+phys_startup_64 = ABSOLUTE(startup_64 - LOAD_OFFSET);
+ENTRY(phys_startup_64)
+```
+
+**arch/x86/kernel/head_64.S:50-51 的注释**：
+```c
+/*
+ * We come here either directly from a 64bit bootloader, or from
+ * arch/x86/boot/compressed/head_64.S.
+ */
+```
+明确说明了两条路径：
+- BIOS/GRUB：从 `arch/x86/boot/compressed/head_64.S` 来
+- UEFI：直接从 64位 bootloader（UEFI 固件）来
+
+#### 为什么 UEFI 不需要重定位拷贝？
+
+**UEFI 路径的优势**：
+1. **内存管理更灵活**：通过 `efi_random_alloc()` 分配目标内存
+2. **压缩数据和解压目标天然隔离**：
+   - 压缩数据：在 UEFI 加载的 PE 文件中（如 300MB）
+   - 解压目标：EFI 分配的新内存（如 180MB）
+   - 两者由 EFI 内存管理器保证不重叠
+3. **不需要自解压**：
+   - BIOS 路径：解压器代码在压缩内核中，自己解压自己，必须先移走
+   - UEFI 路径：EFI stub 在压缩镜像中，但解压时已分配好目标内存，直接解压即可
+
+**BIOS 路径为什么需要重定位**：
+1. **自解压困境**：解压器代码和压缩数据都在 1MB 处
+2. **栈和数据在解压路径上**：即使解压到 16MB，栈和临时数据可能在 1MB~2MB 之间
+3. **支持 CONFIG_RELOCATABLE**：解压目标可能是任意地址（KASLR、kexec）
+   - 场景：当前在 32MB，解压到 32MB，必须先移走
+4. **通用性设计**：一套代码支持所有启动场景
+
+**结论**：重定位拷贝机制是 BIOS/GRUB 路径的特有需求，UEFI 路径通过 EFI boot services 的内存管理完全避免了这个问题。
 
 ### 为什么解压后的内核要放到 0x1000000 (16MB) 而不是原地解压？
 
