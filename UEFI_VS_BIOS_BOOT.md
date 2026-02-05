@@ -92,4 +92,3 @@
 - [GRUB UEFI 长模式启动分析](GRUB_UEFI_LONG_MODE_ANALYSIS.md) - GRUB 和 Linux kernel 的 UEFI 长模式启动详细实现
 - [GRUB 模式切换](GRUB_MODE_SWITCHING.md) - GRUB 在不同模式间的切换机制
 - [x86 CPU 模式](X86_CPU_MODES.md) - x86 CPU 的实模式、保护模式和长模式详解
-
