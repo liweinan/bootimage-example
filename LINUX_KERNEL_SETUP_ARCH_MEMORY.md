@@ -567,6 +567,551 @@ void __init init_mem_mapping(void)
    页表（为 memblock 中的物理页建立线性地址映射）
    ```
 
+#### 详细代码分析：E820 如何驱动 Paging
+
+**完整调用链**：
+
+```
+setup_arch()                          [arch/x86/kernel/setup.c]
+    ├─ e820__memory_setup()           → 解析 E820 到 e820_table
+    ├─ max_pfn = e820__end_of_ram_pfn() → 扫描 E820_RAM 计算最大 PFN
+    ├─ e820__memblock_setup()         → 将 E820_RAM 加入 memblock
+    └─ init_mem_mapping()             [arch/x86/mm/init.c]
+            ├─ memory_map_bottom_up() 或 memory_map_top_down()
+            │   └─ init_range_memory_mapping()
+            │       └─ init_memory_mapping(start, end, PAGE_KERNEL)
+            │           └─ kernel_physical_mapping_init()  [arch/x86/mm/init_64.c]
+            │               ├─ 遍历 PML4/PDPT/PD/PT 级别
+            │               ├─ 根据 E820 类型设置页表属性
+            │               └─ 填充页表项（物理页框号 + 属性位）
+            ├─ load_cr3(swapper_pg_dir)
+            └─ __flush_tlb_all()
+```
+
+**1. `e820__end_of_ram_pfn()` - 从 E820 计算物理内存大小**
+
+源码：`arch/x86/kernel/e820.c`
+
+```c
+unsigned long __init e820__end_of_ram_pfn(void)
+{
+    return e820_end_pfn(MAX_ARCH_PFN, E820_TYPE_RAM);
+}
+
+static unsigned long __init e820_end_pfn(unsigned long limit_pfn,
+                                          enum e820_type type)
+{
+    int i;
+    unsigned long max_pfn = 0;
+    struct e820_table *e820 = e820_table;
+
+    // 遍历 E820 表
+    for (i = 0; i < e820->nr_entries; i++) {
+        struct e820_entry *entry = &e820->entries[i];
+        unsigned long start_pfn;
+        unsigned long end_pfn;
+
+        // 只处理指定类型（E820_TYPE_RAM）
+        if (entry->type != type)
+            continue;
+
+        start_pfn = entry->addr >> PAGE_SHIFT;
+        end_pfn = (entry->addr + entry->size) >> PAGE_SHIFT;
+
+        // 限制在架构支持的最大 PFN 内
+        if (start_pfn >= limit_pfn)
+            continue;
+        if (end_pfn > limit_pfn)
+            end_pfn = limit_pfn;
+
+        // 找到最大的结束页帧号
+        if (end_pfn > max_pfn)
+            max_pfn = end_pfn;
+    }
+
+    return max_pfn;
+}
+```
+
+**关键点**：
+- 只扫描 `E820_TYPE_RAM` 类型的条目
+- 将物理地址转换为页帧号（`>> PAGE_SHIFT`，即除以 4096）
+- `max_pfn` 决定了内核需要管理的物理内存范围
+
+**2. `e820__memblock_setup()` - 将 E820 RAM 导入 memblock**
+
+源码：`arch/x86/kernel/e820.c`
+
+```c
+void __init e820__memblock_setup(void)
+{
+    int i;
+    u64 end;
+
+    // 第一遍：添加所有可用 RAM 到 memblock
+    for (i = 0; i < e820_table->nr_entries; i++) {
+        struct e820_entry *entry = &e820_table->entries[i];
+
+        end = entry->addr + entry->size;
+
+        // 只处理 RAM 类型
+        if (entry->type != E820_TYPE_RAM)
+            continue;
+
+        // 忽略低于 1MB 的内存（通常已被使用）
+        if (entry->addr >= end)
+            continue;
+
+        // 将 RAM 区域加入 memblock.memory
+        memblock_add(entry->addr, entry->size);
+    }
+
+    // 第二遍：标记软预留区域（pmem 等）
+    for (i = 0; i < e820_table->nr_entries; i++) {
+        struct e820_entry *entry = &e820_table->entries[i];
+
+        if (entry->type == E820_TYPE_SOFT_RESERVED)
+            memblock_reserve(entry->addr, entry->size);
+    }
+
+    // 设置 memblock 的分配限制（在页表建立前只能分配低端内存）
+    memblock_set_current_limit(ISA_END_ADDRESS);
+}
+```
+
+**关键点**：
+- `memblock_add()` 将物理内存区域添加到 `memblock.memory` 列表
+- 只有 `E820_TYPE_RAM` 会被添加，其他类型（RESERVED、ACPI 等）不加入
+- `memblock_reserve()` 标记已占用的内存（不可分配，但仍在 memblock.memory 中）
+- 此时只记录了"哪里有 RAM"，还未建立页表
+
+**3. `init_mem_mapping()` - 为 RAM 建立直接映射**
+
+源码：`arch/x86/mm/init.c`
+
+```c
+void __init init_mem_mapping(void)
+{
+    unsigned long end;
+
+    pti_check_boottime_disable();      // Page Table Isolation 检查
+    probe_page_size_mask();             // 探测支持的页大小（4K/2M/1G）
+
+    setup_pcid();                       // Process Context ID
+
+    // 从 max_pfn 计算物理内存末尾地址
+    end = max_pfn << PAGE_SHIFT;
+
+#ifdef CONFIG_X86_64
+    end = max_pfn_mapped << PAGE_SHIFT;
+#endif
+
+    /* 第一阶段：映射 ISA 区域（0-1MB） */
+    init_memory_mapping(0, ISA_END_ADDRESS, PAGE_KERNEL_IO);
+
+    /* 第二阶段：初始化 trampoline（实模式切换区域） */
+    init_trampoline();
+
+    /*
+     * 第三阶段：映射整个物理 RAM
+     * 选择自底向上或自顶向下映射策略
+     */
+    if (memblock_bottom_up()) {
+        unsigned long kernel_end = __pa_symbol(_end);
+
+        // 自底向上：先映射内核之后的区域，再映射内核之前的区域
+        // 优点：页表分配在内核之后，避免碎片
+        memory_map_bottom_up(kernel_end, end);
+        memory_map_bottom_up(ISA_END_ADDRESS, kernel_end);
+    } else {
+        // 自顶向下：从高地址向低地址映射
+        memory_map_top_down(ISA_END_ADDRESS, end);
+    }
+
+    // 如果支持 5 级页表，调整映射
+#ifdef CONFIG_X86_5LEVEL
+    if (pgtable_l5_enabled())
+        init_trampoline_pgt_l5();
+#endif
+
+    // 加载新的页表基址并刷新 TLB
+    load_cr3(swapper_pg_dir);
+    __flush_tlb_all();
+
+    // 放宽 memblock 分配限制（现在可以分配高端内存了）
+    x86_init.hyper.init_after_bootmem();
+    memblock_set_current_limit(ISA_END_ADDRESS);
+
+    // 输出映射信息
+    early_memtest(0, max_pfn_mapped << PAGE_SHIFT);
+}
+```
+
+**4. `kernel_physical_mapping_init()` - 实际创建页表项**
+
+源码：`arch/x86/mm/init_64.c`
+
+```c
+/*
+ * 为给定的物理地址区域创建页表映射
+ * start, end: 物理地址范围
+ * prot: 页表保护位（PAGE_KERNEL、PAGE_KERNEL_NOCACHE 等）
+ */
+unsigned long __meminit
+kernel_physical_mapping_init(unsigned long paddr_start,
+                              unsigned long paddr_end,
+                              unsigned long page_size_mask,
+                              pgprot_t prot)
+{
+    bool pgd_changed = false;
+    unsigned long vaddr, vaddr_start, vaddr_end, vaddr_next, paddr_next;
+    unsigned long paddr_last = paddr_end;
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pud_t *pud;
+    pmd_t *pmd;
+    pte_t *pte;
+
+    // 转换为虚拟地址（直接映射区域）
+    vaddr = (unsigned long)__va(paddr_start);
+    vaddr_end = (unsigned long)__va(paddr_end);
+    vaddr_start = vaddr;
+
+    // 遍历 PGD 级别
+    for (; vaddr < vaddr_end; vaddr = vaddr_next) {
+        pgd = pgd_offset_k(vaddr);
+        vaddr_next = (vaddr & PGDIR_MASK) + PGDIR_SIZE;
+
+        if (pgd_val(*pgd)) {
+            p4d = (p4d_t *)pgd_page_vaddr(*pgd);
+            paddr_next = phys_p4d_init(p4d, paddr, paddr_end,
+                                        page_size_mask, prot);
+            continue;
+        }
+
+        // 分配新的 P4D 表
+        p4d = alloc_low_page();
+        paddr_next = phys_p4d_init(p4d, paddr, paddr_end,
+                                    page_size_mask, prot);
+
+        spin_lock(&init_mm.page_table_lock);
+        // 设置 PGD 条目指向 P4D 表
+        pgd_populate(&init_mm, pgd, p4d);
+        spin_unlock(&init_mm.page_table_lock);
+        pgd_changed = true;
+    }
+
+    if (pgd_changed)
+        sync_global_pgds(vaddr_start, vaddr_end - 1);
+
+    return paddr_last;
+}
+
+// P4D 级别初始化
+static unsigned long __meminit
+phys_p4d_init(p4d_t *p4d_page, unsigned long paddr,
+               unsigned long paddr_end,
+               unsigned long page_size_mask,
+               pgprot_t prot)
+{
+    unsigned long paddr_next, paddr_last = paddr_end;
+    unsigned long vaddr = (unsigned long)__va(paddr);
+    int i = p4d_index(vaddr);
+
+    // 遍历 P4D 条目
+    for (; i < PTRS_PER_P4D; i++, paddr = paddr_next) {
+        p4d_t *p4d = p4d_page + i;
+        pud_t *pud;
+
+        vaddr = (unsigned long)__va(paddr);
+        paddr_next = (paddr & P4D_MASK) + P4D_SIZE;
+
+        if (paddr >= paddr_end) {
+            // 超出范围，清零剩余条目
+            if (!after_bootmem &&
+                !p4d_none(*p4d) && pud_page_vaddr(*p4d))
+                free_pud_table(pud_page_vaddr(*p4d), p4d);
+            continue;
+        }
+
+        if (!p4d_none(*p4d)) {
+            pud = pud_offset(p4d, 0);
+            paddr_last = phys_pud_init(pud, paddr, paddr_end,
+                                        page_size_mask, prot);
+            continue;
+        }
+
+        // 分配新的 PUD 表
+        pud = alloc_low_page();
+        paddr_last = phys_pud_init(pud, paddr, paddr_end,
+                                    page_size_mask, prot);
+
+        spin_lock(&init_mm.page_table_lock);
+        p4d_populate(&init_mm, p4d, pud);
+        spin_unlock(&init_mm.page_table_lock);
+    }
+
+    return paddr_last;
+}
+
+// PUD 级别初始化（可能使用 1GB 大页）
+static unsigned long __meminit
+phys_pud_init(pud_t *pud_page, unsigned long paddr,
+               unsigned long paddr_end,
+               unsigned long page_size_mask,
+               pgprot_t prot)
+{
+    unsigned long pages = 0, paddr_next;
+    unsigned long paddr_last = paddr_end;
+    unsigned long vaddr = (unsigned long)__va(paddr);
+    int i = pud_index(vaddr);
+
+    for (; i < PTRS_PER_PUD; i++, paddr = paddr_next) {
+        pud_t *pud = pud_page + i;
+        pmd_t *pmd;
+        pgprot_t prot_pud = prot;
+
+        vaddr = (unsigned long)__va(paddr);
+        paddr_next = (paddr & PUD_MASK) + PUD_SIZE;
+
+        if (paddr >= paddr_end) {
+            // 超出范围，清理
+            if (!after_bootmem &&
+                !pud_none(*pud) && pmd_page_vaddr(*pud))
+                free_pmd_table(pmd_page_vaddr(*pud), pud);
+            continue;
+        }
+
+        // 尝试使用 1GB 大页（如果支持且对齐）
+        if (direct_gbpages &&
+            (page_size_mask & (1 << PG_LEVEL_1G)) &&
+            IS_ALIGNED(paddr, PUD_SIZE) &&
+            IS_ALIGNED(paddr_next, PUD_SIZE)) {
+
+            // 设置 PUD 直接映射 1GB 物理页
+            set_pud(pud, __pud(paddr | pgprot_val(prot_pud) | _PAGE_PSE));
+            pages++;
+            paddr_last = paddr_next;
+            continue;
+        }
+
+        // 否则使用 PMD 级别（2MB 或 4KB 页）
+        if (!pud_none(*pud)) {
+            pmd = pmd_offset(pud, 0);
+            paddr_last = phys_pmd_init(pmd, paddr, paddr_end,
+                                        page_size_mask, prot);
+            continue;
+        }
+
+        pmd = alloc_low_page();
+        paddr_last = phys_pmd_init(pmd, paddr, paddr_end,
+                                    page_size_mask, prot);
+
+        spin_lock(&init_mm.page_table_lock);
+        pud_populate(&init_mm, pud, pmd);
+        spin_unlock(&init_mm.page_table_lock);
+    }
+
+    return paddr_last;
+}
+
+// PMD 级别初始化（可能使用 2MB 大页）
+static unsigned long __meminit
+phys_pmd_init(pmd_t *pmd_page, unsigned long paddr,
+               unsigned long paddr_end,
+               unsigned long page_size_mask,
+               pgprot_t prot)
+{
+    unsigned long pages = 0, paddr_next;
+    unsigned long paddr_last = paddr_end;
+
+    int i = pmd_index((unsigned long)__va(paddr));
+
+    for (; i < PTRS_PER_PMD; i++, paddr = paddr_next) {
+        pmd_t *pmd = pmd_page + i;
+        pte_t *pte;
+        pgprot_t prot_pmd = prot;
+
+        paddr_next = (paddr & PMD_MASK) + PMD_SIZE;
+
+        if (paddr >= paddr_end) {
+            if (!after_bootmem &&
+                !pmd_none(*pmd) && pte_page_vaddr(*pmd))
+                free_pte_table(pte_page_vaddr(*pmd), pmd);
+            continue;
+        }
+
+        // 尝试使用 2MB 大页
+        if (page_size_mask & (1 << PG_LEVEL_2M) &&
+            IS_ALIGNED(paddr, PMD_SIZE) &&
+            IS_ALIGNED(paddr_next, PMD_SIZE)) {
+
+            // 设置 PMD 直接映射 2MB 物理页
+            set_pmd(pmd, __pmd(paddr | pgprot_val(prot_pmd) | _PAGE_PSE));
+            pages++;
+            paddr_last = paddr_next;
+            continue;
+        }
+
+        // 否则使用 PTE 级别（4KB 页）
+        if (!pmd_none(*pmd)) {
+            pte = pte_offset_kernel(pmd, 0);
+            paddr_last = phys_pte_init(pte, paddr, paddr_end, prot);
+            continue;
+        }
+
+        pte = alloc_low_page();
+        paddr_last = phys_pte_init(pte, paddr, paddr_end, prot);
+
+        spin_lock(&init_mm.page_table_lock);
+        pmd_populate_kernel(&init_mm, pmd, pte);
+        spin_unlock(&init_mm.page_table_lock);
+    }
+
+    return paddr_last;
+}
+
+// PTE 级别初始化（4KB 页）
+static unsigned long __meminit
+phys_pte_init(pte_t *pte_page, unsigned long paddr,
+               unsigned long paddr_end,
+               pgprot_t prot)
+{
+    unsigned long pages = 0;
+    unsigned long paddr_last = paddr_end;
+    unsigned long paddr_next;
+    int i = pte_index((unsigned long)__va(paddr));
+
+    for (; i < PTRS_PER_PTE; i++, paddr = paddr_next) {
+        pte_t *pte = pte_page + i;
+
+        paddr_next = (paddr & PAGE_MASK) + PAGE_SIZE;
+
+        if (paddr >= paddr_end) {
+            if (!after_bootmem &&
+                !pte_none(*pte))
+                set_pte(pte, __pte(0));
+            continue;
+        }
+
+        // 设置 PTE 映射 4KB 物理页
+        // paddr: 物理页框号
+        // pgprot_val(prot): 页表属性位（Present、Writable、Cacheable 等）
+        set_pte(pte, pfn_pte(paddr >> PAGE_SHIFT, prot));
+        pages++;
+        paddr_last = paddr_next;
+    }
+
+    return paddr_last;
+}
+```
+
+**关键代码分析**：
+
+1. **从 E820 获取物理地址范围**：
+   ```c
+   end = max_pfn << PAGE_SHIFT;  // max_pfn 来自 e820__end_of_ram_pfn()
+   ```
+
+2. **只为 memblock.memory 中的区域建立映射**（memblock 来自 E820_TYPE_RAM）：
+   ```c
+   memory_map_bottom_up(ISA_END_ADDRESS, end);
+   // 内部会调用 for_each_memblock(memory, reg) 遍历
+   ```
+
+3. **页表属性根据内存类型设置**：
+   ```c
+   // RAM 区域：cacheable, writable
+   init_memory_mapping(start, end, PAGE_KERNEL);
+   // PAGE_KERNEL = _PAGE_PRESENT | _PAGE_RW | _PAGE_ACCESSED | _PAGE_DIRTY
+
+   // 设备 MMIO：uncached, writable
+   ioremap(phys_addr, size);  // 使用 PAGE_KERNEL_IO
+   // PAGE_KERNEL_IO = _PAGE_PRESENT | _PAGE_RW | _PAGE_PCD | _PAGE_PWT
+   ```
+
+4. **页表项的实际填充**：
+   ```c
+   // PTE 级别
+   set_pte(pte, pfn_pte(paddr >> PAGE_SHIFT, prot));
+   // 展开为：
+   // pte->pte = (物理页框号 << 12) | 属性位
+   //         = 0x00100000 | (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|...)
+   ```
+
+**5. 设备内存的特殊映射 - `ioremap()`**
+
+源码：`arch/x86/mm/ioremap.c`
+
+```c
+/*
+ * ioremap - 将设备物理地址映射到内核虚拟地址空间
+ * phys_addr: 设备物理地址（如 0xFEC00000 - LAPIC 基址）
+ * size: 映射大小
+ * 返回：内核虚拟地址指针
+ */
+void __iomem *ioremap(resource_size_t phys_addr, unsigned long size)
+{
+    // 对于设备 MMIO，使用 uncached 映射
+    return __ioremap_caller(phys_addr, size,
+                            IORES_MAP_SYSTEM_RAM | IORES_MAP_ENCRYPTED,
+                            PAGE_KERNEL_IO,
+                            __builtin_return_address(0),
+                            false);
+}
+
+static void __iomem *
+__ioremap_caller(resource_size_t phys_addr, unsigned long size,
+                 enum page_cache_mode pcm, pgprot_t prot,
+                 void *caller, bool encrypted)
+{
+    unsigned long offset, vaddr;
+    resource_size_t last_addr;
+    const resource_size_t unaligned_phys_addr = phys_addr;
+    const unsigned long unaligned_size = size;
+    struct vm_struct *area;
+    pgprot_t new_prot;
+    int retval;
+
+    // 检查是否在 E820 表中
+    // 如果是 E820_TYPE_RAM，警告（不应该用 ioremap 映射 RAM）
+    if (iores_map_check(phys_addr, size) != IORES_MAP_SYSTEM_RAM_OK) {
+        WARN_ONCE(1, "ioremap on RAM at %pa - %pa\n",
+                  &phys_addr, &last_addr);
+        return NULL;
+    }
+
+    // 页对齐
+    offset = phys_addr & ~PAGE_MASK;
+    phys_addr &= PAGE_MASK;
+    size = PAGE_ALIGN(last_addr + 1) - phys_addr;
+
+    // 在内核虚拟地址空间中分配区域（vmalloc 区域）
+    area = get_vm_area_caller(size, VM_IOREMAP, caller);
+    if (!area)
+        return NULL;
+    area->phys_addr = phys_addr;
+    vaddr = (unsigned long)area->addr;
+
+    // 设置页表属性为 uncached
+    new_prot = pgprot_noncached(prot);
+
+    // 创建页表映射（uncached）
+    if (ioremap_page_range(vaddr, vaddr + size, phys_addr, new_prot)) {
+        free_vm_area(area);
+        return NULL;
+    }
+
+    return (void __iomem *)(vaddr + offset);
+}
+```
+
+**关键点**：
+- `ioremap()` 检查物理地址是否在 E820_TYPE_RAM 区域，如果是则警告
+- 设备内存必须用 `uncached` 属性映射（`PAGE_KERNEL_IO`）
+- 映射到 vmalloc 区域，不是直接映射区域
+- 页表属性：`_PAGE_PCD | _PAGE_PWT`（Cache Disable + Write Through）
+
 **E820 影响的页表属性**：
 
 | E820 类型 | 是否映射？ | 页表属性 | 用途 |
@@ -609,6 +1154,100 @@ for_each_memblock(memory, reg) {  // memblock 来自 E820
 // 设备内存由驱动单独映射
 void __iomem *lapic_base = ioremap(0xFEC00000, 4096);  // uncached
 ```
+
+#### 完整示例：E820 如何影响页表创建
+
+假设系统有如下 E820 表：
+
+```
+E820 Memory Map:
+  [0x00000000 - 0x0009FC00] Type=1 (RAM)      640KB
+  [0x000A0000 - 0x000FFFFF] Type=2 (RESERVED) VGA + BIOS ROM
+  [0x00100000 - 0xBFFD0000] Type=1 (RAM)      ~3GB
+  [0xBFFD0000 - 0xC0000000] Type=3 (ACPI)     192KB
+  [0xFEC00000 - 0xFED00000] Type=2 (RESERVED) LAPIC/IOAPIC
+```
+
+**处理流程**：
+
+| 步骤 | 函数 | 对 E820 条目的处理 | 结果 |
+|------|------|--------------------|------|
+| 1 | `e820__memory_setup()` | 解析所有条目到 `e820_table` | 内核有完整的物理内存布局 |
+| 2 | `e820__end_of_ram_pfn()` | 只扫描 Type=1 (RAM) | `max_pfn = 0xBFFD0` |
+| 3 | `e820__memblock_setup()` | 只将 Type=1 加入 memblock | `memblock.memory` 包含 [0-640KB] + [1MB-3GB] |
+| 4 | `init_mem_mapping()` | 遍历 memblock，为每个 RAM 区域调用 `kernel_physical_mapping_init()` | 为 RAM 建立页表映射 |
+| 5 | `kernel_physical_mapping_init()` | 创建 PML4→PDPT→PD→PT，设置 PTE | **0x00000000-0x0009FC00**: 映射到 `0xFFFF888000000000-0xFFFF88800009FC00`，属性=PAGE_KERNEL (cacheable, RW)<br>**0x00100000-0xBFFD0000**: 映射到 `0xFFFF888000100000-0xFFFF8880BFFD0000`，属性=PAGE_KERNEL |
+| 6 | Type=2, Type=3 处理 | **不映射** Type=2/3 区域 | VGA、BIOS ROM、ACPI、LAPIC 等**不在直接映射中** |
+| 7 | 驱动需要访问设备时 | 调用 `ioremap(0xFEC00000, ...)` | LAPIC 映射到 vmalloc 区域，属性=PAGE_KERNEL_IO (uncached) |
+
+**页表内容示例**（简化）：
+
+```
+PML4[0] → PDPT[0] → PD[0] → PT[0-159]
+    PT[0]   = PFN 0x00000 | PAGE_KERNEL  (物理 0x00000 → 虚拟 0xFFFF888000000000)
+    PT[1]   = PFN 0x00001 | PAGE_KERNEL  (物理 0x01000 → 虚拟 0xFFFF888000001000)
+    ...
+    PT[159] = PFN 0x0009F | PAGE_KERNEL  (物理 0x9F000 → 虚拟 0xFFFF88800009F000)
+    PT[160] = 0 (not present)             ← 0xA0000-0xFFFFF 不映射（VGA/BIOS）
+    ...
+    PT[255] = 0 (not present)
+
+PML4[0] → PDPT[0] → PD[0] → PT[256-...]
+    PT[256] = PFN 0x00100 | PAGE_KERNEL  (物理 1MB 开始映射)
+    PT[257] = PFN 0x00101 | PAGE_KERNEL
+    ...
+
+设备内存（LAPIC）：
+    不在 PML4[0] 直接映射区域
+    ↓
+    通过 ioremap() 映射到 vmalloc 区域（PML4[272] 等）
+    PML4[272] → ... → PTE = PFN 0xFEC00 | PAGE_KERNEL_IO (uncached)
+```
+
+**属性位差异**：
+
+```c
+// PAGE_KERNEL (RAM 区域)
+#define PAGE_KERNEL    __pgprot(__PAGE_KERNEL)
+#define __PAGE_KERNEL  (_PAGE_PRESENT | _PAGE_RW | _PAGE_ACCESSED | \
+                        _PAGE_DIRTY | _PAGE_GLOBAL)
+// Cache: Write-back (默认)
+// 0x8000000000000063 (典型值)
+
+// PAGE_KERNEL_IO (设备 MMIO)
+#define PAGE_KERNEL_IO __pgprot(__PAGE_KERNEL_IO)
+#define __PAGE_KERNEL_IO (_PAGE_PRESENT | _PAGE_RW | _PAGE_DIRTY | \
+                          _PAGE_ACCESSED | _PAGE_PCD | _PAGE_PWT)
+// Cache: Disabled (PCD=1, PWT=1)
+// 0x8000000000000073 (典型值)
+```
+
+**关键差异**：
+- **PCD (Page Cache Disable)** = 1：禁用 CPU 缓存
+- **PWT (Page Write Through)** = 1：写穿透（不使用回写）
+
+**为什么设备内存必须 uncached？**
+
+1. **硬件寄存器即时性**：
+   ```c
+   // LAPIC EOI（End of Interrupt）寄存器
+   volatile u32 *lapic_eoi = ioremap(0xFEC000B0, 4);
+   *lapic_eoi = 0;  // 必须立即写入硬件，不能缓存
+   ```
+
+2. **DMA 一致性**：
+   ```c
+   // 网卡 DMA 描述符
+   void __iomem *desc_ring = ioremap(0xFEB00000, 4096);
+   // 硬件和 CPU 必须看到相同的数据，不能有缓存副本
+   ```
+
+3. **MMIO 副作用**：
+   ```
+   读取 PCI 配置寄存器可能改变硬件状态
+   → 不能缓存读结果
+   → 每次访问必须到达硬件
+   ```
 
 **总结**：
 
