@@ -91,8 +91,8 @@ LINUX_KERNEL_INIT.md（主文档）
 - `GRUB_UEFI_LONG_MODE_ANALYSIS.md` - GRUB UEFI 长模式
 - `UEFI_VS_BIOS_BOOT.md` - UEFI vs BIOS
 - `LINUX_KERNEL_SETUP_FLOW.md` - Setup 流程
-- `LINUX_KERNEL_SETUP_ARCH_MEMORY.md` - setup_arch 内存
-- `MMU_AND_PAGING.md` - MMU 与分页
+- `PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md` - 阶段 1：分页理论与早期页表
+- `PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md` - 阶段 2：setup_arch 完整页表
 - `X86_NEAR_VS_LONG_JUMP.md` - 跳转指令
 
 ### 测试程序

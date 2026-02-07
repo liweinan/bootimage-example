@@ -193,7 +193,8 @@ DISPLAY=:1 make run-gui
 
 ### 内存管理文档
 
-- **[MMU_AND_PAGING.md](MMU_AND_PAGING.md)** - x86 MMU、分页与 Linux 内核页表管理（Flat Model、多级页表、内核与 MMU 分工）
+- **[PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md](PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md)** - 阶段 1：分页理论与早期页表（Flat Model、MMU 工作原理、startup_32/64 身份映射）
+- **[PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md)** - 阶段 2：setup_arch 完整页表建立（E820、memblock、init_mem_mapping）
 - **[LINUX_USERSPACE_MEMORY.md](LINUX_USERSPACE_MEMORY.md)** - Linux 用户空间内存管理
 - **[FILL.md](FILL.md)** - 内存填充相关文档
 

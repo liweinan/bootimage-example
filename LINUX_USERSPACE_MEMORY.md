@@ -258,7 +258,7 @@ PML4表    PDPT表    PD表      PT表
 3. 逐级查找，最终得到物理地址
 4. 如果页表项不存在或权限不足，触发页错误（Page Fault）
 
-（x86 MMU 与分页、Flat Model 与多级页表、内核与 MMU 分工详见 [MMU_AND_PAGING.md](MMU_AND_PAGING.md)。）
+（x86 MMU 与分页、Flat Model 与多级页表、内核与 MMU 分工详见 [PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md](PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md)。）
 
 #### 2. 页错误处理（Page Fault）
 

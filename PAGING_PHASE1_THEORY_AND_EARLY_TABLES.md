@@ -1,8 +1,20 @@
 # x86 MMU、分页与 Linux 内核页表管理
 
+## 文档定位
+
+本文档涵盖**分页理论基础**和**早期页表建立阶段**（压缩内核 startup_32/64）：
+- **理论部分**：MMU 工作原理、GDT 与 Paging 的两阶段地址转换、内核与 MMU 的分工
+- **早期页表**：压缩内核（startup_32/64）如何首次启用分页、构建身份映射页表
+
+> **页表管理的两个阶段**：
+> - **阶段 1：早期页表（本文档）** - 压缩内核 startup_32/64 构建简单的身份映射页表，首次启用 CR0.PG
+> - **阶段 2：完整页表** - start_kernel → setup_arch 中根据 E820/memblock 建立完整的直接映射，详见 [PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md)
+
+## 文档内容
+
 本文档说明：在 Flat Model 下虚拟地址"平坦线性"与物理内存通过分页/MMU 非线性映射的关系；GDT 与 Paging 作为两阶段地址转换的协作关系；Long Mode 下 GDT 仍起的作用；启动时 lgdt 和启用分页的顺序依赖；Linux 内核如何与 MMU 协作管理四级/五级页表；以及用"图书馆"类比理解内核与 MMU 的分工。
 
-> **相关文档**：[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) 中 startup_32 构建身份映射页表、CR3、CR0.PG；[LINUX_KERNEL_SETUP_ARCH_MEMORY.md](LINUX_KERNEL_SETUP_ARCH_MEMORY.md) init_mem_mapping、paging_init；[X86_CPU_MODES.md](X86_CPU_MODES.md) 实模式、保护模式、长模式；[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md) long mode 下 CS 的作用。
+> **相关文档**：[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) 中 startup_32 构建身份映射页表、CR3、CR0.PG；[PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md) init_mem_mapping、paging_init；[X86_CPU_MODES.md](X86_CPU_MODES.md) 实模式、保护模式、长模式；[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md) long mode 下 CS 的作用。
 
 ---
 
@@ -422,7 +434,7 @@ flowchart TD
 - **反向映射**：为在换出等场景下高效找到映射到某物理页的所有 PTE，内核维护从 `struct page` 到所有映射它的 `pte` 的反向映射数据结构。
 - **巨页**：内核可将连续普通页合并为大页（如 2MB、1GB），在 PMD 或 PUD 级建立直接映射，减少 TLB 未命中、提升性能。
 
-**总结**：**MMU** 是执行者（给定 CR3 和虚拟地址，查表得物理地址）；**内核**是管理者（保证 CR3 指向的页表树正确、完整，创建树、处理缺页、进程退出时回收）。页表管理集**动态分配、硬件抽象、异常处理、性能优化和资源回收**于一体。详见 [LINUX_KERNEL_SETUP_ARCH_MEMORY.md](LINUX_KERNEL_SETUP_ARCH_MEMORY.md) 中 init_mem_mapping、paging_init。
+**总结**：**MMU** 是执行者（给定 CR3 和虚拟地址，查表得物理地址）；**内核**是管理者（保证 CR3 指向的页表树正确、完整，创建树、处理缺页、进程退出时回收）。页表管理集**动态分配、硬件抽象、异常处理、性能优化和资源回收**于一体。详见 [PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md) 中 init_mem_mapping、paging_init。
 
 ---
 
