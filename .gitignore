@@ -21,3 +21,13 @@ __pycache__/
 # 下载的 initrd 文件
 initrd-alpine-*.img
 *.img
+
+# 编辑器索引文件
+.cursorindexingignore
+
+# AI 辅助工具目录
+.specstory/
+
+# 文档备份文件
+*.backup
+*.backup_step*
