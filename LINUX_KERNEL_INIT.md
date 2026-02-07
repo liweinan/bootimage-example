@@ -28,9 +28,9 @@ start_kernel()
     ↓
 setup_arch（内存接管）
     ↓
-trap_init / syscall_init
+trap_init（IDT异常门 + SYSCALL/SYSENTER MSR设置）
     ↓
-init_IRQ（中断接管）
+init_IRQ（IDT硬件中断门 + INT 0x80）
     ↓
 rest_init（创建 PID 1/2）
     ↓
@@ -56,6 +56,37 @@ enter_kernel
 ```
 
 > **重要**：UEFI 路径**完全跳过**压缩内核的 startup_32/startup_64，直接通过 EFI stub 解压并进入主内核。详见 [UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md)。
+
+---
+
+## 中断与系统调用机制概览
+
+**重要概念澄清**：为避免混淆，先明确 IDT 与系统调用的关系。
+
+### IDT（中断描述符表）包含的内容
+
+IDT 是 x86 架构的硬件机制，CPU 通过中断向量号（0-255）查询 IDT 表，跳转到对应的处理程序。
+
+| 中断类型 | 向量范围 | 说明 | 设置阶段 |
+|---------|---------|------|---------|
+| **CPU 异常** | 0-31 | #DE(除零), #PF(缺页), #GP(通用保护) 等 | idt_setup_early_handler() → idt_setup_traps() |
+| **硬件中断 (IRQ)** | 32-255 | 时钟、键盘、网卡等设备中断 | idt_setup_apic_and_irq_gates() |
+| **软件中断** | 特定向量 | INT 0x80（32位系统调用兼容） | idt_setup_ia32_syscall_gate() |
+
+### 系统调用的两种机制
+
+Linux 内核支持两种系统调用机制，**它们的实现方式完全不同**：
+
+| 机制 | 指令 | 是否使用 IDT | 设置时机 | 性能 | 适用范围 |
+|------|------|-------------|---------|------|---------|
+| **传统机制** | `INT 0x80` | ✅ 是（查询 IDT[0x80]） | init_IRQ() → idt_setup_ia32_syscall_gate() | 慢 | 32位兼容 |
+| **现代机制** | `SYSCALL`/`SYSENTER` | ❌ 否（通过 MSR 寄存器） | trap_init() → syscall_init() | 快 | 64位主流 |
+
+**关键区别**：
+- **INT 0x80**：是 IDT 表的一个条目（向量 0x80），通过软件中断机制实现
+- **SYSCALL**：是专用 CPU 指令，通过 MSR 寄存器（MSR_LSTAR 等）配置入口地址，**完全绕过 IDT**
+
+> 详细对比见本文档第 2 节「trap_init() 与 syscall」和第 3 节「init_IRQ() 与接管 INT 服务的过程」。
 
 ---
 
@@ -1037,7 +1068,7 @@ void __init idt_setup_early_handler(void)
 }
 ```
 
-**GDT 与 IDT**：GDT 定义段（代码/数据/栈）；IDT 定义中断/异常时跳转目标。早期 IDT 在此阶段设置，完整 IRQ/INT 0x80 在 start_kernel() 的 init_IRQ() 中设置（见下）。
+**GDT 与 IDT**：GDT 定义段（代码/数据/栈）；IDT 定义中断/异常时跳转目标。早期 IDT 在此阶段设置（仅CPU异常），完整 IDT（包括硬件中断和 INT 0x80）在 start_kernel() 的 init_IRQ() 中设置。**注**：现代系统调用（SYSCALL/SYSENTER）不通过 IDT，而是在 trap_init() 中通过 MSR 寄存器配置（见本文档开头的「中断与系统调用机制概览」）。
 
 | 特性 | GDT（全局描述符表） | IDT（中断描述符表） |
 |------|---------------------|---------------------|
@@ -1723,6 +1754,17 @@ static inline long syscall(long number, ...)
 - **init_IRQ() 阶段**：设置 IDT[0x80]，让 INT 0x80 可用（依赖 IDT 完善）
 - 两者相互独立，但共同完成系统调用机制的初始化
 - 现代程序主要使用 SYSCALL，INT 0x80 主要用于兼容
+
+**与 IDT 内容的关系**：
+- **IDT 表包含三类条目**：
+  1. **CPU 异常**（0-31）：#DE, #PF, #GP 等 → idt_setup_early_handler() → idt_setup_traps()
+  2. **硬件中断**（32+）：时钟、键盘、网卡等 IRQ → idt_setup_apic_and_irq_gates()
+  3. **软件中断**（特定向量）：INT 0x80（32位系统调用兼容）→ idt_setup_ia32_syscall_gate()
+
+- **SYSCALL/SYSENTER 不在 IDT 中**，它们通过 MSR 寄存器配置：
+  - MSR_LSTAR：SYSCALL 入口地址（entry_SYSCALL_64）
+  - MSR_STAR：段选择子（内核态 CS / 用户态 CS）
+  - MSR_SYSCALL_MASK：RFLAGS 掩码（syscall 时清除的标志位）
 
 ### 3. init_IRQ() 与接管 INT 服务的过程
 
