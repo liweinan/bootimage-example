@@ -12,81 +12,9 @@
 > - **阶段 1：早期页表** - 压缩内核 startup_32/64 构建简单的身份映射页表，详见 [PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md](PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md)
 > - **阶段 2：完整页表（本文档）** - setup_arch 中根据 E820/memblock 建立完整的直接映射，替换早期页表
 
-## 关键问题解答
+## 代码来源说明
 
-### Q1: BIOS 运行在实模式，如何探测 4GB 以上的内存？
-
-**答**: 关键是 BIOS **不需要直接访问 4GB 以上的物理内存**来探测它们的存在。
-
-#### 内存探测的核心机制（无需直接访问高地址内存）
-
-**1. 读取内存控制器寄存器**（主要方式）：
-- 内存控制器（Northbridge/Memory Controller Hub）有配置寄存器记录安装的内存大小
-- 这些寄存器通过 **PCI 配置空间**（I/O 端口 0xCF8/0xCFC）或 **MMIO** 访问
-- 即使在实模式下，也可通过 I/O 指令（`in`/`out`）读取 PCI 配置空间
-- 寄存器会告诉 BIOS：安装了多少内存、内存条的分布、是否超过 4GB 等
-
-**示例：通过 PCI 配置空间读取内存大小**（实际硬件）：
-
-```c
-// 通过 PCI 配置空间读取内存控制器信息
-u32 read_pci_config(u8 bus, u8 dev, u8 func, u8 offset)
-{
-    u32 address = 0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | offset;
-    outl(0xCF8, address);      // 写配置地址到 I/O 端口 0xCF8
-    return inl(0xCFC);         // 从 I/O 端口 0xCFC 读取配置数据
-}
-
-// Intel Northbridge 的 TOLUD 寄存器（Top of Low Usable DRAM）
-u32 low_mem_top = read_pci_config(0, 0, 0, 0xBC);  // 例：0xC0000000 (3GB)
-
-// Intel Northbridge 的 TOUUD 寄存器（Top of Upper Usable DRAM，64 位）
-u64 high_mem_top = read_pci_config_64(0, 0, 0, 0xA8);  // 例：0x400000000 (16GB)
-
-// BIOS 无需访问 16GB 内存，只需读取寄存器就知道有 16GB
-```
-
-**2. 虚拟化平台接口**：
-
-QEMU/KVM 通过 **fw_cfg 接口**直接传递完整内存布局：
-
-```c
-// SeaBIOS - src/fw/paravirt.c
-void qemu_preinit(void)
-{
-    // 读取低于 4GB 的内存大小
-    u32 lowmem = qemu_cfg_read_u32(QEMU_CFG_RAM_SIZE);
-
-    // 读取高于 4GB 的内存大小（如果有）
-    u64 highmem = qemu_cfg_read_u64(QEMU_CFG_HIGH_MEM_SIZE);
-
-    // BIOS 不需要访问这些内存，只需要知道它们存在
-    e820_add(0x100000, lowmem - 0x100000, E820_RAM);
-    if (highmem)
-        e820_add(0x100000000ULL, highmem, E820_RAM);  // 4GB (2^32) 以上
-}
-```
-
-**3. POST 阶段的 CPU 模式**（用于初始化内存控制器，非探测）：
-- SeaBIOS 在 POST 可切换到 **32 位保护模式**（访问 0-4GB）
-- 某些 BIOS 使用 **PAE 模式**（Physical Address Extension，36 位地址线，最多 64GB）
-- 但对于 **4GB 以上内存的探测**，主要靠读取配置寄存器，而非直接访问内存
-
-#### 关键点总结
-
-| 方面 | 说明 |
-|------|------|
-| **如何知道 4GB 以上内存？** | 读取内存控制器的 PCI 配置寄存器（TOUUD 等） |
-| **是否需要访问高地址？** | ❌ 不需要，寄存器通过 I/O 端口访问，不受地址模式限制 |
-| **32 位保护模式的限制** | ❌ 只能访问 4GB 物理地址（2^32）<br>✅ 但可通过 I/O 端口读取配置寄存器 |
-| **INT 15h E820 的数据来源** | BIOS 在 POST 阶段收集的信息，存储在 BIOS 数据区 |
-| **实模式的角色** | INT 15h 中断处理程序运行在实模式，但只是**返回已收集的数据** |
-
-详见：**2.2 SeaBIOS 如何构建 E820 表**
-
-### Q2: 代码来源标注
-
-本文档涉及**三个项目**的代码：
+本文档涉及**四个项目**的代码：
 
 | 项目 | 用途 | 源码仓库 |
 |------|------|---------|
@@ -97,342 +25,6 @@ void qemu_preinit(void)
 
 所有代码片段都已标注**项目名、文件路径、函数名和行号**（基于 Linux v6.x 内核）。
 
-### Q3: UEFI 的 E820 支持
-
-UEFI 固件**不使用 E820 表**，而是提供 **`GetMemoryMap()` 服务**。
-
-- **EDK2 实现**：`MdeModulePkg/Core/Dxe/Mem/Page.c:CoreGetMemoryMap()`
-- **EFI 内存类型**：14 种类型（vs E820 的 5 种），包括 BootServices（可回收）、RuntimeServices（不可回收）等
-- **GRUB 转换**：GRUB 在 UEFI 模式下调用 GetMemoryMap，将 EFI 内存映射转换为 E820 格式传递给 Linux 内核
-- **Linux 内核**：收到的仍是 E820 格式（由 GRUB 转换），但内核也保留原始 EFI 内存映射
-
-详见：**2.3.1 UEFI GetMemoryMap() 实现（EDK2）**
-
-### Q4: 内核接收 E820 表的逻辑是否统一？
-
-**答：是的，完全统一**。无论是 BIOS 还是 UEFI 启动，Linux 内核接收到的都是 **E820 格式**的内存映射。
-
-#### 统一接口的设计
-
-```mermaid
-flowchart TD
-    subgraph Firmware[固件层]
-        BIOS[Legacy BIOS<br>INT 15h E820]
-        UEFI[UEFI<br>GetMemoryMap]
-    end
-
-    subgraph Bootloader[引导加载器层 - GRUB]
-        GRUB_BIOS[GRUB BIOS 模式]
-        GRUB_UEFI[GRUB UEFI 模式]
-    end
-
-    subgraph Unified[统一接口]
-        BOOT_PARAMS[boot_params.e820_table<br>boot_e820_entry[128]]
-    end
-
-    subgraph Kernel[Linux 内核]
-        E820_SETUP[e820__memory_setup<br>统一的解析函数]
-        E820_TABLE[e820_table<br>统一的全局表]
-    end
-
-    BIOS -->|返回 E820| GRUB_BIOS
-    UEFI -->|返回 EFI Memory Map| GRUB_UEFI
-
-    GRUB_BIOS -->|直接复制| BOOT_PARAMS
-    GRUB_UEFI -->|转换为 E820 格式| BOOT_PARAMS
-
-    BOOT_PARAMS -->|ESI 寄存器传递| E820_SETUP
-    E820_SETUP --> E820_TABLE
-
-    style Unified fill:#ffe1e1
-    style Kernel fill:#e1ffe1
-```
-
-#### 关键设计点
-
-| 层次 | BIOS 路径 | UEFI 路径 | 是否统一？ |
-|------|----------|----------|----------|
-| **固件接口** | INT 15h E820 | GetMemoryMap() | ❌ 不同 |
-| **GRUB 处理** | 直接读取 E820 | 转换 EFI → E820 | ⚠️ 内部不同 |
-| **传递给内核** | `boot_params.e820_table` | `boot_params.e820_table` | ✅ **统一** |
-| **内核接收** | `e820__memory_setup()` | `e820__memory_setup()` | ✅ **统一** |
-| **内核数据结构** | `e820_table` | `e820_table` | ✅ **统一** |
-
-#### 内核接收的统一代码路径
-
-> **项目**: Linux Kernel
-> **文件**: `arch/x86/kernel/e820.c:1354`
-
-```c
-// Linux Kernel - arch/x86/kernel/e820.c:1354
-char *__init e820__memory_setup(void)
-{
-    // 调用统一的内存布局获取函数
-    // 默认实现：e820__memory_setup_default()
-    char *who = x86_init.resources.memory_setup();
-
-    // BIOS 路径：who = "BIOS-e820"
-    // UEFI 路径：who = "BIOS-e820"（但实际来自 EFI，经 GRUB 转换）
-
-    // 拷贝到备份表（与启动方式无关）
-    memcpy(&e820_table_kexec, &e820_table, sizeof(e820_table));
-    memcpy(&e820_table_firmware, &e820_table, sizeof(e820_table));
-
-    return who;
-}
-
-char *__init e820__memory_setup_default(void)
-{
-    char *who = "BIOS-e820";
-
-    // 统一的数据来源：boot_params.e820_table
-    int entries = boot_params.e820_entries;
-    for (int i = 0; i < entries && i < E820_MAX_ENTRIES; i++) {
-        struct boot_e820_entry *entry = &boot_params.e820_table[i];
-        e820__range_add(entry->addr, entry->size, entry->type);
-    }
-
-    // 额外处理：如果是 EFI 启动，还会处理原始 EFI 内存映射
-    if (efi_enabled(EFI_BOOT))
-        e820__setup_efi();  // 从 EFI 原始信息中补充细节
-
-    return who;
-}
-```
-
-#### 内核对 UEFI 的额外处理
-
-虽然接收 E820 的逻辑统一，但内核**也保留了 EFI 原始内存映射**：
-
-> **项目**: Linux Kernel
-> **文件**: `arch/x86/platform/efi/efi.c`
-
-```c
-// Linux Kernel - arch/x86/platform/efi/efi.c
-void __init efi_init(void)
-{
-    // 如果是 EFI 启动，保留原始 EFI 内存映射
-    if (!efi_enabled(EFI_BOOT))
-        return;
-
-    // efi.memmap 保存原始的 EFI Memory Map
-    efi_memmap_init_early(&boot_params.efi_info);
-
-    // 内核同时维护两套数据：
-    // 1. e820_table - 转换后的 E820 格式（用于内存管理）
-    // 2. efi.memmap - 原始 EFI 格式（用于 Runtime Services）
-}
-```
-
-#### 为什么保留 EFI 原始信息？
-
-| 用途 | 使用 E820 | 使用 EFI Memory Map |
-|------|----------|-------------------|
-| **物理内存管理** | ✅ 是 | ❌ 否 |
-| **建立页表映射** | ✅ 是 | ❌ 否 |
-| **EFI Runtime Services** | ❌ 否 | ✅ 是（需要精确的 EFI 类型） |
-| **SetVirtualAddressMap** | ❌ 否 | ✅ 是 |
-| **ACPI 表访问** | ⚠️ 部分 | ✅ 是 |
-
-**关键点**：
-- ✅ **内存管理统一**：无论 BIOS/UEFI，内核都用 `e820_table` 进行内存管理
-- ✅ **接收逻辑统一**：`e820__memory_setup()` 从 `boot_params.e820_table` 读取
-- ⚠️ **UEFI 特殊性**：内核额外保留 `efi.memmap`，用于 EFI Runtime Services
-- ✅ **GRUB 的抽象层**：GRUB 负责将不同固件接口统一为 E820 格式
-
-#### 完整的数据流
-
-```
-【BIOS 启动】
-BIOS INT 15h E820
-    ↓ (返回 E820)
-GRUB grub_machine_mmap_iterate()
-    ↓ (直接复制)
-boot_params.e820_table[]
-    ↓ (ESI 寄存器)
-Linux e820__memory_setup()
-    ↓
-e820_table (内核全局表)
-
-【UEFI 启动】
-UEFI GetMemoryMap()
-    ↓ (返回 EFI_MEMORY_DESCRIPTOR[])
-GRUB grub_efi_get_memory_map()
-    ↓ (转换 EFI → E820)
-boot_params.e820_table[]
-    ↓ (ESI 寄存器)
-Linux e820__memory_setup()
-    ↓
-e820_table (内核全局表)
-    +
-efi.memmap (EFI 原始映射，用于 Runtime Services)
-```
-
-**总结**：
-- ✅ **是的，内核接收逻辑完全统一**
-- ✅ 统一接口是 `boot_params.e820_table`
-- ✅ 统一处理函数是 `e820__memory_setup()`
-- ⚠️ UEFI 启动时，内核**额外**保留 EFI 原始信息（用于 Runtime Services）
-- ✅ GRUB 充当**适配层**，屏蔽了 BIOS/UEFI 的差异
-
-### Q5: 512GB 内存的系统也是这个机制吗？
-
-**答：是的，机制完全相同**，但有一些实际考虑：
-
-#### 1. 数据结构容量充足
-
-E820 表的数据结构使用 **64 位整数**（`u64`），可以表示的地址范围远超 512GB：
-
-| 字段 | 类型 | 最大值 | 可表示范围 |
-|------|------|--------|----------|
-| `addr` | `u64` | 2^64 - 1 | 18,446,744 TB（约 16 EB） |
-| `size` | `u64` | 2^64 - 1 | 18,446,744 TB（约 16 EB） |
-
-512GB = 2^39 字节，仅占用 64 位地址空间的 **0.000003%**，完全没有问题。
-
-#### 2. E820 表条目限制
-
-`boot_params.e820_table` 数组最多有 **128 个条目**：
-
-> **项目**: Linux Kernel
-> **文件**: `arch/x86/include/uapi/asm/bootparam.h`
-
-```c
-// Linux Kernel - arch/x86/include/uapi/asm/bootparam.h
-#define E820_MAX_ENTRIES_ZEROPAGE  128
-
-struct boot_params {
-    // ...
-    __u32  e820_entries;
-    struct boot_e820_entry e820_table[E820_MAX_ENTRIES_ZEROPAGE];
-    // ...
-};
-```
-
-**实际使用情况**：
-- ✅ **8GB 系统**：通常 10-20 个条目（见 Q4 下方的示例表）
-- ✅ **512GB 系统**：通常 30-60 个条目
-- ✅ **多 NUMA 节点**：可能达到 60-80 个条目
-- ⚠️ **理论极限**：128 个条目（实际很少达到）
-
-**为什么条目不多？**
-- 固件会**合并连续的相同类型区域**
-- 大块 RAM 通常是单个或几个条目（例如：`0x100000000-0x8000000000, RAM` 一个条目就能表示 512GB）
-- 保留区域（PCI MMIO、ACPI 等）相对固定
-
-#### 3. 大内存系统的实际特点
-
-**512GB 内存的系统通常具有以下特征**：
-
-| 特征 | 说明 |
-|------|------|
-| **固件类型** | 几乎 100% 使用 UEFI（不再是 Legacy BIOS） |
-| **CPU 架构** | x86-64（64 位物理地址线，支持 52 位地址 = 4 PB） |
-| **NUMA 拓扑** | 通常是多 NUMA 节点（例如：2 个 CPU，每个 256GB） |
-| **内存条目** | E820 表会有多个大块 RAM 条目（每个 NUMA 节点一个或几个） |
-| **地址空洞** | 可能在 4GB 附近有大块 MMIO 空洞（PCIe、GPU 等） |
-
-#### 4. 512GB 系统的 E820 表示例
-
-假设一个双路 CPU 服务器，每个 CPU 256GB，总共 512GB：
-
-```
-# dmesg | grep "BIOS-e820"  （UEFI 启动也显示为 "BIOS-e820"）
-
-[    0.000000] BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable
-[    0.000000] BIOS-e820: [mem 0x0000000000100000-0x00000000bfffffff] usable        # 低于 4GB 的 RAM (~3GB)
-[    0.000000] BIOS-e820: [mem 0x00000000c0000000-0x00000000cfffffff] reserved      # PCIe MMIO
-[    0.000000] BIOS-e820: [mem 0x0000000100000000-0x000000407fffffff] usable        # NUMA 节点 0 (256GB)
-[    0.000000] BIOS-e820: [mem 0x0000004080000000-0x000000807fffffff] usable        # NUMA 节点 1 (256GB)
-[    0.000000] BIOS-e820: [mem 0x0000008080000000-0x00000080ffffffff] reserved      # ACPI NVS
-```
-
-**关键观察**：
-- ✅ 512GB 内存仅用了 **6 个 E820 条目**
-- ✅ 每个大块 RAM 区域是一个条目（256GB 一个条目）
-- ✅ 地址从 4GB（`0x100000000`）一直延伸到 512GB+（`0x807fffffff` ≈ 512GB）
-- ✅ 仍然远低于 128 条目的限制
-
-#### 5. 内核对大内存的处理
-
-> **项目**: Linux Kernel
-> **文件**: `arch/x86/kernel/e820.c`
-
-```c
-// Linux Kernel - arch/x86/kernel/e820.c
-void __init e820__memblock_setup(void)
-{
-    int i;
-    u64 end;
-
-    // 遍历所有 E820 条目，添加到 memblock
-    for (i = 0; i < e820_table->nr_entries; i++) {
-        struct e820_entry *entry = &e820_table->entries[i];
-
-        // 对于 512GB 系统，这里会添加多个大块区域
-        if (entry->type != E820_TYPE_RAM)
-            continue;
-
-        // memblock_add() 可以处理任意大小的区域
-        // 512GB 的区域会被正确添加
-        memblock_add(entry->addr, entry->size);
-    }
-
-    // 对于 NUMA 系统，后续会调用 numa_init()
-    // 将内存按 NUMA 节点组织
-}
-```
-
-#### 6. NUMA 系统的额外处理
-
-512GB 系统通常是 NUMA 架构，内核会进行额外处理：
-
-> **项目**: Linux Kernel
-> **文件**: `arch/x86/mm/numa.c`
-
-```c
-// Linux Kernel - arch/x86/mm/numa.c
-void __init numa_init(void)
-{
-    // 检测 NUMA 拓扑（从 ACPI SRAT 表）
-    numa_emulation();  // 或 acpi_numa_init()
-
-    // 将 memblock 中的内存按 NUMA 节点分组
-    // 例如：节点 0: 0-256GB, 节点 1: 256-512GB
-    for_each_node_mask(nid, node_possible_map) {
-        u64 start = numa_meminfo.blk[nid].start;
-        u64 end = numa_meminfo.blk[nid].end;
-
-        // 为每个节点建立独立的内存管理结构
-        setup_node_data(nid, start, end);
-    }
-}
-```
-
-#### 关键点总结
-
-| 方面 | 8GB 系统 | 512GB 系统 | 是否相同机制？ |
-|------|---------|-----------|--------------|
-| **E820 数据结构** | `u64` 地址/大小 | `u64` 地址/大小 | ✅ 完全相同 |
-| **boot_params 传递** | `e820_table[128]` | `e820_table[128]` | ✅ 完全相同 |
-| **内核解析函数** | `e820__memory_setup()` | `e820__memory_setup()` | ✅ 完全相同 |
-| **E820 条目数量** | ~15 个 | ~40 个（NUMA）| ⚠️ 数量不同，但都在限制内 |
-| **固件类型** | BIOS 或 UEFI | 几乎总是 UEFI | ⚠️ 固件倾向不同 |
-| **NUMA 处理** | 通常单节点 | 通常多节点 | ⚠️ 需要额外的 NUMA 初始化 |
-| **memblock 管理** | `memblock_add()` | `memblock_add()` | ✅ 完全相同 |
-
-**最终答案**：
-- ✅ **E820 机制完全相同**，`u64` 字段可以轻松表示 512GB（甚至 PB 级）
-- ✅ **内核处理流程相同**：`e820__memory_setup()` → `e820__memblock_setup()` → `init_mem_mapping()`
-- ✅ **条目限制不是问题**：512GB 系统通常只需 30-60 个条目，远低于 128 的限制
-- ⚠️ **NUMA 是额外层次**：大内存系统需要额外的 NUMA 拓扑初始化，但这是在 E820 之上的
-- ✅ **固件探测机制相同**：UEFI `GetMemoryMap()` 或 BIOS PCI 配置寄存器，原理如 Q1 所述
-
-## 文档内容
-
-本文档展开说明 `start_kernel()` 中 **setup_arch(&command_line)** 与**内核对物理内存的接管**相关的步骤，基于 x86（含 x86_64）内核源码：`arch/x86/kernel/setup.c`、`arch/x86/kernel/e820.c`、`arch/x86/mm/init.c`、`arch/x86/mm/init_64.c` 等。
-
-> **相关文档**：setup_arch() 及完整启动链见 [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)；MMU、分页与内核页表分工见 [PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md](PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md)。
 
 ## 1. 调用顺序概览
 
@@ -680,26 +272,8 @@ e820 map has 6 items:
 
 > **项目**: [SeaBIOS](https://www.seabios.org/) - Legacy BIOS 实现
 > **源码仓库**: https://git.seabios.org/seabios.git
-
-#### 关键问题：BIOS 在实模式下如何探测 4GB 以上的内存？
-
-**实模式限制**：实模式下 CPU 只能访问 1MB 地址空间（20 位地址线），但现代系统有数 GB 甚至数百 GB 内存。
-
-**BIOS 的解决方案**：
-
-1. **POST 阶段使用保护模式或 Unreal Mode**：
-   - BIOS 在 POST 阶段（开机自检）**不一定处于实模式**
-   - SeaBIOS 在 POST 时使用 **32 位保护模式**来探测和初始化内存
-   - 探测完成后将结果存储在 BIOS 数据区（BDA/EBDA），供后续 INT 15h 调用返回
-
-2. **Unreal Mode（Big Real Mode）**：
-   - 一种混合模式：CPU 处于实模式，但段寄存器的隐藏部分仍保留 32 位段界限
-   - 允许访问 4GB 地址空间，同时保持实模式兼容性
-   - 部分 BIOS 使用这种模式进行内存探测
-
-3. **内存控制器探测**：
-   - BIOS 通过读取内存控制器（Northbridge）的配置寄存器获取内存信息
-   - 这些寄存器通过 I/O 端口或 PCI 配置空间访问，不受实模式地址限制
+>
+> 关于"BIOS 如何在实模式下探测 4GB 以上内存"的详细解答，请参见文档末尾的**附录 Q1**。
 
 **SeaBIOS 的具体实现**（参考 `src/post.c`）：
 
@@ -1192,69 +766,9 @@ grub_linux_boot (void)
 
 **接收流程**：
 
-> **项目**: Linux Kernel
-> **文件**: `arch/x86/kernel/setup.c`
-> **函数**: `setup_arch()`
-
-```c
-// Linux Kernel - arch/x86/kernel/setup.c
-void __init setup_arch(char **cmdline_p)
-{
-    // ... 早期初始化 ...
-
-    // 从 boot_params 解析 E820 表
-    e820__memory_setup();
-
-    // ... 后续内存管理初始化 ...
-}
-```
-
-**`e820__memory_setup()` 实现**：
-
-> **项目**: Linux Kernel
-> **文件**: `arch/x86/kernel/e820.c:1354`
-
-```c
-// Linux Kernel - arch/x86/kernel/e820.c:1354
-char *__init e820__memory_setup(void)
-{
-    // 调用平台相关的内存布局获取函数
-    // 默认实现为 e820__memory_setup_default()
-    char *who = x86_init.resources.memory_setup();
-
-    // 拷贝到备份表（用于 kexec、firmware 查询等）
-    memcpy(&e820_table_kexec, &e820_table, sizeof(e820_table));
-    memcpy(&e820_table_firmware, &e820_table, sizeof(e820_table));
-
-    return who;  // 返回来源字符串（如 "BIOS-e820"）
-}
-```
-
-**`e820__memory_setup_default()`** - 默认从 boot_params 读取：
-
-> **项目**: Linux Kernel
-> **文件**: `arch/x86/kernel/e820.c:1316`
-
-```c
-// Linux Kernel - arch/x86/kernel/e820.c:1316
-char *__init e820__memory_setup_default(void)
-{
-    char *who = "BIOS-e820";
-
-    // 从 boot_params.e820_table 复制到内核全局 e820_table
-    int entries = boot_params.e820_entries;
-    for (int i = 0; i < entries && i < E820_MAX_ENTRIES; i++) {
-        struct boot_e820_entry *entry = &boot_params.e820_table[i];
-        e820__range_add(entry->addr, entry->size, entry->type);
-    }
-
-    // 额外处理 EFI 内存映射（EFI 启动时）
-    if (efi_enabled(EFI_BOOT))
-        e820__setup_efi();
-
-    return who;
-}
-```
+> Linux 内核无论从 BIOS 还是 UEFI 启动，都通过统一的 `e820__memory_setup()` 接口接收内存映射。
+>
+> 详细的接收逻辑、统一接口设计图和 BIOS/UEFI 路径对比，请参见文档末尾的**附录 Q4**。
 
 **内核使用 E820 表的关键步骤**：
 
@@ -2220,3 +1734,409 @@ E820 表是连接"硬件物理内存布局"与"内核虚拟内存管理"的桥�
 因此，**setup_arch() 中内核对物理内存的完整接管**是由 **e820 解析 → memblock 建立 → init_mem_mapping → paging_init** 这一整条链完成的；若只选“一步”作为“关键”，通常是 **init_mem_mapping()**（建立直接映射并切换页表），因为此前内核还不能线性访问全部 RAM，此后才可以。内核与 MMU 在页表上的分工（内核维护页表、MMU 查表与缺页协作）见 [PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md](PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md)。
 
 本文档基于 Linux 内核 x86 源码整理；具体行号与条件编译可能随版本略有变化，以实际源码为准。
+
+---
+
+## 附录：关键问题深入解答
+
+### Q1: BIOS 运行在实模式，如何探测 4GB 以上的内存？
+
+**答**: 关键是 BIOS **不需要直接访问 4GB 以上的物理内存**来探测它们的存在。
+
+#### 内存探测的核心机制（无需直接访问高地址内存）
+
+**1. 读取内存控制器寄存器**（主要方式）：
+- 内存控制器（Northbridge/Memory Controller Hub）有配置寄存器记录安装的内存大小
+- 这些寄存器通过 **PCI 配置空间**（I/O 端口 0xCF8/0xCFC）或 **MMIO** 访问
+- 即使在实模式下，也可通过 I/O 指令（`in`/`out`）读取 PCI 配置空间
+- 寄存器会告诉 BIOS：安装了多少内存、内存条的分布、是否超过 4GB 等
+
+**示例：通过 PCI 配置空间读取内存大小**（实际硬件）：
+
+```c
+// 通过 PCI 配置空间读取内存控制器信息
+u32 read_pci_config(u8 bus, u8 dev, u8 func, u8 offset)
+{
+    u32 address = 0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | offset;
+    outl(0xCF8, address);      // 写配置地址到 I/O 端口 0xCF8
+    return inl(0xCFC);         // 从 I/O 端口 0xCFC 读取配置数据
+}
+
+// Intel Northbridge 的 TOLUD 寄存器（Top of Low Usable DRAM）
+u32 low_mem_top = read_pci_config(0, 0, 0, 0xBC);  // 例：0xC0000000 (3GB)
+
+// Intel Northbridge 的 TOUUD 寄存器（Top of Upper Usable DRAM，64 位）
+u64 high_mem_top = read_pci_config_64(0, 0, 0, 0xA8);  // 例：0x400000000 (16GB)
+
+// BIOS 无需访问 16GB 内存，只需读取寄存器就知道有 16GB
+```
+
+**2. 虚拟化平台接口**：
+
+QEMU/KVM 通过 **fw_cfg 接口**直接传递完整内存布局：
+
+```c
+// SeaBIOS - src/fw/paravirt.c
+void qemu_preinit(void)
+{
+    // 读取低于 4GB 的内存大小
+    u32 lowmem = qemu_cfg_read_u32(QEMU_CFG_RAM_SIZE);
+
+    // 读取高于 4GB 的内存大小（如果有）
+    u64 highmem = qemu_cfg_read_u64(QEMU_CFG_HIGH_MEM_SIZE);
+
+    // BIOS 不需要访问这些内存，只需要知道它们存在
+    e820_add(0x100000, lowmem - 0x100000, E820_RAM);
+    if (highmem)
+        e820_add(0x100000000ULL, highmem, E820_RAM);  // 4GB (2^32) 以上
+}
+```
+
+**3. POST 阶段的 CPU 模式**（用于初始化内存控制器，非探测）：
+- SeaBIOS 在 POST 可切换到 **32 位保护模式**（访问 0-4GB）
+- 某些 BIOS 使用 **PAE 模式**（Physical Address Extension，36 位地址线，最多 64GB）
+- 但对于 **4GB 以上内存的探测**，主要靠读取配置寄存器，而非直接访问内存
+
+#### 关键点总结
+
+| 方面 | 说明 |
+|------|------|
+| **如何知道 4GB 以上内存？** | 读取内存控制器的 PCI 配置寄存器（TOUUD 等） |
+| **是否需要访问高地址？** | ❌ 不需要，寄存器通过 I/O 端口访问，不受地址模式限制 |
+| **32 位保护模式的限制** | ❌ 只能访问 4GB 物理地址（2^32）<br>✅ 但可通过 I/O 端口读取配置寄存器 |
+| **INT 15h E820 的数据来源** | BIOS 在 POST 阶段收集的信息，存储在 BIOS 数据区 |
+| **实模式的角色** | INT 15h 中断处理程序运行在实模式，但只是**返回已收集的数据** |
+
+详见：**2.2 SeaBIOS 如何构建 E820 表**
+
+### Q3: UEFI 的 E820 支持
+
+UEFI 固件**不使用 E820 表**，而是提供 **`GetMemoryMap()` 服务**。
+
+- **EDK2 实现**：`MdeModulePkg/Core/Dxe/Mem/Page.c:CoreGetMemoryMap()`
+- **EFI 内存类型**：14 种类型（vs E820 的 5 种），包括 BootServices（可回收）、RuntimeServices（不可回收）等
+- **GRUB 转换**：GRUB 在 UEFI 模式下调用 GetMemoryMap，将 EFI 内存映射转换为 E820 格式传递给 Linux 内核
+- **Linux 内核**：收到的仍是 E820 格式（由 GRUB 转换），但内核也保留原始 EFI 内存映射
+
+> **详细实现**：完整的 EDK2 GetMemoryMap() 源码和 GRUB 转换逻辑，请参见 **2.3.1 UEFI GetMemoryMap() 实现（EDK2）**。
+
+### Q4: 内核接收 E820 表的逻辑是否统一？
+
+**答：是的，完全统一**。无论是 BIOS 还是 UEFI 启动，Linux 内核接收到的都是 **E820 格式**的内存映射。
+
+#### 统一接口的设计
+
+```mermaid
+flowchart TD
+    subgraph Firmware[固件层]
+        BIOS[Legacy BIOS<br>INT 15h E820]
+        UEFI[UEFI<br>GetMemoryMap]
+    end
+
+    subgraph Bootloader[引导加载器层 - GRUB]
+        GRUB_BIOS[GRUB BIOS 模式]
+        GRUB_UEFI[GRUB UEFI 模式]
+    end
+
+    subgraph Unified[统一接口]
+        BOOT_PARAMS[boot_params.e820_table<br>boot_e820_entry[128]]
+    end
+
+    subgraph Kernel[Linux 内核]
+        E820_SETUP[e820__memory_setup<br>统一的解析函数]
+        E820_TABLE[e820_table<br>统一的全局表]
+    end
+
+    BIOS -->|返回 E820| GRUB_BIOS
+    UEFI -->|返回 EFI Memory Map| GRUB_UEFI
+
+    GRUB_BIOS -->|直接复制| BOOT_PARAMS
+    GRUB_UEFI -->|转换为 E820 格式| BOOT_PARAMS
+
+    BOOT_PARAMS -->|ESI 寄存器传递| E820_SETUP
+    E820_SETUP --> E820_TABLE
+
+    style Unified fill:#ffe1e1
+    style Kernel fill:#e1ffe1
+```
+
+#### 关键设计点
+
+| 层次 | BIOS 路径 | UEFI 路径 | 是否统一？ |
+|------|----------|----------|----------|
+| **固件接口** | INT 15h E820 | GetMemoryMap() | ❌ 不同 |
+| **GRUB 处理** | 直接读取 E820 | 转换 EFI → E820 | ⚠️ 内部不同 |
+| **传递给内核** | `boot_params.e820_table` | `boot_params.e820_table` | ✅ **统一** |
+| **内核接收** | `e820__memory_setup()` | `e820__memory_setup()` | ✅ **统一** |
+| **内核数据结构** | `e820_table` | `e820_table` | ✅ **统一** |
+
+#### 内核接收的统一代码路径
+
+> **项目**: Linux Kernel
+> **文件**: `arch/x86/kernel/e820.c:1354`
+
+```c
+// Linux Kernel - arch/x86/kernel/e820.c:1354
+char *__init e820__memory_setup(void)
+{
+    // 调用统一的内存布局获取函数
+    // 默认实现：e820__memory_setup_default()
+    char *who = x86_init.resources.memory_setup();
+
+    // BIOS 路径：who = "BIOS-e820"
+    // UEFI 路径：who = "BIOS-e820"（但实际来自 EFI，经 GRUB 转换）
+
+    // 拷贝到备份表（与启动方式无关）
+    memcpy(&e820_table_kexec, &e820_table, sizeof(e820_table));
+    memcpy(&e820_table_firmware, &e820_table, sizeof(e820_table));
+
+    return who;
+}
+
+char *__init e820__memory_setup_default(void)
+{
+    char *who = "BIOS-e820";
+
+    // 统一的数据来源：boot_params.e820_table
+    int entries = boot_params.e820_entries;
+    for (int i = 0; i < entries && i < E820_MAX_ENTRIES; i++) {
+        struct boot_e820_entry *entry = &boot_params.e820_table[i];
+        e820__range_add(entry->addr, entry->size, entry->type);
+    }
+
+    // 额外处理：如果是 EFI 启动，还会处理原始 EFI 内存映射
+    if (efi_enabled(EFI_BOOT))
+        e820__setup_efi();  // 从 EFI 原始信息中补充细节
+
+    return who;
+}
+```
+
+#### 内核对 UEFI 的额外处理
+
+虽然接收 E820 的逻辑统一，但内核**也保留了 EFI 原始内存映射**：
+
+> **项目**: Linux Kernel
+> **文件**: `arch/x86/platform/efi/efi.c`
+
+```c
+// Linux Kernel - arch/x86/platform/efi/efi.c
+void __init efi_init(void)
+{
+    // 如果是 EFI 启动，保留原始 EFI 内存映射
+    if (!efi_enabled(EFI_BOOT))
+        return;
+
+    // efi.memmap 保存原始的 EFI Memory Map
+    efi_memmap_init_early(&boot_params.efi_info);
+
+    // 内核同时维护两套数据：
+    // 1. e820_table - 转换后的 E820 格式（用于内存管理）
+    // 2. efi.memmap - 原始 EFI 格式（用于 Runtime Services）
+}
+```
+
+#### 为什么保留 EFI 原始信息？
+
+| 用途 | 使用 E820 | 使用 EFI Memory Map |
+|------|----------|-------------------|
+| **物理内存管理** | ✅ 是 | ❌ 否 |
+| **建立页表映射** | ✅ 是 | ❌ 否 |
+| **EFI Runtime Services** | ❌ 否 | ✅ 是（需要精确的 EFI 类型） |
+| **SetVirtualAddressMap** | ❌ 否 | ✅ 是 |
+| **ACPI 表访问** | ⚠️ 部分 | ✅ 是 |
+
+**关键点**：
+- ✅ **内存管理统一**：无论 BIOS/UEFI，内核都用 `e820_table` 进行内存管理
+- ✅ **接收逻辑统一**：`e820__memory_setup()` 从 `boot_params.e820_table` 读取
+- ⚠️ **UEFI 特殊性**：内核额外保留 `efi.memmap`，用于 EFI Runtime Services
+- ✅ **GRUB 的抽象层**：GRUB 负责将不同固件接口统一为 E820 格式
+
+#### 完整的数据流
+
+```
+【BIOS 启动】
+BIOS INT 15h E820
+    ↓ (返回 E820)
+GRUB grub_machine_mmap_iterate()
+    ↓ (直接复制)
+boot_params.e820_table[]
+    ↓ (ESI 寄存器)
+Linux e820__memory_setup()
+    ↓
+e820_table (内核全局表)
+
+【UEFI 启动】
+UEFI GetMemoryMap()
+    ↓ (返回 EFI_MEMORY_DESCRIPTOR[])
+GRUB grub_efi_get_memory_map()
+    ↓ (转换 EFI → E820)
+boot_params.e820_table[]
+    ↓ (ESI 寄存器)
+Linux e820__memory_setup()
+    ↓
+e820_table (内核全局表)
+    +
+efi.memmap (EFI 原始映射，用于 Runtime Services)
+```
+
+**总结**：
+- ✅ **是的，内核接收逻辑完全统一**
+- ✅ 统一接口是 `boot_params.e820_table`
+- ✅ 统一处理函数是 `e820__memory_setup()`
+- ⚠️ UEFI 启动时，内核**额外**保留 EFI 原始信息（用于 Runtime Services）
+- ✅ GRUB 充当**适配层**，屏蔽了 BIOS/UEFI 的差异
+
+
+### Q5: 512GB 内存的系统也是这个机制吗？
+
+**答：是的，机制完全相同**，但有一些实际考虑：
+
+#### 1. 数据结构容量充足
+
+E820 表的数据结构使用 **64 位整数**（`u64`），可以表示的地址范围远超 512GB：
+
+| 字段 | 类型 | 最大值 | 可表示范围 |
+|------|------|--------|----------|
+| `addr` | `u64` | 2^64 - 1 | 18,446,744 TB（约 16 EB） |
+| `size` | `u64` | 2^64 - 1 | 18,446,744 TB（约 16 EB） |
+
+512GB = 2^39 字节，仅占用 64 位地址空间的 **0.000003%**，完全没有问题。
+
+#### 2. E820 表条目限制
+
+`boot_params.e820_table` 数组最多有 **128 个条目**：
+
+> **项目**: Linux Kernel
+> **文件**: `arch/x86/include/uapi/asm/bootparam.h`
+
+```c
+// Linux Kernel - arch/x86/include/uapi/asm/bootparam.h
+#define E820_MAX_ENTRIES_ZEROPAGE  128
+
+struct boot_params {
+    // ...
+    __u32  e820_entries;
+    struct boot_e820_entry e820_table[E820_MAX_ENTRIES_ZEROPAGE];
+    // ...
+};
+```
+
+**实际使用情况**：
+- ✅ **8GB 系统**：通常 10-20 个条目（见 2.1.2 节的示例表）
+- ✅ **512GB 系统**：通常 30-60 个条目
+- ✅ **多 NUMA 节点**：可能达到 60-80 个条目
+- ⚠️ **理论极限**：128 个条目（实际很少达到）
+
+**为什么条目不多？**
+- 固件会**合并连续的相同类型区域**
+- 大块 RAM 通常是单个或几个条目（例如：`0x100000000-0x8000000000, RAM` 一个条目就能表示 512GB）
+- 保留区域（PCI MMIO、ACPI 等）相对固定
+
+#### 3. 大内存系统的实际特点
+
+**512GB 内存的系统通常具有以下特征**：
+
+| 特征 | 说明 |
+|------|------|
+| **固件类型** | 几乎 100% 使用 UEFI（不再是 Legacy BIOS） |
+| **CPU 架构** | x86-64（64 位物理地址线，支持 52 位地址 = 4 PB） |
+| **NUMA 拓扑** | 通常是多 NUMA 节点（例如：2 个 CPU，每个 256GB） |
+| **内存条目** | E820 表会有多个大块 RAM 条目（每个 NUMA 节点一个或几个） |
+| **地址空洞** | 可能在 4GB 附近有大块 MMIO 空洞（PCIe、GPU 等） |
+
+#### 4. 512GB 系统的 E820 表示例
+
+假设一个双路 CPU 服务器，每个 CPU 256GB，总共 512GB：
+
+```
+# dmesg | grep "BIOS-e820"  （UEFI 启动也显示为 "BIOS-e820"）
+
+[    0.000000] BIOS-e820: [mem 0x0000000000000000-0x000000000009ffff] usable
+[    0.000000] BIOS-e820: [mem 0x0000000000100000-0x00000000bfffffff] usable        # 低于 4GB 的 RAM (~3GB)
+[    0.000000] BIOS-e820: [mem 0x00000000c0000000-0x00000000cfffffff] reserved      # PCIe MMIO
+[    0.000000] BIOS-e820: [mem 0x0000000100000000-0x000000407fffffff] usable        # NUMA 节点 0 (256GB)
+[    0.000000] BIOS-e820: [mem 0x0000004080000000-0x000000807fffffff] usable        # NUMA 节点 1 (256GB)
+[    0.000000] BIOS-e820: [mem 0x0000008080000000-0x00000080ffffffff] reserved      # ACPI NVS
+```
+
+**关键观察**：
+- ✅ 512GB 内存仅用了 **6 个 E820 条目**
+- ✅ 每个大块 RAM 区域是一个条目（256GB 一个条目）
+- ✅ 地址从 4GB（`0x100000000`）一直延伸到 512GB+（`0x807fffffff` ≈ 512GB）
+- ✅ 仍然远低于 128 条目的限制
+
+#### 5. 内核对大内存的处理
+
+> **项目**: Linux Kernel
+> **文件**: `arch/x86/kernel/e820.c`
+
+```c
+// Linux Kernel - arch/x86/kernel/e820.c
+void __init e820__memblock_setup(void)
+{
+    int i;
+    u64 end;
+
+    // 遍历所有 E820 条目，添加到 memblock
+    for (i = 0; i < e820_table->nr_entries; i++) {
+        struct e820_entry *entry = &e820_table->entries[i];
+
+        // 对于 512GB 系统，这里会添加多个大块区域
+        if (entry->type != E820_TYPE_RAM)
+            continue;
+
+        // memblock_add() 可以处理任意大小的区域
+        // 512GB 的区域会被正确添加
+        memblock_add(entry->addr, entry->size);
+    }
+
+    // 对于 NUMA 系统，后续会调用 numa_init()
+    // 将内存按 NUMA 节点组织
+}
+```
+
+#### 6. NUMA 系统的额外处理
+
+512GB 系统通常是 NUMA 架构，内核会进行额外处理：
+
+> **项目**: Linux Kernel
+> **文件**: `arch/x86/mm/numa.c`
+
+```c
+// Linux Kernel - arch/x86/mm/numa.c
+void __init numa_init(void)
+{
+    // 检测 NUMA 拓扑（从 ACPI SRAT 表）
+    numa_emulation();  // 或 acpi_numa_init()
+
+    // 将 memblock 中的内存按 NUMA 节点分组
+    // 例如：节点 0: 0-256GB, 节点 1: 256-512GB
+    for_each_node_mask(nid, node_possible_map) {
+        u64 start = numa_meminfo.blk[nid].start;
+        u64 end = numa_meminfo.blk[nid].end;
+
+        // 为每个节点建立独立的内存管理结构
+        setup_node_data(nid, start, end);
+    }
+}
+```
+
+#### 关键点总结
+
+| 方面 | 8GB 系统 | 512GB 系统 | 是否相同机制？ |
+|------|---------|-----------|--------------|
+| **E820 数据结构** | `u64` 地址/大小 | `u64` 地址/大小 | ✅ 完全相同 |
+| **boot_params 传递** | `e820_table[128]` | `e820_table[128]` | ✅ 完全相同 |
+| **内核解析函数** | `e820__memory_setup()` | `e820__memory_setup()` | ✅ 完全相同 |
+| **E820 条目数量** | ~15 个 | ~40 个（NUMA）| ⚠️ 数量不同，但都在限制内 |
+| **固件类型** | BIOS 或 UEFI | 几乎总是 UEFI | ⚠️ 固件倾向不同 |
+| **NUMA 处理** | 通常单节点 | 通常多节点 | ⚠️ 需要额外的 NUMA 初始化 |
+| **memblock 管理** | `memblock_add()` | `memblock_add()` | ✅ 完全相同 |
+
+**最终答案**：
+- ✅ **E820 机制完全相同**，`u64` 字段可以轻松表示 512GB（甚至 PB 级）
+- ✅ **内核处理流程相同**：`e820__memory_setup()` → `e820__memblock_setup()` → `init_mem_mapping()`
+- ✅ **条目限制不是问题**：512GB 系统通常只需 30-60 个条目，远低于 128 的限制
+- ⚠️ **NUMA 是额外层次**：大内存系统需要额外的 NUMA 拓扑初始化，但这是在 E820 之上的
+- ✅ **固件探测机制相同**：UEFI `GetMemoryMap()` 或 BIOS PCI 配置寄存器，原理如 Q1 所述
