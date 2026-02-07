@@ -7,7 +7,8 @@
 > - UEFI vs BIOS：[UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md) UEFI 与 BIOS 引导机制差异
 > - Setup 流程：[LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md) 从扇区 0 启动的 Setup
 > - 内存管理：[LINUX_KERNEL_SETUP_ARCH_MEMORY.md](LINUX_KERNEL_SETUP_ARCH_MEMORY.md) setup_arch 内存接管详解；[MMU_AND_PAGING.md](MMU_AND_PAGING.md) x86 MMU、分页与内核页表管理
-> - 架构细节：[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md) near/long jump 与 long mode 下 CS 的作用
+> - 架构细节：[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md) near/long jump 与 long mode 下 CS 的作用；[POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md) 位置无关代码（`__pi_` 前缀）实现机制
+> - **重定位专题**：[COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md) 压缩内核重定位与原地解压详解
 > - **原地解压专题**：[SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md) 解压代码为何不被覆盖的完整解答；[WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) 为什么要重定位压缩内核（KASLR 分析）；[INVESTIGATION_SUMMARY.md](INVESTIGATION_SUMMARY.md) I-cache 理论验证与调查报告
 >
 > **执行顺序（BIOS/GRUB 路径）**：GRUB/入口 → 【阶段1】压缩内核 startup_32（32位模式切换）→ 【阶段2】压缩内核 startup_64（重定位拷贝、解压）→ 【阶段3】主内核 startup_64 → x86_64_start_kernel（早期 IDT）→ start_kernel() → setup_arch → trap_init/syscall → init_IRQ → rest_init → 核心进程。
@@ -184,403 +185,61 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
 
 **关键**：阶段1通过 lret 跳转到这里时，仍在**压缩内核代码**中（`arch/x86/boot/compressed/head_64.S`），还没有解压，也还没有跳转到主内核。这个阶段完成：设置64位环境、重定位拷贝压缩内核到安全位置、解压内核、跳转到主内核。
 
+> **📖 详细分析**：重定位拷贝与原地解压的完整技术细节请参阅：[COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md)
+> - 为何需要重定位拷贝
+> - 地址计算公式（%rbp、%rbx）
+> - vmlinuz 文件结构分析
+> - 原地解压的精妙设计
+> - extract_kernel 为何不被覆盖
+
 **压缩内核 startup_64 关键步骤**：
 
 ```
 压缩内核 startup_64（arch/x86/boot/compressed/head_64.S:278-476，.code64）
     ├─ cld, cli；设置段寄存器（290-299行）
-    ├─ 计算解压目标 %rbp（如 LOAD_PHYSICAL_ADDR）与重定位目标 %rbx（314-331行）
+    ├─ 计算解压目标 %rbp（LOAD_PHYSICAL_ADDR，通常 16MB）与重定位目标 %rbx（通常 38MB）（314-331行）
     ├─ 设置栈（334行）
     ├─ 加载 GDT、lretq 切换到 __KERNEL_CS（357-366行）
     ├─ 保存 boot_params 到 %r15（374行）
     ├─ load_stage1_idt（376行）
     ├─ sev_enable（390行，CONFIG_AMD_MEM_ENCRYPT）
     ├─ configure_5level_paging（409行）
-    ├─ 【重定位拷贝】将压缩内核（startup_32～_bss）整段拷贝到 %rbx 处（通常 16MB 以上的安全位置）（419-425行）
+    ├─ 【重定位拷贝】rep movsq：将压缩内核从 1MB 拷贝到 %rbx（通常 38MB）（419-425行）
+    │       └─ 为何重定位？见 [COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md)
     ├─ 重新加载 GDT（432-435行）
-    └─ jmp .Lrelocated（440-441行）→ 跳转到同文件内重定位后的 .Lrelocated 标签
+    └─ jmp .Lrelocated（440-441行）→ 跳转到重定位后的 .Lrelocated 标签
         ↓
-.Lrelocated（arch/x86/boot/compressed/head_64.S:445-476，仍在同一文件内）
+.Lrelocated（arch/x86/boot/compressed/head_64.S:445-476）
     ├─ 清除 BSS（450-455行）
     ├─ load_stage2_idt（457行）
     ├─ initialize_identity_maps（461行）
     ├─ 【解压内核】call extract_kernel()（469行）← 关键：在这里解压内核！
-    │       ├─ choose_random_location()（可选 KASLR）更新 output 物理地址
-    │       ├─ decompress_kernel() 解压到 output（通常 0x1000000，即 16MB）
+    │       ├─ 从 %rbx (38MB) 处读取压缩数据
+    │       ├─ 向 %rbp (16MB) 处写入解压数据
+    │       ├─ choose_random_location()（可选 KASLR）
+    │       ├─ decompress_kernel() 解压到 output（通常 0x1000000）
     │       ├─ 解析解压后 ELF，handle_relocations()
     │       └─ 返回主内核入口地址到 %rax
     └─ jmp *%rax（475行）→ 【阶段3】跳转到主内核 startup_64（arch/x86/kernel/head_64.S）
 ```
 
-**重定位拷贝的详细说明**：
+**关键地址说明**：
+- **1MB (0x100000)**：GRUB 加载压缩内核的初始位置
+- **16MB (0x1000000)**：解压目标地址（%rbp，CONFIG_PHYSICAL_START）
+- **38MB (约 0x2600000)**：重定位后的压缩内核位置（%rbx，计算公式见详细文档）
 
-**压缩内核的位置变化（时间线）**：
+**重定位的核心原因**：
+1. **避免自解压覆盖**：解压器代码和压缩数据都在同一个 bzImage 中，如果不重定位，解压到 16MB 可能覆盖 1MB 处正在执行的代码
+2. **支持 KASLR**：解压目标可能是任意地址，重定位确保在所有场景下都安全
+3. **原地解压优化**：重定位后 VO（解压目标）和 ZO（压缩源）完全分离，实现高效的原地解压
 
+**地址计算公式**（详见 [COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md)）：
 ```
-T1: GRUB 加载阶段
-    ├─ GRUB 将压缩内核（bzImage）加载到临时缓冲区（prot_mode_mem，通常在 16MB+）
-    ├─ relocator 将其从临时缓冲区复制到 0x100000 (1MB)（prot_mode_target）
-    └─ 跳转到 code32_start（0x100000，即 startup_32）
-    └─ 说明：GRUB 使用 relocator 机制（grub_relocator32_boot）两步完成：
-       先读取到 GRUB 可访问的临时缓冲区，boot 时再复制到目标地址并跳转
-
-T2: startup_32/startup_64 执行阶段（在 1MB 处执行）
-    └─ 压缩内核仍在 1MB (0x100000) 处
-    └─ 计算重定位目标地址 %rbx（通常 16MB 以上，约 22MB）
-
-T3: 重定位拷贝阶段（rep movsq，419-425行）
-    └─ 将压缩内核从 1MB 拷贝到 %rbx（通常 38MB，为什么？见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
-    └─ 跳转到新位置（%rbx 处）继续执行
-
-T4: 解压阶段（在 %rbx 处执行）
-    └─ 从 %rbx 处调用 extract_kernel()
-    └─ 解压内核到 16MB (0x1000000)
-    └─ 跳转到解压后的主内核
+%rbp = LOAD_PHYSICAL_ADDR (通常 0x1000000，即 16MB)
+%rbx = %rbp + BP_init_size - rva(_end)
+     = 16MB + 初始化总大小 - 压缩内核大小
+     = 16MB + 32.87MB - 9.91MB ≈ 38.96MB
 ```
-
-**为何需要重定位拷贝？**
-
-**重要前提**：此重定位拷贝机制**仅适用于 BIOS/GRUB 启动路径**，UEFI 启动路径**完全不经过此流程**（详见下节"BIOS vs UEFI 两条不同的启动路径"）。
-
-**BIOS/GRUB 路径的重定位原因**：
-- **初始执行位置**：压缩内核开始执行时在 **1MB (0x100000)**（GRUB relocator 复制后的位置）
-  - 注：GRUB 实际先加载到临时缓冲区（prot_mode_mem，通常 16MB+），boot 时 relocator 复制到 1MB
-- **解压目标**：需要解压到 **16MB (0x1000000)**（CONFIG_PHYSICAL_ADDR 配置，可能因 KASLR 而不同）
-- **为什么看起来 1MB 和 16MB 不重叠仍需重定位**：
-  1. **栈和数据结构**：解压器代码在 1MB 处执行时，其栈、全局变量、临时数据都在附近
-  2. **解压器代码自身**：`extract_kernel()` 函数本身在 1MB 处，解压到 16MB 时可能覆盖执行路径
-  3. **CONFIG_RELOCATABLE + KASLR**：解压目标不总是 16MB，可能是任意对齐地址（见下节）
-  4. **通用性设计**：重定位机制支持所有场景（固定地址、KASLR、kexec 等）
-- **解决方案**：先将整个压缩内核（包括解压器代码和压缩数据）从 1MB 拷贝到安全位置（%rbx，通常在 16MB 以上，例如约 22MB），然后从那里执行解压操作
-
-**地址计算**：
-- **解压目标 %rbp**：解压后内核的最终位置（LOAD_PHYSICAL_ADDR，通常 0x1000000，即 16MB）
-  - 来源：`arch/x86/boot/compressed/head_64.S:325` 设置 `%rbp = LOAD_PHYSICAL_ADDR`
-  - `LOAD_PHYSICAL_ADDR` 由 `CONFIG_PHYSICAL_START` 配置（默认 0x1000000）
-- **重定位目标 %rbx**：压缩内核的安全位置（计算公式见源代码328-331行）
-  ```asm
-  movl    BP_init_size(%rsi), %ebx     # BP_init_size：内核初始化需要的总大小
-  subl    $ rva(_end), %ebx             # 减去压缩内核代码段的大小
-  addq    %rbp, %rbx                    # 加上解压目标地址（16MB）
-  # 结果：%rbx = 0x1000000 + BP_init_size - rva(_end)
-  ```
-  - **具体数值**：通常在 **16MB 以上**（例如：16MB + 8MB - 2MB = 22MB 左右）
-  - **为何这样计算**：将压缩内核放在解压目标地址之后的安全位置，确保解压时不会覆盖正在执行的代码
-  - **BP_init_size**：来自 boot_params，表示内核镜像初始化需要的总内存大小（包括解压后的内核 + BSS + brk）
-  - **rva(_end)**：压缩内核代码段的结束位置（相对地址）
-
-**拷贝过程**（`arch/x86/boot/compressed/head_64.S:419-425`）：
-
-```asm
-/* Copy the compressed kernel to the end of our buffer
- * where decompression in place becomes safe. */
-	leaq	(_bss-8)(%rip), %rsi          /* 源：当前运行位置 */
-	leaq	rva(_bss-8)(%rbx), %rdi       /* 目标：%rbx 处（安全地址） */
-	movl	$(_bss - startup_32), %ecx    /* 大小：整个压缩内核 */
-	shrl	$3, %ecx                      /* 转换为8字节单位 */
-	std                                   /* 方向标志：向下拷贝（避免覆盖） */
-	rep	movsq                             /* 执行拷贝 */
-	cld                                   /* 清除方向标志 */
-```
-
-**这次拷贝包含什么？** 只拷贝**压缩内核**这一段（startup_32～_bss，即解压器代码 + 压缩的内核数据），**不包含 initrd**。initrd 由引导程序（如 GRUB）单独加载到另一块内存，不在 bzImage 镜像内。
-
-**拷贝到哪里？** %rbx 指向的地址，通常是 **16MB 以上**（具体位置：16MB + BP_init_size - 压缩内核大小，例如约 22MB 左右）。这个位置确保：
-- 解压到 16MB 时不会覆盖正在执行的重定位后的代码
-- 有足够的空间容纳整个压缩内核（几 MB）
-
-**跳转到新位置**（`arch/x86/boot/compressed/head_64.S:432-441`）：
-
-```asm
-	/* 重新加载 GDT，指向新位置 */
-	leaq	rva(gdt64)(%rbx), %rax
-	leaq	rva(gdt)(%rbx), %rdx
-	movq	%rdx, 2(%rax)
-	lgdt	(%rax)
-
-	/* 跳转到新地址的 .Lrelocated */
-	leaq	rva(.Lrelocated)(%rbx), %rax
-	jmp	*%rax
-```
-
-**重要说明："新地址"指的是什么？**
-
-这里的 `jmp *%rax` **不是跳转到主内核**，而是跳转到**同一个文件内**（`arch/x86/boot/compressed/head_64.S`）的 `.Lrelocated` 标签（第445行）。
-
-**跳转目标**：`.Lrelocated`（`arch/x86/boot/compressed/head_64.S:445`）
-```asm
-440:    leaq    rva(.Lrelocated)(%rbx), %rax
-441:    jmp    *%rax              ← 跳转到下面的 .Lrelocated
-442: SYM_CODE_END(startup_64)
-443:
-444:    .text
-445: SYM_FUNC_START_LOCAL_NOALIGN(.Lrelocated)  ← 跳转目标在这里！
-446:    /* Clear BSS */
-       ...
-469:    call    extract_kernel      ← 在这里解压内核
-       ...
-475:    jmp    *%rax               ← 这里才跳转到主内核！
-476: SYM_FUNC_END(.Lrelocated)
-```
-
-**为什么需要这次跳转？**
-- 前面的 `rep movsq`（419-425行）已将整个压缩内核拷贝到 %rbx 处（新内存位置）
-- 但当前指令仍在**旧位置**执行
-- 必须跳转到**新位置的 .Lrelocated** 继续执行
-- 这样后续 `call extract_kernel()` 解压到 0x100000 时，不会覆盖正在执行的代码
-
-**"新地址"的含义**：
-- **不是**指主内核（`arch/x86/kernel/head_64.S`）
-- **而是**指重定位后的新内存位置（%rbx 处的 `.Lrelocated`）
-- 只有在 `.Lrelocated` 内执行完 `extract_kernel()` 后的 `jmp *%rax`（第475行）才真正跳转到【阶段3】主内核
-
-**extract_kernel() 函数**（`arch/x86/boot/compressed/misc.c:405`）：
-
-在 **重定位拷贝完成后**被调用，完成以下工作：
-1. 根据 bzImage 布局找到压缩负载（input_data/input_len）
-2. choose_random_location()（可选 KASLR）确定解压目标地址
-3. decompress_kernel() 解压到 output（%rbp 指定，通常 0x1000000，即 16MB）
-4. 解析解压后的 ELF 格式
-5. handle_relocations() 处理重定位
-6. 返回主内核入口地址（通过 %rax）
-
-**与主内核的衔接**：extract_kernel() 返回后，`.Lrelocated` 中执行 `jmp *%rax`（第475行），跳转到**主内核**的 `startup_64`（`arch/x86/kernel/head_64.S:38`），此时 %rsi（即 %r15）仍保存着 boot_params 指针。
-
-### 原地解压（In-Place Decompression）的精妙设计
-
-> **📖 完整解答**：本节简要说明原地解压的设计，详细分析请参阅：
-> - [SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md) - extract_kernel 代码为何不被覆盖的完整答案
-> - [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) - 为什么要重定位压缩内核（KASLR 分析）
-> - [INVESTIGATION_SUMMARY.md](INVESTIGATION_SUMMARY.md) - I-cache 理论验证与完整调查过程
-
-#### 问题的提出
-
-在前面的分析中，我们知道：
-- 解压目标：从 16MB（%rbp）开始，向上扩展
-- 压缩内核位置：重定位到 %rbx (通常 38MB ~ 48MB，由 init_size 决定)
-- 解压后内核大小：通常 20MB ~ 30MB
-
-**关键问题**：extract_kernel() 代码在解压过程中会被覆盖吗？
-
-#### vmlinuz 文件结构（重要发现）
-
-通过分析实际的 vmlinuz 文件（Linux 6.6.110），发现其结构与之前的理解不同：
-
-```
-vmlinuz 文件布局：
-
-[Boot + Setup]  [.head.text]  [Payload (gzip vmlinux)]  [.text + .rodata + .data]
-   16 KB          0.69 KB            9.85 MB                    55.25 KB
-
-   0x0-0x4000    0x4000-0x42c4    0x42c4-0x9de704          0x9de704-0x9ec400
-                                ↑                          ↑
-                          压缩的 vmlinux              extract_kernel 等函数
-```
-
-**关键发现**：
-1. **Payload** (0x42c4-0x9de704): 压缩的 vmlinux（ELF 格式），9.85 MB
-2. **.text 段** (0x9de704-0x9ec400): extract_kernel、decompress_kernel 等函数，55.25 KB
-3. **Payload 是压缩后的解压目标（VO）**，不包含解压程序本身
-
-#### 运行时内存布局（基于 Linux 6.6.110）
-
-**关键参数**：
-```
-init_size = 0x20de000 (32.87 MB)  // BP_init_size
-ZO 总大小  = 0x9e8400 (9.91 MB)    // vmlinuz 中的压缩内核总大小
-Payload  = 0x9da440 (9.85 MB)    // 其中的压缩 vmlinux
-.text段   = 55.25 KB              // extract_kernel 等函数
-```
-
-**内存布局计算**：
-```
-%rbp = 0x1000000 (16 MB)           // 解压目标起始
-%rbx = %rbp + init_size - ZO_size
-     = 0x1000000 + 0x20de000 - 0x9e8400
-     = 0x26f5c00 (38.96 MB)        // ZO 重定位位置
-```
-
-**ZO 在运行时的布局**（重定位到 38.96 MB后）：
-
-```
-38.96 MB (%rbx) ──┬─── ZO_startup_32 (.head.text 起始)
-                  │    0.69 KB
-38.96 MB + 0x2c4 ─┼─── Payload 起始 (压缩的 vmlinux)
-                  │    9.85 MB
-48.81 MB ─────────┼─── .text 段起始 (extract_kernel 代码)
-                  │    55.25 KB
-48.87 MB ─────────┴─── ZO__end
-```
-
-#### 解压过程详细分析
-
-**关键理解**：init_size 不等于解压后的内核大小（VO_size）！
-
-```
-init_size (32.87 MB) 包含：
-1. VO (解压后的 vmlinux)：约 22.96 MB
-2. ZO (压缩内核)：9.91 MB
-3. 安全间隔空间
-```
-
-**解压目标大小**（VO_size）：
-```
-VO_size ≈ init_size - ZO_size
-        = 32.87 MB - 9.91 MB
-        = 22.96 MB
-```
-
-**实际内存布局**：
-
-```
-16 MB (%rbp) ──────┬─── VO__text (解压目标起始)
-                   │
-                   │    解压写入区域
-                   │    (output_len ≈ 22.96 MB)
-                   │
-38.96 MB ──────────┼─── VO__end (解压结束位置)
-                   │
-                   │    安全间隔
-                   │
-38.96 MB (%rbx) ───┼─── ZO_startup_32 (.head.text)
-                   │    0.69 KB
-                   ├─── Payload (压缩 vmlinux)
-                   │    9.85 MB
-48.81 MB ──────────┼─── .text 段 (extract_kernel 代码)
-                   │    55.25 KB
-48.87 MB ──────────┴─── ZO__end
-```
-
-**解压过程**：
-1. 从 Payload (38.96-48.81 MB) 读取压缩数据
-2. 向 output (16-38.96 MB) 写入解压数据
-3. 解压结束于 38.96 MB
-
-**结论**：
-- ✅ **extract_kernel 代码（48.81-48.87 MB）完全不在解压范围（16-38.96 MB）内**
-- ✅ **解压过程不会覆盖 extract_kernel 代码**
-- ✅ **这是通过精确的内存布局计算实现的**
-
-#### 设计精妙之处
-
-**源代码注释**（`arch/x86/boot/compressed/misc.c:389-403`）：
-
-```c
-/*
- * The compressed kernel image (ZO), has been moved so that its position
- * is against the end of the buffer used to hold the uncompressed kernel
- * image (VO) and the execution environment (.bss, .brk), which makes sure
- * there is room to do the in-place decompression.
- *
- *                             |-----compressed kernel image------|
- *                             V                                  V
- * 0                       extract_offset                      +INIT_SIZE
- * |-----------|---------------|-------------------------|--------|
- *             |               |                         |        |
- *           VO__text      startup_32 of ZO          VO__end    ZO__end
- *             ^                                         ^
- *             |-------uncompressed kernel image---------|
- */
-```
-
-**关键点**：
-1. **ZO 放在缓冲区末尾**：确保 VO 和 ZO 有合理的间隔
-2. **VO_size < init_size**：解压目标小于总缓冲区大小
-3. **extract_kernel 在 ZO 的最后**：位于 Payload 之后，完全在 VO 范围外
-
-**INIT_SIZE 的计算**（`arch/x86/boot/header.S:502-509`）：
-
-```c
-#define ZO_INIT_SIZE    (ZO__end - ZO_startup_32 + ZO_z_min_extract_offset)
-#define VO_INIT_SIZE    (VO__end - VO__text)
-#if ZO_INIT_SIZE > VO_INIT_SIZE
-# define INIT_SIZE ZO_INIT_SIZE  ← 通常取这个值
-#else
-# define INIT_SIZE VO_INIT_SIZE
-#endif
-```
-
-这确保了：
-- `init_size` 足够大，包含 VO + ZO + 安全间隔
-- VO 不会扩展到 ZO 的范围
-
-#### 原地解压（In-Place Decompression）示意图
-
-```
-源代码注释中的图（arch/x86/boot/compressed/misc.c:389-403）：
-
-                             |-----compressed kernel image------|
-                             V                                  V
- 0                       extract_offset                      +INIT_SIZE
- |-----------|---------------|-------------------------|--------|
-             |               |                         |        |
-           VO__text      startup_32 of ZO          VO__end    ZO__end
-             ^                                         ^
-             |-------uncompressed kernel image---------|
-
-实际内存地址（Linux 6.6.110）：
-
-16 MB        38.96 MB    48.81 MB     48.87 MB
- |------------|-----------|-----------|
- |            |           |           |
- VO__text     VO__end     .text段     ZO__end
- (%rbp)                   (extract_kernel)
-
- |←  VO  →| 安全间隔  |←     ZO     →|
- |← 22.96MB →|        |← 9.91 MB  →|
-
- 解压写入: 16MB → 38.96MB (不会到达 extract_kernel)
-           ↑
-         output_len ≈ 22.96 MB
-```
-
-**关键设计**：
-- VO 结束于 38.96 MB
-- ZO 开始于 38.96 MB
-- extract_kernel 代码在 48.81-48.87 MB（ZO 的最后 55 KB）
-- **解压写入永远不会到达 extract_kernel 代码区域**
-
-#### 总结：精妙的内存布局设计
-
-**核心设计原理**：
-
-1. **分离 VO 和 ZO**：
-   - `init_size` 的计算确保 VO + ZO 可以共存
-   - VO（解压目标）在前，ZO（压缩源）在后
-   - 两者有明确的边界
-
-2. **extract_kernel 代码的安全位置**：
-   - 位于 Payload（压缩的 vmlinux）之后
-   - 完全在 VO 范围之外
-   - **永远不会被解压过程覆盖**
-
-3. **不需要任何特殊机制**：
-   - ❌ 不依赖 CPU 指令缓存
-   - ❌ 不需要特殊的编译器指令
-   - ✅ 纯粹通过数学计算保证安全
-
-**实际数据验证**（Linux 6.6.110）：
-```
-vmlinuz 结构：
-  .head.text:   0.69 KB
-  Payload:      9.85 MB  (压缩的 vmlinux)
-  .text段:      55.25 KB (extract_kernel 等函数)
-
-运行时布局：
-  解压目标 (VO):   16 MB - 38.96 MB (22.96 MB)
-  压缩源 (ZO):     38.96 MB - 48.87 MB (9.91 MB)
-  extract_kernel:  48.81 MB - 48.87 MB (55 KB)
-
-结论：完全不重叠！
-```
-
-**参考资料**：
-- Linux 源代码：`arch/x86/boot/compressed/misc.c:389-403`
-- Linux 源代码：`arch/x86/boot/header.S:428-509`
-- 详细分析专题：
-  - [SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md) - 完整答案：为什么 extract_kernel 不被覆盖
-  - [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) - KASLR 与重定位的必要性
-  - [INVESTIGATION_SUMMARY.md](INVESTIGATION_SUMMARY.md) - 调查过程与实验验证
 
 ### BIOS vs UEFI 两条完全不同的启动路径
 
@@ -852,6 +511,13 @@ ENTRY(phys_startup_64)
 
 **重要**：这是第二个 startup_64（【阶段3】主内核），与【阶段2】压缩内核中的 startup_64（`arch/x86/boot/compressed/head_64.S:278`）是**不同的文件**。注：【阶段1】是 startup_32，不是 startup_64。
 
+> **关于 `__pi_` 前缀与位置无关代码**：
+>
+> 在主内核 startup_64 的早期阶段（如 `call startup_64_setup_gdt_idt`），内核尚未完全建立虚拟地址映射，此时需要使用**位置无关代码（Position Independent Code, PIC）**来访问全局符号。你可能会在代码中看到带 `__pi_` 前缀的符号（如 `__pi_startup_64_setup_gdt_idt`），这些符号是通过 `objcopy --prefix-symbols=__pi_` 自动生成的 PIC 版本。
+>
+> 详细的实现机制（包括 `-fPIC` 编译选项、`objcopy` 符号前缀处理、RIP 相对寻址、`rip_rel_ptr()` 宏、`SYM_PIC_ALIAS` 宏等）请参阅：
+> - **[POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)** - 位置无关代码完整分析
+
 **主内核 startup_64**：保存 boot_params（%RSI→%R15）、设置初始栈与 GS 基址、**设置 GDT 和早期 IDT**（`startup_64_setup_gdt_idt`）、切换到 __KERNEL_CS、可选 SEV/SME、verify_cpu，然后进入 C 代码。
 
 **主内核 startup_64 关键步骤**：
@@ -922,6 +588,9 @@ SYM_CODE_END(startup_64)
 ```
 
 **startup_64_setup_gdt_idt 的实现**（`arch/x86/boot/startup/gdt_idt.c`）：主内核入口在切换到虚拟地址和 C 环境之前需要可用的 GDT 与一个最小 IDT。
+
+> **相关文档**：
+> - [POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)：详细分析了 `__pi_` 前缀的含义、位置无关代码编译机制（-fPIC、objcopy --prefix-symbols）、RIP 相对寻址、SYM_PIC_ALIAS 宏的实现原理，以及 `startup_64_setup_gdt_idt()` 如何通过 `rip_rel_ptr()` 访问符号
 
 **为何说这里是"早期/初步"的 GDT/IDT**：
 - **时机**：这次 lgdt/lidt 发生在 head_64.S，尚在**切到虚拟地址之前**、**进入完整 C 内核**（setup_arch、trap_init、init_IRQ 等）之前，因而是启动顺序里**最早**的一次 GDT/IDT 设置。
@@ -1085,6 +754,65 @@ static gate_desc bringup_idt_table[NUM_EXCEPTION_VECTORS] __page_aligned_data;
 **为什么需要临时表？** 注释（`gdt_idt.c:12-23`）说明：
 > The bringup-IDT is used until the idt_table takes over. The idt_table can't be used that early because all the code modifying it is in idt.c and can be **instrumented by tracing or KASAN**, which both don't work during early CPU bringup. Also the idt_table has the runtime vectors configured which require certain CPU state to be setup already (like TSS), which also hasn't happened yet in early CPU bringup.
 
+#### bringup_idt_table 的具体内容定义
+
+**初始化方式**：
+
+```c
+// arch/x86/boot/startup/gdt_idt.c:24
+static gate_desc bringup_idt_table[NUM_EXCEPTION_VECTORS] __page_aligned_data;
+```
+
+- `__page_aligned_data` 宏定义（`include/linux/linkage.h:39`）：
+  ```c
+  #define __page_aligned_data __section(".data..page_aligned") __aligned(PAGE_SIZE)
+  ```
+- 放在 `.data..page_aligned` section 中，页对齐
+- **初始化为全零**（静态变量，编译器自动清零）
+
+**运行时填充**：
+
+```c
+// arch/x86/boot/startup/gdt_idt.c:27-44
+void startup_64_load_idt(void *vc_handler)
+{
+    struct desc_ptr desc = {
+        .address = (unsigned long)rip_rel_ptr(bringup_idt_table),
+        .size    = sizeof(bringup_idt_table) - 1,
+    };
+    struct idt_data data;
+    gate_desc idt_desc;
+
+    /* @vc_handler is set only for a VMM Communication Exception */
+    if (vc_handler) {
+        init_idt_data(&data, X86_TRAP_VC, vc_handler);      // 初始化 #VC 数据
+        idt_init_desc(&idt_desc, &data);                    // 创建门描述符
+        native_write_idt_entry((gate_desc *)desc.address, X86_TRAP_VC, &idt_desc);
+    }
+
+    native_load_idt(&desc);  // lidt 指令加载
+}
+```
+
+**表的内容总结**：
+
+| 条件 | IDT 内容 | 说明 |
+|------|---------|------|
+| **默认情况**（大多数系统） | 32 个全零的 gate_desc 条目 | 所有条目都是无效门描述符 |
+| **启用 AMD SEV**（虚拟化环境） | 只有 `IDT[29]` (#VC 异常) 被填充 | 其他 31 个条目仍为 0 |
+| **任何情况** | 没有硬件中断门 | 因为此时中断已关闭（见下文） |
+
+**为什么几乎为空是安全的？**
+
+1. **中断已关闭**：早期启动阶段 `EFLAGS.IF = 0`，不会响应硬件中断
+2. **代码非常简单**：从 `startup_64_setup_gdt_idt()` 到 `idt_setup_early_handler()` 之间的代码很少，几乎不会触发异常
+3. **如果触发未处理的异常**：
+   - CPU 查找 `bringup_idt_table[vector]`
+   - 发现是全零（无效门描述符）
+   - 触发 **Double Fault (#DF)**
+   - #DF 也没有处理函数 → **Triple Fault** → CPU 重启
+4. **这是可接受的**：如果在这个简单阶段触发异常，说明有严重错误，重启是合理的
+
 **2. idt_table（运行时表，最终表）**
 
 定义在 `arch/x86/kernel/idt.c:173`：
@@ -1201,6 +929,172 @@ idt_setup_from_table(gate_desc *idt, const struct idt_data *t, int size, bool sy
 - 早期阶段 CPU 状态不完整（TSS 未设置，无法使用 IST）
 - 临时表设计简单，只需应对极少数早期异常
 - 正式表功能完整，支持所有运行时需求
+
+### 内核启动过程的中断状态
+
+**核心结论：内核在早期启动阶段一直处于关中断状态，直到 `local_irq_enable()` 才第一次开启中断。**
+
+#### 中断关闭的完整时间线
+
+```
+【压缩内核 startup_32】(arch/x86/boot/compressed/head_64.S)
+    ├─ cli (90行)  ← 第一次关中断 (EFLAGS.IF = 0)
+    └─ 切换到 64 位长模式
+
+【压缩内核 startup_64】(arch/x86/boot/compressed/head_64.S)
+    ├─ cli (291行) ← 再次确保关中断
+    ├─ 重定位拷贝
+    ├─ 解压内核
+    └─ 跳转到主内核 startup_64
+
+【主内核 startup_64】(arch/x86/kernel/head_64.S)
+    ├─ pushq $0; popfq (408-410行) ← 清零 RFLAGS（包括 IF 位）
+    ├─ startup_64_setup_gdt_idt()  ← 加载 bringup_idt_table
+    │       └─ 此时：中断关闭 + IDT 几乎为空 = 双重保护
+    └─ 进入 x86_64_start_kernel()
+
+【x86_64_start_kernel()】(arch/x86/kernel/head64.c)
+    ├─ 仍处于关中断状态
+    ├─ idt_setup_early_handler() ← 切换到 idt_table（填充早期异常向量）
+    │       └─ 此时：中断关闭 + IDT 有异常处理 = 可处理同步异常
+    └─ start_kernel()
+
+【start_kernel()】(init/main.c)
+    ├─ setup_arch()       ← 中断仍关闭
+    ├─ trap_init()        ← 中断仍关闭，设置 SYSCALL/SYSENTER
+    ├─ init_IRQ()         ← 中断仍关闭，完善 IDT、初始化 PIC/APIC
+    │       └─ idt_setup_apic_and_irq_gates() ← IDT 完全就绪
+    └─ local_irq_enable() ← ✨ 第一次开中断！(main.c:1071)
+            asm volatile("sti": : :"memory");
+```
+
+#### EFLAGS.IF 位的状态跟踪
+
+| 阶段 | IF 位 | 代码位置 | 说明 |
+|------|-------|---------|------|
+| GRUB 跳转前 | 0 | GRUB relocator | GRUB 在跳转前执行 `cli` |
+| startup_32 | 0 | compressed/head_64.S:90 | `cli` 指令 |
+| startup_64（压缩） | 0 | compressed/head_64.S:291 | `cli` 指令 |
+| startup_64（主内核） | 0 | kernel/head_64.S:408-410 | `pushq $0; popfq` |
+| x86_64_start_kernel | 0 | head64.c | 继承 |
+| start_kernel 前期 | 0 | main.c | 继承 |
+| setup_arch() | 0 | setup.c | 仍关闭 |
+| trap_init() | 0 | traps.c | 仍关闭 |
+| init_IRQ() | 0 | irqinit.c | 仍关闭 |
+| **local_irq_enable()** | **1** | main.c:1071 | ✨ **第一次开启** |
+
+#### 为什么要关中断这么久？
+
+**原因 1：硬件中断处理机制未就绪**
+
+- **PIC/APIC 未初始化**：
+  - 8259A PIC 的 ICW（Initialization Command Words）还没有设置
+  - Local APIC 还没有使能和配置
+  - 中断向量映射还没有建立（PIC 默认映射 0x08-0x0F 与 CPU 异常冲突）
+
+- **IDT 不完整**：
+  - `bringup_idt_table` 几乎为空，无法处理硬件中断
+  - 早期的 `idt_table` 只有异常向量，没有硬件 IRQ 门
+  - 直到 `idt_setup_apic_and_irq_gates()` 才填充硬件中断向量
+
+- **没有中断栈**：
+  - IST（Interrupt Stack Table）还没有设置
+  - TSS（Task State Segment）还没有初始化
+  - 中断处理可能栈溢出
+
+**原因 2：CPU 状态不稳定**
+
+- **GDT 可能在切换**：`startup_64_setup_gdt_idt()` 正在加载新的 GDT
+- **页表在建立中**：`init_mem_mapping()` 正在建立完整页表
+- **栈在切换**：从临时栈切换到内核栈
+- **如果此时发生中断**：可能访问无效的段、页表或栈，导致 Triple Fault
+
+**原因 3：内存管理未就绪**
+
+- **memblock 未初始化**：`setup_arch()` 才建立 memblock
+- **buddy 系统未初始化**：`mm_core_init()` 才建立伙伴系统
+- **如果中断处理需要分配内存**：会导致系统崩溃
+
+**原因 4：并发安全**
+
+- 早期初始化代码**不是并发安全的**
+- 没有锁机制保护
+- 如果中断打断，可能导致数据竞争
+- 例如：全局变量正在初始化，中断处理函数读取到不一致的值
+
+**原因 5：调试和可预测性**
+
+- 关中断保证了启动过程的**确定性**
+- 不会被异步中断打断，便于调试
+- 启动顺序完全可控
+
+#### 中断关闭期间可能发生的异常
+
+虽然硬件中断被关闭，但以下**同步异常**仍可能发生（通过 IDT 处理）：
+
+| 异常类型 | 向量 | 何时可能发生 | 处理方式 |
+|---------|------|-------------|---------|
+| **#PF (Page Fault)** | 14 | `init_mem_mapping()` 建立页表时 | `idt_setup_early_handler()` 后有处理函数 |
+| **#GP (General Protection)** | 13 | 访问无效段或特权级错误 | `idt_setup_early_handler()` 后有处理函数 |
+| **#UD (Invalid Opcode)** | 6 | CPU 不支持的指令 | `idt_setup_early_handler()` 后有处理函数 |
+| **#DF (Double Fault)** | 8 | 异常处理时又发生异常 | `idt_setup_traps()` 后有处理函数 + IST |
+| **#VC (VMM Communication)** | 29 | SEV-SNP 虚拟化环境 | `bringup_idt_table` 中就有处理函数 |
+
+**关键点**：
+- 这些都是**同步异常**，由当前执行的指令触发
+- 不受 `EFLAGS.IF` 影响
+- 可以通过 IDT 处理（如果有处理函数）
+- 如果 IDT 中没有处理函数 → Double Fault → Triple Fault → 重启
+
+#### 何时真正开始响应硬件中断？
+
+```c
+// init/main.c
+asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protector
+void start_kernel(void)
+{
+    ...
+    trap_init();               // 设置完整的 IDT + SYSCALL
+    init_IRQ();                // 初始化 PIC/APIC + 填充硬件中断向量
+    ...
+    /* Do the rest non-__init'ed, we're now alive */
+    local_irq_enable();        // ← main.c:1071，第一次开中断 ✨
+    ...
+    rest_init();               // 创建 init 和 kthreadd 进程
+}
+```
+
+**`local_irq_enable()` 的实现**：
+
+```c
+// include/linux/irqflags.h
+#define local_irq_enable() \
+    do { \
+        asm volatile("sti": : :"memory"); \
+    } while (0)
+```
+
+**开中断后的状态**：
+- ✅ IDT 完全就绪（所有 256 个向量）
+- ✅ PIC/APIC 已初始化
+- ✅ TSS 和 IST 已设置
+- ✅ 内存管理系统就绪
+- ✅ 可以安全响应硬件中断（时钟、键盘、网卡等）
+
+#### 总结：双重保护机制
+
+内核启动早期采用**双重保护**策略：
+
+1. **关中断（EFLAGS.IF = 0）**：
+   - 防止硬件中断打断
+   - 确保启动流程的确定性
+
+2. **空 IDT（bringup_idt_table 几乎为空）**：
+   - 即使误开中断或发生异常
+   - 也会因为无效门描述符导致 Triple Fault 重启
+   - 而不是进入未知状态
+
+这种设计确保了**启动过程的稳定性和可预测性**，只有在所有硬件和软件机制都就绪后，才开启中断，开始响应外部事件。
 
 ---
 
