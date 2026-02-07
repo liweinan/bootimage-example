@@ -413,8 +413,214 @@ void __init e820__memblock_setup(void)
 - E820 表在后续阶段可能被修改（如添加内核镜像保留区、initrd 保留区等）
 - `e820__memory_setup()` 只负责"解析并记录"物理内存布局，尚未建立 memblock 或页表
 
+### 2.5 E820 表与 Paging/Segment 的关系
+
+#### E820 描述的是什么地址空间？
+
+**E820 表描述的是物理地址空间（Physical Address Space）**，与虚拟地址转换机制（Segment、Paging）处于不同层次。
+
+```mermaid
+flowchart TD
+    subgraph AddressTranslation[x86 地址转换流程]
+        LA[逻辑地址<br>Logical Address<br>Segment:Offset]
+        LIN[线性地址<br>Linear Address]
+        PA[物理地址<br>Physical Address]
+
+        LA -->|第一阶段<br>Segment| LIN
+        LIN -->|第二阶段<br>Paging| PA
+    end
+
+    subgraph E820Layer[E820 表的作用层次]
+        E820[E820 内存映射表]
+        PHYS[物理地址空间布局<br>0x0000-0x9FC00: RAM<br>0x0000A0000-0x000FFFFF: RESERVED<br>0x00100000-0xBFFD0000: RAM<br>...]
+
+        E820 -.描述.-> PHYS
+    end
+
+    PA -.最终访问.-> PHYS
+
+    style E820Layer fill:#ffe1e1
+    style AddressTranslation fill:#e1f5ff
+```
+
+#### E820 表与 Segment（分段）的关系：**无直接关系**
+
+**为什么无关？**
+
+1. **Segment 作用于地址转换的第一阶段**：
+   - Segment 将**逻辑地址**（段:偏移）转换为**线性地址**
+   - 在 Flat Model 下，段基址为 0，逻辑地址 = 线性地址
+   - Segment 处理的是虚拟地址空间的**访问方式**，不关心物理内存布局
+
+2. **E820 描述物理地址空间**：
+   - E820 告诉 OS："物理地址 0x100000-0xBFFD0000 是可用 RAM"
+   - 这个信息与你用什么段选择子、段基址来访问无关
+   - 即使在实模式下用 `segment:offset` 访问，E820 描述的仍然是最终的物理地址
+
+**示例**：
+
+```
+实模式访问：DS=0x1000, offset=0x5000
+    → 线性地址 = 0x1000 * 16 + 0x5000 = 0x15000
+    → 物理地址 = 0x15000（实模式无分页）
+
+E820 告诉我们：物理地址 0x15000 是否是可用 RAM？
+    → 与你用哪个段寄存器、段基址多少无关
+```
+
+**结论**：E820 表与 Segment 机制处于不同层次，**无直接依赖关系**。
+
+---
+
+#### E820 表与 Paging（分页）的关系：**强依赖关系**
+
+**E820 是 Paging 的数据来源**：分页机制需要知道"应该为哪些物理地址建立页表映射"，这个信息来自 E820 表。
+
+**依赖关系流程**：
+
+```mermaid
+flowchart TD
+    A[BIOS/固件 提供 E820 表]
+    B[内核解析 E820<br>e820__memory_setup]
+    C[提取 RAM 区域<br>e820__memblock_setup]
+    D[将 E820_RAM 加入 memblock]
+    E[为 RAM 建立页表<br>init_mem_mapping]
+    F[遍历 memblock 中的物理页]
+    G[创建页表项 PTE<br>物理页框号 → 页表]
+    H[加载 CR3<br>启用新页表]
+    I[内核可访问所有 RAM]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+
+    style A fill:#ffe1e1
+    style E fill:#e1f5ff
+    style I fill:#e1ffe1
+```
+
+**为什么 Paging 依赖 E820？**
+
+| 问题 | E820 的作用 | 如果没有 E820 会怎样？ |
+|------|------------|---------------------|
+| **页表应该映射哪些物理地址？** | E820_TYPE_RAM 告诉内核哪些物理地址是可用内存 | 内核不知道哪些物理地址可以安全访问，可能映射到设备内存或保留区域导致崩溃 |
+| **哪些物理地址不应该映射？** | E820_TYPE_RESERVED 标记了 BIOS、设备等保留区域 | 内核可能覆盖 BIOS 数据或设备内存映射区，导致系统故障 |
+| **设备内存需要特殊映射吗？** | E820 区分 RAM 和设备内存 | 内核可能用普通的 cached 映射访问设备内存，导致数据不一致 |
+| **物理内存有多大？** | E820 扫描所有 RAM 区域得到 max_pfn | 内核不知道物理内存大小，无法正确初始化内存管理 |
+
+**实际代码中的依赖**（`arch/x86/mm/init.c:init_mem_mapping()`）：
+
+```c
+void __init init_mem_mapping(void)
+{
+    unsigned long end;
+
+    // 从 E820 获取物理内存范围
+    end = max_pfn << PAGE_SHIFT;  // max_pfn 来自 e820__end_of_ram_pfn()
+
+    // 为 E820 中的 RAM 区域建立直接映射
+    // 内部通过遍历 memblock（来自 E820）建立页表
+    memory_map_bottom_up(ISA_END_ADDRESS, end);
+
+    // 加载新页表
+    load_cr3(swapper_pg_dir);
+    __flush_tlb_all();
+}
+```
+
+**具体依赖点**：
+
+1. **`max_pfn` 计算**（`arch/x86/kernel/e820.c`）：
+   ```c
+   unsigned long __init e820__end_of_ram_pfn(void)
+   {
+       unsigned long max_pfn = 0;
+       for (i = 0; i < e820_table->nr_entries; i++) {
+           struct e820_entry *entry = &e820_table->entries[i];
+
+           if (entry->type != E820_TYPE_RAM)  // 只考虑 RAM 区域
+               continue;
+
+           unsigned long pfn = (entry->addr + entry->size) >> PAGE_SHIFT;
+           if (pfn > max_pfn)
+               max_pfn = pfn;
+       }
+       return max_pfn;
+   }
+   ```
+
+2. **`init_mem_mapping()` 建立映射**：
+   - 只为 E820_TYPE_RAM 区域建立常规的 cacheable 页表映射
+   - E820_TYPE_RESERVED 区域不建立映射，或在需要时建立特殊映射（uncached）
+
+3. **`memblock` 作为中介**：
+   ```
+   E820 表（物理内存布局描述）
+       ↓
+   memblock（早期内存分配器，记录可用物理页）
+       ↓
+   页表（为 memblock 中的物理页建立线性地址映射）
+   ```
+
+**E820 影响的页表属性**：
+
+| E820 类型 | 是否映射？ | 页表属性 | 用途 |
+|----------|----------|---------|------|
+| `E820_TYPE_RAM` | ✅ 是 | Cacheable, Write-back | 内核直接映射，可分配使用 |
+| `E820_TYPE_RESERVED` | ❌ 否 | - | BIOS/设备保留，不映射到内核地址空间 |
+| `E820_TYPE_ACPI` | ⚠️ 按需 | Cacheable | ACPI 表，需要时临时映射 |
+| `E820_TYPE_NVS` | ⚠️ 按需 | Uncached | ACPI NVS，需要时映射为 uncached |
+| 设备 MMIO | ⚠️ 按需 | Uncached, Write-combining | 驱动通过 ioremap 映射，必须 uncached |
+
+**关键示例：为什么内核不能盲目映射所有物理地址？**
+
+假设一个系统的物理地址空间：
+
+```
+0x00000000 - 0x0009FC00: RAM (640KB)           ← E820_TYPE_RAM，应该映射
+0x000A0000 - 0x000FFFFF: 设备/BIOS ROM (384KB) ← E820_TYPE_RESERVED，不应该映射
+0x00100000 - 0xBFFD0000: RAM (约 3GB)          ← E820_TYPE_RAM，应该映射
+0xBFFD0000 - 0xC0000000: ACPI tables (192KB)   ← E820_TYPE_ACPI，按需映射
+0xFEC00000 - 0xFED00000: LAPIC/IOAPIC          ← E820_TYPE_RESERVED，驱动用 ioremap
+```
+
+如果内核不查看 E820，直接为所有物理地址建立 cacheable 映射：
+
+- ❌ **0x000A0000-0x000FFFFF**：这是 VGA 显存和 BIOS ROM，用 cached 映射会导致数据不一致
+- ❌ **0xFEC00000-0xFED00000**：这是 LAPIC/IOAPIC 寄存器，必须用 uncached 映射
+- ❌ **未知的保留区域**：可能触发 machine check exception
+
+**正确做法**（基于 E820）：
+```c
+// init_mem_mapping() 只映射 E820_TYPE_RAM
+for_each_memblock(memory, reg) {  // memblock 来自 E820
+    unsigned long start = reg->base;
+    unsigned long end = start + reg->size;
+
+    // 只为 RAM 建立 cacheable 映射
+    init_memory_mapping(start, end, PAGE_KERNEL);
+}
+
+// 设备内存由驱动单独映射
+void __iomem *lapic_base = ioremap(0xFEC00000, 4096);  // uncached
+```
+
+**总结**：
+
+| 关系 | 结论 | 原因 |
+|------|------|------|
+| **E820 vs Segment** | **无直接关系** | E820 描述物理地址布局，Segment 只是虚拟地址转换的第一阶段，两者处于不同层次 |
+| **E820 vs Paging** | **强依赖关系** | Paging 需要知道"为哪些物理地址建立页表映射"，这个信息来自 E820 表；没有 E820，内核无法安全地建立页表 |
+
+E820 表是连接"硬件物理内存布局"与"内核虚拟内存管理"的桥梁。
+
 > **相关文档**：
-> - [MMU_AND_PAGING.md](MMU_AND_PAGING.md) - MMU、分页与内核页表管理
+> - [MMU_AND_PAGING.md](MMU_AND_PAGING.md) - 第二章详细分析了 GDT（Segment）与 Paging 的两阶段地址转换关系
 > - [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) - 完整启动流程
 
 ## 3. max_pfn 与 e820__memblock_setup()：早期分配器
