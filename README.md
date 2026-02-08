@@ -199,6 +199,10 @@ DISPLAY=:1 make run-gui
   - 第二部分：Phase 1 - 早期页表（compressed kernel 身份映射）
   - 第三部分：Phase 2 - 完整页表（E820、memblock、init_mem_mapping、zone）
 
+#### 深入专题
+- **[GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)** - GDT 详解：从保护模式到长模式
+- **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解
+
 #### 子文档（技术细节）
 - **[E820_MEMORY_MAP.md](E820_MEMORY_MAP.md)** - E820 内存映射表详解
 - **[SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md)** - SeaBIOS E820 构建流程
