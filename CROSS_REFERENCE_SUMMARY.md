@@ -1,6 +1,117 @@
 # 文档交叉引用总结
 
-## 新增文档及其交叉引用
+## 最新更新：内存管理文档重组（2026-02）
+
+### 文档合并与专题提取
+
+#### 1. LINUX_PAGING_COMPLETE_GUIDE.md（合并创建）
+**主题**：Linux 内核分页机制完整指南：从理论到实践
+
+**来源文档**：
+- `_ARCHIVED_PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md`（已归档）
+- `_ARCHIVED_PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md`（已归档）
+
+**文档结构**：
+- 第一部分：理论基础（Flat Model、GDT、MMU、页表抽象）
+- 第二部分：Phase 1 - 早期页表（compressed kernel 身份映射）
+- 第三部分：Phase 2 - 完整页表（E820、memblock、init_mem_mapping、zone）
+
+**被引用位置**：
+- `README.md` - "核心指南"部分
+- `LINUX_KERNEL_INIT.md` - 4 处引用（分页相关章节）
+- `E820_MEMORY_MAP.md` - 主文档引用
+- `SEABIOS_E820_CONSTRUCTION.md` - 相关文档
+- `LINUX_USERSPACE_MEMORY.md` - 内核内存管理引用
+- `BOOTLOADER_MEMORY_PASSING.md` - 内存传递流程
+
+**引用其他文档**：
+- `GDT_DETAILED_GUIDE.md` - GDT 深入阅读
+- `BUDDY_ALLOCATOR_GUIDE.md` - 内存分配器深入阅读
+- `E820_MEMORY_MAP.md` - E820 表细节
+- `SEABIOS_E820_CONSTRUCTION.md` - BIOS 构建 E820
+- `LINUX_KERNEL_INIT.md` - 内核启动流程
+
+#### 2. GDT_DETAILED_GUIDE.md（专题提取）
+**主题**：GDT 详解：从保护模式到长模式
+
+**提取来源**：从 LINUX_PAGING_COMPLETE_GUIDE 中提取 GDT 相关详细内容
+
+**核心内容**：
+- GDT 基础概念与数据结构
+- 保护模式下的段式管理
+- 长模式下 GDT 的简化与作用
+- GDT 与分页的协作关系
+- Linux 内核启动过程中的 GDT 演化（GRUB → compressed kernel → main kernel → per-CPU）
+
+**被引用位置**：
+- `README.md` - "深入专题"部分
+- `LINUX_PAGING_COMPLETE_GUIDE.md` - 第一部分理论基础（第 93 行）
+- `LINUX_KERNEL_INIT.md` - "相关文档 > 内存管理"章节
+
+**引用其他文档**：
+- `LINUX_PAGING_COMPLETE_GUIDE.md` - 分页主文档
+- `LINUX_KERNEL_INIT.md` - 启动流程
+- `X86_NEAR_VS_LONG_JUMP.md` - 长模式跳转
+
+#### 3. BUDDY_ALLOCATOR_GUIDE.md（专题提取）
+**主题**：伙伴系统与 Slab 分配器详解
+
+**提取来源**：从 LINUX_PAGING_COMPLETE_GUIDE 中提取内存分配器相关详细内容
+
+**核心内容**：
+- Linux 内核内存分配层次结构
+- 伙伴系统原理、算法与实现
+- Slab/SLUB 分配器设计与 per-CPU 缓存
+- memblock 到 buddy 的转换流程
+- 性能优化策略
+
+**被引用位置**：
+- `README.md` - "深入专题"部分
+- `LINUX_PAGING_COMPLETE_GUIDE.md` - 第一部分理论基础（第 93 行）
+- `LINUX_KERNEL_INIT.md` - "相关文档 > 内存管理"章节
+
+**引用其他文档**：
+- `LINUX_PAGING_COMPLETE_GUIDE.md` - 分页主文档
+
+### 批量更新的文档（Phase1/Phase2 → Complete Guide）
+
+以下文档的 PAGING_PHASE1/PHASE2 引用已全部更新为 LINUX_PAGING_COMPLETE_GUIDE：
+- `LINUX_KERNEL_INIT.md`（4 处更新）
+- `E820_MEMORY_MAP.md`（3 处更新）
+- `SEABIOS_E820_CONSTRUCTION.md`（批量替换）
+- `LINUX_USERSPACE_MEMORY.md`（批量替换）
+
+### 文档引用关系图（内存管理）
+
+```
+LINUX_PAGING_COMPLETE_GUIDE.md（核心指南）
+    ├─→ GDT_DETAILED_GUIDE.md（深入专题：GDT 演化）
+    │   └─→ LINUX_KERNEL_INIT.md（启动流程）
+    │   └─→ X86_NEAR_VS_LONG_JUMP.md（跳转指令）
+    ├─→ BUDDY_ALLOCATOR_GUIDE.md（深入专题：内存分配器）
+    ├─→ E820_MEMORY_MAP.md（子文档：E820 表）
+    ├─→ SEABIOS_E820_CONSTRUCTION.md（子文档：BIOS 构建）
+    └─→ BOOTLOADER_MEMORY_PASSING.md（子文档：内存传递）
+```
+
+### Git 提交记录
+
+- **82a0a8a**: docs: merge paging documentation into unified guide
+  - 合并 Phase1 和 Phase2 为统一文档
+  - 修复 Mermaid 语法错误
+  - 更新 7 个文档的交叉引用
+  - 归档旧文档
+
+- **c10de5c**: Add specialist documentation for GDT and memory allocators
+  - 创建 GDT_DETAILED_GUIDE.md
+  - 创建 BUDDY_ALLOCATOR_GUIDE.md
+  - 更新 README.md 添加"深入专题"章节
+
+---
+
+## 原地解压专题文档（2026-01）
+
+### 新增文档及其交叉引用
 
 ### 1. SOLUTION_ICACHE_MYSTERY.md
 **主题**：extract_kernel 代码为什么不会被覆盖的完整解答

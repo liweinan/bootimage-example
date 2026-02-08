@@ -1415,6 +1415,8 @@ int kthreadd(void *unused)
 ### 内存管理
 
 - **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)** - Linux 内核分页机制完整指南：从理论到实践（包含理论基础、Phase 1 早期页表、Phase 2 完整页表）
+- **[GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)** - GDT 详解：从保护模式到长模式（GDT 演化、段描述符、与分页的协作）
+- **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解（内存分配层次、buddy 算法、SLUB 实现）
 
 ### 架构细节
 
