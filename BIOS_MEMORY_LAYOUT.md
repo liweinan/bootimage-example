@@ -302,7 +302,7 @@
            end
            
            subgraph BIOSMap["BIOS映射区域"]
-               BIOSMapped["0x0E0000 - 0x0FFFFF (128KB)<br/>BIOS映射区域<br/>实模式可访问<br/>不是RAM，是ROM映射<br/>实际BIOS在4GB顶部"]
+               BIOSMapped["0x0E0000 - 0x0FFFFF (128KB)<br/>BIOS映射区域<br/>实模式可访问<br/>不是RAM，是ROM映射<br/>实际BIOS在4GB顶部<br/>━━━━━━━━━━━━━━━━━━━━━━━━━━━━<br/>F-segment (0xF0000-0xFFFFF, 64KB)：<br/>• BIOS运行时代码与数据<br/>• E820表存储位置（e820_list）：<br/>  └─ VARFSEG段内（链接时确定）<br/>  └─ 数组大小：20B × 128 = 2,560B (2.5KB)<br/>  └─ 加上e820_count：总计约2,564B<br/>  └─ 访问方式：INT 15h AX=E820h<br/>  └─ 来源：SeaBIOS构建，传递给bootloader"]
            end
            
            subgraph Above1MB["1MB-4GB RAM区域"]
