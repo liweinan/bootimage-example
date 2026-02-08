@@ -121,6 +121,12 @@ DISPLAY=:1 make run-gui
 ### 核心概念文档
 
 - **[GUIDE.md](GUIDE.md)** - 计算机中断机制完全指南：从汇编到硬件实现
+- **[WHY_VIRTUAL_MEMORY.md](WHY_VIRTUAL_MEMORY.md)** - 为什么需要虚拟内存：从物理地址到分页的必然性
+  - 物理地址 vs 虚拟地址的权衡分析
+  - 分页解决的五大核心问题（碎片、保护、超售、共享、硬件）
+  - 碎片化的数学证明与算法分析
+  - 性能代价的实际分析（TLB、现代优化）
+  - 历史案例（RTOS、DOS、x86 分段演化）
 - **[X86_CPU_MODES.md](X86_CPU_MODES.md)** - x86 CPU 运行模式详解（实模式、保护模式、长模式）
 - **[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md)** - x86 near jump 与 long jump（far jump）区别，long mode 下 CS 的作用（CPL、L/D 位）
 - **[A20_ADDRESS_LINE.md](A20_ADDRESS_LINE.md)** - A20 地址线详解
