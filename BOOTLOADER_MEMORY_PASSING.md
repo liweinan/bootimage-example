@@ -20,7 +20,7 @@
 **相关文档**：
 - [SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md) - SeaBIOS 如何构建 E820 表
 - [E820_MEMORY_MAP.md](E820_MEMORY_MAP.md) - E820 表的总体说明
-- [PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md) - Linux 内核如何使用 E820
+- [LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md) - Linux 内核如何使用 E820
 
 ## 代码来源
 
@@ -429,7 +429,7 @@ flowchart TD
     end
 
     subgraph Unified[统一接口]
-        BOOT_PARAMS[boot_params.e820_table<br>boot_e820_entry[128]]
+        BOOT_PARAMS["boot_params.e820_table<br>(最多128项)"]
     end
 
     subgraph Kernel[Linux 内核]
@@ -603,7 +603,7 @@ efi.memmap (EFI 原始映射，用于 Runtime Services)
 
 - **[SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md)**：固件层如何构建 E820
 - **[E820_MEMORY_MAP.md](E820_MEMORY_MAP.md)**：E820 表的总体说明和数据结构
-- **[PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md)**：内核如何使用 E820
+- **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)**：内核如何使用 E820
 
 ---
 

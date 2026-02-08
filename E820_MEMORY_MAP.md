@@ -1,6 +1,6 @@
 # E820 内存映射表详解
 
-> **本文档为** [Linux 内核 setup_arch() 内存接管详解](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md) **的子文档**
+> **本文档为** [Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md) **的子文档**
 
 本文档详细介绍 E820 内存映射表的数据结构、Linux 内核如何接收和使用 E820 表，以及 E820 与分页/分段机制的关系。
 
@@ -13,7 +13,7 @@
 **相关文档**：
 - [SeaBIOS E820 构建流程](SEABIOS_E820_CONSTRUCTION.md) - BIOS 固件如何构建 E820 表
 - [Bootloader 内存信息传递](BOOTLOADER_MEMORY_PASSING.md) - GRUB 如何传递 E820 表给内核
-- [主文档：setup_arch() 内存接管](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md) - 内核接管内存的完整流程
+- [主文档：Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md) - 内核接管内存的完整流程（包含 E820 解析、memblock、init_mem_mapping）
 
 ---
 
@@ -1153,6 +1153,6 @@ PML4[0] → PDPT[0] → PD[0] → PT[256-...]
 E820 表是连接"硬件物理内存布局"与"内核虚拟内存管理"的桥梁。
 
 > **相关文档**：
-> - [PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md](PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md) - 第二章详细分析了 GDT（Segment）与 Paging 的两阶段地址转换关系
+> - [LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md) - 第一部分详细分析了 GDT（Segment）与 Paging 的两阶段地址转换关系
 > - [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) - 完整启动流程
 

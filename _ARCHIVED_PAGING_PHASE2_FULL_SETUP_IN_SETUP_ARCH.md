@@ -1,3 +1,18 @@
+# ⚠️ 文档已归档
+
+**本文档已被合并到新的统一文档中，不再维护。**
+
+请访问：**[Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md)**
+
+新文档包含：
+- 第一部分：理论基础（Flat Model、GDT、MMU、页表抽象）
+- 第二部分：Phase 1 - 早期页表（compressed kernel 身份映射）
+- 第三部分：Phase 2 - 完整页表（E820、memblock、init_mem_mapping、zone）
+
+---
+
+# 原文档内容（仅供参考）
+
 # Linux 内核 setup_arch() 内存接管详解
 
 ## 文档定位

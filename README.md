@@ -193,8 +193,18 @@ DISPLAY=:1 make run-gui
 
 ### 内存管理文档
 
-- **[PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md](PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md)** - 阶段 1：分页理论与早期页表（Flat Model、MMU 工作原理、startup_32/64 身份映射）
-- **[PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md)** - 阶段 2：setup_arch 完整页表建立（E820、memblock、init_mem_mapping）
+#### 核心指南
+- **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)** - Linux 内核分页机制完整指南：从理论到实践
+  - 第一部分：理论基础（Flat Model、GDT、MMU、页表抽象）
+  - 第二部分：Phase 1 - 早期页表（compressed kernel 身份映射）
+  - 第三部分：Phase 2 - 完整页表（E820、memblock、init_mem_mapping、zone）
+
+#### 子文档（技术细节）
+- **[E820_MEMORY_MAP.md](E820_MEMORY_MAP.md)** - E820 内存映射表详解
+- **[SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md)** - SeaBIOS E820 构建流程
+- **[BOOTLOADER_MEMORY_PASSING.md](BOOTLOADER_MEMORY_PASSING.md)** - Bootloader 内存信息传递
+
+#### 用户空间内存
 - **[LINUX_USERSPACE_MEMORY.md](LINUX_USERSPACE_MEMORY.md)** - Linux 用户空间内存管理
 - **[FILL.md](FILL.md)** - 内存填充相关文档
 
