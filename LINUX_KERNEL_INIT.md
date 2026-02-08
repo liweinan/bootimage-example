@@ -99,302 +99,67 @@ Linux 内核支持两种系统调用机制，**它们的实现方式完全不同
 - **16MB (0x1000000)**：解压后内核的目标位置（CONFIG_PHYSICAL_START 配置，或 KASLR 随机地址）
 - **16MB+ (约 38MB)**：重定位后的压缩内核位置（%rbx），从这里解压内核到 16MB（详见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
 
-```
-GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
-    │   将压缩内核加载到 0x100000 (1MB)
-    │   EIP = boot_params.hdr.code32_start (0x100000)，ESI = boot_params
+GRUB grub_relocator32_boot()
     ↓
 【阶段1】压缩内核 startup_32（arch/x86/boot/compressed/head_64.S:82）
-    │   在 1MB 处执行，32位保护模式
-    ├─ GDT/栈/段设置
-    ├─ verify_cpu
-    ├─ CR4.PAE=1
-    ├─ 构建身份映射页表（内联，head_64.S:200-231）
-    ├─ CR3 = pgtable（head_64.S:234-235）
-    ├─ EFER.LME = 1
-    ├─ CR0.PG = 1
-    └─ lret → 【阶段2】压缩内核 startup_64（head_64.S:273 跳转到 278）
+    │   32位保护模式，位于 1MB 处
+    ├─ 设置 GDT/栈/段寄存器
+    ├─ 构建身份映射页表
+    ├─ 启用 PAE、长模式、分页（CR4.PAE=1, EFER.LME=1, CR0.PG=1）
+    └─ lret → 切换到 64 位长模式
         ↓
-【阶段2】压缩内核 startup_64
+【阶段2】压缩内核 startup_64（head_64.S:278）
     │   64位长模式
-    ├─ 【仍在 1MB 处执行】设置64位环境：段寄存器、栈、GDT
-    ├─ 【仍在 1MB 处执行】load_stage1_idt
-    ├─ 【仍在 1MB 处执行】sev_enable
-    ├─ 【仍在 1MB 处执行】configure_5level_paging
-    ├─ 【重定位拷贝】rep movsq 拷贝到 %rbx（通常 38MB）
-    ├─ 重新加载 GDT
-    ├─ jmp .Lrelocated（跳到 %rbx 处）
-    ├─ 【现在在 %rbx 处执行】清除 BSS
-    ├─ load_stage2_idt
-    ├─ initialize_identity_maps
-    ├─ call extract_kernel
+    ├─ 设置 64 位环境（段寄存器、栈、GDT）
+    ├─ 重定位拷贝到高地址（约 38MB，详见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
+    ├─ 解压内核到 16MB
     │   extract_kernel()（arch/x86/boot/compressed/misc.c:334）
-    │       → 解压内核到 %rbp（0x1000000，即 16MB）
-    └─ jmp *%rax（head_64.S:475）
-        → 【阶段3】跳转到主内核 startup_64（解压后内核的入口）
+    └─ 跳转到主内核入口
         ↓
-【阶段3】主内核 startup_64
-    ├─ mov %rsi, %r15
-    │   → 保存 boot_params 指针到 R15
-    ├─ leaq __top_init_kernel_stack(%rip), %rsp
-    │   → 设置初始内核栈
-    ├─ xor %rbx, %rbx; wrmsr
-    │   → 清零 GS_BASE（MSR_GS_BASE）
-    ├─ call startup_64_setup_gdt_idt
+【阶段3】主内核 startup_64（arch/x86/kernel/head_64.S）
+    ├─ 设置内核栈和 GS_BASE
+    ├─ 加载内核 GDT 和早期 IDT
     │   startup_64_setup_gdt_idt()（arch/x86/boot/startup/gdt_idt.c:49）
-    │       ├─ rip_rel_ptr(&gdt_page)
-    │       ├─ native_load_gdt(&startup_gdt_descr)
-    │       │   → 加载内核 GDT
-    │       ├─ loadsegment(ds, __KERNEL_DS)
-    │       ├─ loadsegment(ss, __KERNEL_DS)
-    │       └─ startup_64_load_idt(handler)
-    │           startup_64_load_idt()
-    │               ├─ idt_init_desc(..., X86_TRAP_VC, ...)（仅 AMD SEV）
-    │               └─ native_load_idt(&desc)
-    ├─ pushq $__KERNEL_CS; lretq（head_64.S:77-80）
-    │   → 切换到 __KERNEL_CS 代码段
-    ├─ [可选] call sme_enable（CONFIG_AMD_MEM_ENCRYPT）
-    ├─ call verify_cpu
-    └─ jmp initial_code（head_64.S 末尾跳转表）
-        → 跳转到 x86_64_start_kernel
+    └─ 跳转到 x86_64_start_kernel
         ↓
 x86_64_start_kernel()（arch/x86/kernel/head64.c:222）
-    ├─ cr4_init_shadow()
-    ├─ reset_early_page_tables()
-    ├─ clear_bss()
-    ├─ clear_page(init_top_pgt)
-    ├─ sme_early_init()
-    ├─ idt_setup_early_handler()【内核接管 INT（早期）】
+    ├─ 重置页表（reset_early_page_tables）
+    ├─ 清除 BSS（clear_bss）
+    ├─ 设置早期 IDT【内核接管异常处理】
     │   idt_setup_early_handler()（arch/x86/kernel/idt.c:320）
-    │       ├─ for (i = 0; i < NUM_EXCEPTION_VECTORS; i++)
-    │       │   idt_setup_from_table(..., early_idt_handler_array, ...)
-    │       └─ load_idt(&idt_descr)
-    │           → 加载早期 IDT，处理 CPU 异常
-    ├─ kasan_early_init()（head64.c:252）
-    ├─ tdx_early_init()
-    ├─ copy_bootdata(__va(real_mode_data))
-    ├─ load_ucode_bsp()
-    ├─ init_top_pgt[511] = __pmd(...)
-    │   → 建立内核高地址映射（0xFFFFFFFF80000000）
-    ├─ x86_64_start_reservations(real_mode_data)
-    │   x86_64_start_reservations()
-    │       ├─ copy_bootdata(__va(real_mode_data))
-    │       ├─ x86_early_init_platform_quirks()
-    │       └─ start_kernel()
-    └─ → start_kernel()
+    ├─ 建立内核高地址映射（0xFFFFFFFF80000000）
+    └─ 调用 start_kernel()
         ↓
 start_kernel()（init/main.c:1005）
-    │
-    ├─ 【阶段 1：早期初始化】
-    │   ├─ set_task_stack_end_magic(&init_task)
-    │   ├─ smp_setup_processor_id()
-    │   ├─ debug_objects_early_init()
-    │   ├─ cgroup_init_early()
+    ├─ 【早期初始化】
     │   ├─ local_irq_disable()
     │   ├─ boot_cpu_init()
-    │   ├─ page_address_init()
-    │   ├─ pr_notice("%s", linux_banner)
-    │   ├─ early_security_init()
-    │   ├─ setup_arch(&command_line)【内核接管内存】
-    │   │   setup_arch()（arch/x86/kernel/setup.c:880）
-    │   │       ├─ memblock_reserve(__pa_symbol(_text), ...)
-    │   │       ├─ early_reserve_memory()
-    │   │       ├─ e820__memory_setup()
-    │   │       │   e820__memory_setup()（arch/x86/kernel/e820.c:1354）
-    │   │       │       └─ e820__memory_setup_default()
-    │   │       ├─ parse_setup_data()（setup.c:978）
-    │   │       ├─ e820__finish_early_params()
-    │   │       ├─ max_pfn = e820__end_of_ram_pfn()
-    │   │       │   e820__end_of_ram_pfn()（arch/x86/kernel/e820.c:1422）
-    │   │       ├─ e820__memblock_setup()（setup.c:1055）
-    │   │       │   e820__memblock_setup()（arch/x86/kernel/e820.c:1242）
-    │   │       ├─ init_mem_mapping()（setup.c:1083）
-    │   │       │   init_mem_mapping()（arch/x86/mm/init.c:758）
-    │   │       ├─ initmem_init()（setup.c:1118）
-    │   │       ├─ x86_init.paging.pagetable_init()
-    │   │       │   → paging_init()（arch/x86/mm/init_64.c:819）
-    │   │       └─ idt_setup_early_traps()（setup.c:1241）
-    │   │           idt_setup_early_traps()（arch/x86/kernel/idt.c:336）
-    │   ├─ setup_command_line(command_line)（main.c:1022）
-    │   ├─ setup_nr_cpu_ids()
-    │   ├─ setup_per_cpu_areas()
-    │   ├─ smp_prepare_boot_cpu()
-    │   ├─ boot_cpu_hotplug_init()
-    │   ├─ build_all_zonelists(NULL)
-    │   ├─ page_alloc_init()
-    │   ├─ parse_early_param()
-    │   ├─ parse_args(...)
-    │   ├─ jump_label_init()
-    │   ├─ setup_log_buf(0)
-    │   ├─ vfs_caches_init_early()
-    │   ├─ sort_main_extable()
-    │   ├─ trap_init()
-    │   │   trap_init()（arch/x86/kernel/traps.c:1680）
-    │   │       ├─ idt_setup_traps()
-    │   │       │   idt_setup_traps()（arch/x86/kernel/idt.c:264）
-    │   │       ├─ idt_setup_ist_traps()（traps.c:1685）
-    │   │       │   idt_setup_ist_traps()（arch/x86/kernel/idt.c:269）
-    │   │       ├─ cpu_init()（traps.c:1690）
-    │   │       │   cpu_init()（arch/x86/kernel/cpu/common.c:2210）
-    │   │       │       ├─ load_current_idt()
-    │   │       │       ├─ load_sp0(t, &current->thread)
-    │   │       │       ├─ load_mm_ldt(&init_mm)
-    │   │       │       └─ syscall_init()
-    │   │       │           syscall_init()
-    │   │       │               ├─ wrmsr(MSR_STAR, ...)
-    │   │       │               ├─ wrmsrl(MSR_LSTAR, ...)
-    │   │       │               └─ wrmsrl(MSR_SYSCALL_MASK, ...)
-    │   │       └─ idt_setup_debuggers()（traps.c:1693）
-    │   └─ mm_core_init()（main.c:1046）
+    │   ├─ setup_arch()【内核接管物理内存，详见 [LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)】
+    │   │   ├─ e820__memory_setup() - 读取 E820 表
+    │   │   ├─ e820__memblock_setup() - 初始化 memblock
+    │   │   ├─ init_mem_mapping() - 建立完整直接映射
+    │   │   └─ paging_init() - 初始化内存区域
+    │   ├─ build_all_zonelists() - 建立内存 zone
+    │   └─ trap_init()【设置完整 IDT 和系统调用入口】
+    │       ├─ idt_setup_traps() - 设置异常门
+    │       ├─ idt_setup_ist_traps() - 设置 IST 异常
+    │       └─ syscall_init() - 配置 SYSCALL/SYSENTER MSR
     │
-    ├─ 【阶段 2：内存、调度、中断初始化】
-    │   ├─ poking_init()
-    │   ├─ ftrace_init()
-    │   ├─ early_trace_init()
-    │   ├─ sched_init()
-    │   │   sched_init()（kernel/sched/core.c:10056）
-    │   ├─ preempt_disable()（main.c:1063）
-    │   ├─ radix_tree_init()
-    │   ├─ housekeeping_init()
-    │   ├─ workqueue_init_early()
-    │   ├─ rcu_init()
-    │   │   rcu_init()（kernel/rcu/tree.c:5088）
-    │   ├─ trace_init()（main.c:1076）
-    │   ├─ early_irq_init()
-    │   │   early_irq_init()（kernel/irq/irqdesc.c:560）
-    │   ├─ init_IRQ()（main.c:1079）【内核接管 INT（完整）】
-    │   │   init_IRQ()（arch/x86/kernel/irqinit.c:75）
-    │   │       ├─ x86_init.irqs.intr_init()
-    │   │       │   → native_init_IRQ()（arch/x86/kernel/irq.c:110）
-    │   │       │       ├─ idt_setup_apic_and_irq_gates()
-    │   │       │       │   idt_setup_apic_and_irq_gates()（arch/x86/kernel/idt.c:278）
-    │   │       │       │       ├─ idt_setup_from_table(..., apic_idts, ...)
-    │   │       │       │       └─ for (i = 0; i < nr_legacy_irqs(); i++)
-    │   │       │       │           idt_set_irq(irq_to_desc(i), IDT_INDEX(i))
-    │   │       │       ├─ if (!acpi_ioapic && !of_ioapic && nr_legacy_irqs())（irq.c:117）
-    │   │       │       │   setup_irq(2, &irq2)
-    │   │       │       │       → 设置 INT 0x80 (i8259 级联)
-    │   │       │       └─ irq_ctx_init(smp_processor_id())
-    │   │       ├─ irq_init_percpu_irqstack(smp_processor_id())（irqinit.c:88）
-    │   │       └─ lapic_assign_system_vectors()
-    │   ├─ tick_init()（main.c:1080）
-    │   ├─ rcu_init_nohz()
-    │   ├─ init_timers()
-    │   ├─ srcu_init()
-    │   ├─ hrtimers_init()
-    │   ├─ softirq_init()
-    │   ├─ timekeeping_init()
-    │   ├─ time_init()
-    │   ├─ perf_event_init()
-    │   ├─ profile_init()
-    │   ├─ call_function_init()
-    │   ├─ local_irq_enable()
-    │   │   → 首次开启中断，此后可响应硬件中断
-    │   └─ kmem_cache_init_late()
+    ├─ 【调度与中断初始化】
+    │   ├─ sched_init() - 初始化调度器
+    │   ├─ init_IRQ()【设置硬件中断门】
+    │   │   └─ idt_setup_apic_and_irq_gates()
+    │   └─ local_irq_enable() - 首次开启中断
     │
-    ├─ 【阶段 3：控制台、文件系统、进程管理初始化】
-    │   ├─ console_init()
-    │   │   console_init()（drivers/tty/tty_io.c:2872）
-    │   ├─ locking_selftest()（main.c:1096）
-    │   ├─ mem_encrypt_init()
-    │   ├─ vfs_caches_init()
-    │   │   vfs_caches_init()（fs/dcache.c:3277）
-    │   ├─ pagecache_init()（main.c:1102）
-    │   ├─ signals_init()
-    │   ├─ seq_file_init()
-    │   ├─ proc_root_init()
-    │   ├─ nsfs_init()
-    │   ├─ cpuset_init()
-    │   ├─ cgroup_init()
-    │   ├─ taskstats_init_early()
-    │   ├─ delayacct_init()
-    │   ├─ acpi_subsystem_init()
-    │   ├─ arch_post_acpi_subsys_init()
-    │   ├─ kcsan_init()
-    │   ├─ check_bugs()
-    │   ├─ acpi_early_init()
-    │   ├─ arch_call_rest_init()
-    │   │   arch_call_rest_init()（arch/x86/kernel/process.c:856）
-    │   │       └─ rest_init()（init/main.c:711）
-    │   └─ prevent_tail_call_optimization()
+    ├─ 【子系统初始化】
+    │   ├─ console_init() - 初始化控制台
+    │   ├─ vfs_caches_init() - 初始化文件系统
+    │   └─ rest_init() - 创建 init 进程
     │
-    └─ 【阶段 4：rest_init() - 创建 PID 1/2、PID 0 进入 idle】
-        rest_init()
-            ├─ rcu_scheduler_starting()
-            ├─ user_mode_thread(kernel_init, NULL, CLONE_FS)
-            │   user_mode_thread()（kernel/fork.c:2718）
-            │       ├─ kernel_clone(&args)
-            │       │   kernel_clone()
-            │       │       → 创建内核线程，PID = 1
-            │       └─ 返回 PID 1
-            │   → 创建 PID 1（init），入口函数 kernel_init
-            ├─ numa_default_policy()（main.c:717）
-            ├─ kernel_thread(kthreadd, NULL, NULL, CLONE_FS | CLONE_FILES)
-            │   kernel_thread()（kernel/fork.c:2697）
-            │       ├─ kernel_clone(&args)
-            │       │   → 创建内核线程，PID = 2
-            │       └─ 返回 PID 2
-            │   → 创建 PID 2（kthreadd），入口函数 kthreadd
-            ├─ kthreadd_done = &kthreadd_done_completion（main.c:722）
-            ├─ complete(&kthreadd_done)
-            │   → 通知 PID 1：kthreadd 已就绪
-            ├─ schedule_preempt_disabled()
-            └─ cpu_startup_entry(CPUHP_ONLINE)
-                cpu_startup_entry()（kernel/sched/idle.c:393）
-                    ├─ arch_cpu_idle_prepare()
-                    ├─ cpuhp_online_idle(CPUHP_AP_ONLINE_IDLE)
-                    └─ do_idle()
-                        do_idle()
-                            → 当前进程（PID 0: swapper）进入 idle 循环，不返回
-                            → 永久循环：check_preempt_curr() → schedule() → cpu_idle_loop()
-
-【PID 1：kernel_init 线程】
-kernel_init()（init/main.c:1569）
-    ├─ kernel_init_freeable()
-    │   kernel_init_freeable()
-    │       ├─ wait_for_completion(&kthreadd_done)
-    │       │   → 等待 kthreadd 就绪
-    │       ├─ workqueue_init()
-    │       ├─ init_mm_internals()
-    │       ├─ rcu_init_tasks_generic()
-    │       ├─ do_pre_smp_initcalls()
-    │       ├─ smp_init()
-    │       ├─ sched_init_smp()
-    │       ├─ padata_init()
-    │       ├─ page_alloc_init_late()
-    │       ├─ do_basic_setup()
-    │       │   do_basic_setup()
-    │       │       ├─ driver_init()
-    │       │       ├─ init_irq_proc()
-    │       │       └─ do_initcalls()
-    │       ├─ console_on_rootfs()
-    │       ├─ rcu_end_inkernel_boot()
-    │       └─ system_state = SYSTEM_RUNNING
-    ├─ numa_default_policy()
-    ├─ rcu_end_inkernel_boot()
-    ├─ do_sysctl_args()
-    ├─ if (!ramdisk_execute_command)
-    │   ramdisk_execute_command = "/init"
-    ├─ if (!try_to_run_init_process(ramdisk_execute_command))
-    │   try_to_run_init_process()
-    │       └─ run_init_process(init_filename)
-    │           run_init_process()
-    │               ├─ argv_init[0] = init_filename
-    │               └─ kernel_execve(init_filename, argv_init, envp_init)
-    │                   → 执行用户空间 init 程序（如 /init, /sbin/init）
-    └─ → 成功执行用户空间 init，不返回
-
-【PID 2：kthreadd 线程】
-kthreadd()（kernel/kthread.c:815）
-    ├─ set_task_comm(tsk, "kthreadd")
-    ├─ ignore_signals(tsk)
-    ├─ set_cpus_allowed_ptr(tsk, housekeeping_cpumask(...))
-    ├─ set_mems_allowed(node_states[N_MEMORY])
-    ├─ current->flags |= PF_NOFREEZE
-    ├─ cgroup_init_kthreadd()
-    └─ for (;;)
-        └─ 永久循环：等待创建新内核线程请求，负责创建所有后续内核线程
-```
+    └─ rest_init()
+        ├─ 创建 PID 1（kernel_init） → 启动用户空间 init
+        ├─ 创建 PID 2（kthreadd） → 管理内核线程
+        └─ PID 0 进入 idle 循环
 
 ### 文件路径约定
 
