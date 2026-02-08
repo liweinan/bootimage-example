@@ -13,7 +13,6 @@
 
 ### BIOS/GRUB 启动路径
 
-```
 GRUB/入口
     ↓
 【阶段 1】压缩内核 startup_32（32 位模式切换）
@@ -35,11 +34,9 @@ init_IRQ（IDT硬件中断门 + INT 0x80）
 rest_init（创建 PID 1/2）
     ↓
 核心进程启动
-```
 
 ### UEFI 启动路径
 
-```
 UEFI 固件
     ↓
 efi_pe_entry
@@ -53,7 +50,6 @@ enter_kernel
 【阶段 3】主内核 startup_64（直接跳到这里，跳过阶段 1 和 2）
     ↓
 后续流程与 BIOS 路径相同
-```
 
 > **重要**：UEFI 路径**完全跳过**压缩内核的 startup_32/startup_64，直接通过 EFI stub 解压并进入主内核。详见 [UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md)。
 
@@ -193,11 +189,9 @@ start_kernel()（init/main.c:1005）
 
 **入口点**：BIOS/Legacy（如 GRUB）→ code32_start 处即 **startup_32**（x86_64：`arch/x86/boot/compressed/head_64.S:82`，`SYM_FUNC_START(startup_32)`）。UEFI → PE 的 AddressOfEntryPoint 跳转到 EFI stub（`efi_pe_entry` 等）。64 位内核用 `head_64.S`（压缩与主内核各一份，路径不同）；32 位用 `head_32.S`。
 
-```
 grub_relocator32_boot() → EIP = code32_start
     ↓
 【阶段1】压缩内核 startup_32（32 位保护模式，arch/x86/boot/compressed/head_64.S:82）
-```
 
 ---
 
@@ -221,7 +215,6 @@ grub_relocator32_boot() → EIP = code32_start
 
 实际源码中 **无** `setup_identity_mapping` 调用；身份映射页表在 startup_32 内**内联**构建（Build Level 4/3/2），且 **GDT/栈/段** 在 **CR4/页表/CR3/EFER/CR0** 之前。
 
-```
 startup_32
     ├─ cld, cli；算加载偏移 %ebp（89-103行）
     ├─ lgdt（GDT）、段寄存器 = __BOOT_DS、栈 = boot_stack_end、lretl 切到 __KERNEL32_CS（106-125行）
@@ -234,7 +227,6 @@ startup_32
     ├─ lldt/ltr（244-247行）
     ├─ push rva(startup_64); push __KERNEL_CS；CR0.PG = 1（264-270行）
     └─ lret → 【阶段2】压缩内核 startup_64（273行，跳转到同文件278行）
-```
 
 **关键步骤说明**（与源码 head_64.S 对应）：
 
@@ -306,7 +298,6 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
 
 **压缩内核 startup_64 关键步骤**：
 
-```
 压缩内核 startup_64（.code64）
     ├─ cld, cli；设置段寄存器（290-299行）
     ├─ 计算解压目标 %rbp（LOAD_PHYSICAL_ADDR，通常 16MB）与重定位目标 %rbx（通常 38MB）（314-331行）
@@ -333,7 +324,6 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
     │       ├─ 解析解压后 ELF，handle_relocations()
     │       └─ 返回主内核入口地址到 %rax
     └─ jmp *%rax（475行）→ 【阶段3】跳转到主内核 startup_64
-```
 
 **关键地址说明**：
 - **1MB (0x100000)**：GRUB 加载压缩内核的初始位置
