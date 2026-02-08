@@ -705,13 +705,61 @@ SYM_CODE_END(startup_64)
 
 > **相关文档**：
 > - [POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)：详细分析了 `__pi_` 前缀的含义、位置无关代码编译机制（-fPIC、objcopy --prefix-symbols）、RIP 相对寻址、SYM_PIC_ALIAS 宏的实现原理，以及 `startup_64_setup_gdt_idt()` 如何通过 `rip_rel_ptr()` 访问符号
+> - [GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)：GDT 详解，包含 GDT 的完整演化过程（GRUB GDT → 压缩内核 GDT → 主内核 GDT → per-CPU GDT）、段描述符结构、长模式下的作用
+> - [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)：IDT 表的完整演进流程，包含 5 个演进阶段、两个 IDT 表的切换、IST 机制详解
 
 **为何说这里是"早期/初步"的 GDT/IDT**：
 - **时机**：这次 lgdt/lidt 发生在 head_64.S，尚在**切到虚拟地址之前**、**进入完整 C 内核**（setup_arch、trap_init、init_IRQ 等）之前，因而是启动顺序里**最早**的一次 GDT/IDT 设置。
-- **GDT**：加载的是 cpu/common.c 里定义的 **gdt_page**（内核正式 GDT），之后内核一直沿用，这里只是**第一次**让 CPU 用上这张表，并非"临时表再换"。
-- **IDT**：加载的是 **bringup_idt_table**，仅作占位或只填 #VC，属于**最小 IDT**；要等到 x86_64_start_kernel() → idt_setup_early_handler() 用 early_idt_handler_array 填满异常向量并再次 load_idt，才算"早期异常处理就绪"。
 
-因此"初步"主要指**时机最早**，以及 IDT 是**最小、后续被 early IDT 取代**；GDT 则是**一次加载、后续沿用**。
+#### GDT 加载详解
+
+**加载的 GDT**：cpu/common.c 里定义的 **gdt_page**（内核正式 GDT），包含内核代码段、数据段、TSS 等描述符。
+
+**GDT 演化过程**（详见 [GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)）：
+1. **GRUB GDT**（grub/grub-core/lib/i386/relocator.c）：GRUB 设置的临时 GDT，仅供进入内核前使用
+2. **压缩内核 GDT**（arch/x86/boot/compressed/head_64.S::gdt）：压缩内核 startup_32/startup_64 使用的临时 GDT
+3. **主内核早期 GDT**（arch/x86/kernel/cpu/common.c::gdt_page）：← **这里加载的 GDT**
+4. **运行时 per-CPU GDT**（arch/x86/kernel/cpu/common.c::gdt_page）：每个 CPU 一份，动态更新 TSS 等
+
+**GDT 的后续使用**：
+- 这里加载后，内核一直沿用这张 **gdt_page**，只是**第一次**让 CPU 用上这张表
+- 后续在 trap_init() → cpu_init() 中会设置 TSS、LDT 等，但仍使用同一张 GDT
+- 多核启动后，每个 CPU 有自己的 gdt_page 副本（per-CPU），但结构相同
+
+**关键段描述符**：
+- **__KERNEL_CS**（代码段）：64位长模式代码段（CS.L=1，CS.D=0）
+- **__KERNEL_DS**（数据段）：内核数据段（DS/SS/ES/GS 使用）
+- **__BOOT_TSS**：任务状态段，存储栈指针、I/O 位图等
+
+#### IDT 加载详解
+
+**加载的 IDT**：**bringup_idt_table**（arch/x86/boot/startup/gdt_idt.c），静态定义的最小 IDT。
+
+**IDT 特点**：
+- 仅作占位或只填 #VC（X86_TRAP_VC，用于 AMD SEV 加密虚拟机）
+- 大部分中断向量为空（全零），属于**最小 IDT**
+- 这是一个**临时 IDT**，后续会被完整 IDT 取代
+
+**IDT 演化过程**（详见 [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)）：
+1. **阶段 0**：startup_64_setup_gdt_idt() 加载 bringup_idt_table（← **当前阶段**）
+2. **阶段 1**：idt_setup_early_handler() 切换到 idt_table，填充早期异常向量
+3. **阶段 2**：idt_setup_early_traps() 补充 DB、BP、PF 等异常
+4. **阶段 3**：idt_setup_traps() 补全所有异常向量并设置 IST
+5. **阶段 4**：idt_setup_apic_and_irq_gates() 填充硬件 IRQ，IDT 完全就绪
+
+**IDT 的后续演进**：
+- 要等到 x86_64_start_kernel() → idt_setup_early_handler() 用 early_idt_handler_array 填满异常向量并再次 load_idt，才算"早期异常处理就绪"
+- 最终在 start_kernel() → init_IRQ() → idt_setup_apic_and_irq_gates() 后，IDT 包含所有异常、硬件中断和软件中断
+
+**为何早期不能直接用完整 IDT**：
+- 早期不能用 idt.c 的 idt_table，因可能被 KASAN/tracing 等插桩
+- 必须使用简单的 bringup_idt_table，确保在最小环境下可用
+
+#### 总结
+
+因此"初步"主要指**时机最早**，以及两者的后续演进：
+- **GDT**：一次加载，后续沿用（仅在 cpu_init() 中更新 TSS/LDT）
+- **IDT**：最小表，后续被 early IDT 取代，最终演进为完整 IDT
 
 **汇编如何调用 C 函数**：通过链接时的符号解析。
 
