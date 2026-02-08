@@ -95,7 +95,7 @@ Linux 内核支持两种系统调用机制，**它们的实现方式完全不同
 - **16MB (0x1000000)**：解压后内核的目标位置（CONFIG_PHYSICAL_START 配置，或 KASLR 随机地址）
 - **16MB+ (约 38MB)**：重定位后的压缩内核位置（%rbx），从这里解压内核到 16MB（详见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
 
-GRUB grub_relocator32_boot()
+GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
     ↓
 【阶段1】压缩内核 startup_32（arch/x86/boot/compressed/head_64.S:82）
     │   32位保护模式，位于 1MB 处
@@ -104,7 +104,7 @@ GRUB grub_relocator32_boot()
     ├─ 启用 PAE、长模式、分页（CR4.PAE=1, EFER.LME=1, CR0.PG=1）
     └─ lret → 切换到 64 位长模式
         ↓
-【阶段2】压缩内核 startup_64（head_64.S:278）
+【阶段2】压缩内核 startup_64（arch/x86/boot/compressed/head_64.S:278）
     │   64位长模式
     ├─ 设置 64 位环境（段寄存器、栈、GDT）
     ├─ 重定位拷贝到高地址（约 38MB，详见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
@@ -130,32 +130,32 @@ start_kernel()（init/main.c:1005）
     ├─ 【早期初始化】
     │   ├─ local_irq_disable()
     │   ├─ boot_cpu_init()
-    │   ├─ setup_arch()【内核接管物理内存，详见 [LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)】
-    │   │   ├─ e820__memory_setup() - 读取 E820 表
-    │   │   ├─ e820__memblock_setup() - 初始化 memblock
-    │   │   ├─ init_mem_mapping() - 建立完整直接映射
-    │   │   └─ paging_init() - 初始化内存区域
-    │   ├─ build_all_zonelists() - 建立内存 zone
-    │   └─ trap_init()【设置完整 IDT 和系统调用入口】
-    │       ├─ idt_setup_traps() - 设置异常门
-    │       ├─ idt_setup_ist_traps() - 设置 IST 异常
-    │       └─ syscall_init() - 配置 SYSCALL/SYSENTER MSR
+    │   ├─ setup_arch()（arch/x86/kernel/setup.c:880）【内核接管物理内存，详见 [LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)】
+    │   │   ├─ e820__memory_setup()（arch/x86/kernel/e820.c:1354）
+    │   │   ├─ e820__memblock_setup()（arch/x86/kernel/e820.c:1242）
+    │   │   ├─ init_mem_mapping()（arch/x86/mm/init.c:758）
+    │   │   └─ paging_init()（arch/x86/mm/init_64.c:819）
+    │   ├─ build_all_zonelists()
+    │   └─ trap_init()（arch/x86/kernel/traps.c:1680）【设置完整 IDT 和系统调用入口】
+    │       ├─ idt_setup_traps()（arch/x86/kernel/idt.c:264）
+    │       ├─ idt_setup_ist_traps()（arch/x86/kernel/idt.c:269）
+    │       └─ syscall_init()（arch/x86/kernel/cpu/common.c）
     │
     ├─ 【调度与中断初始化】
-    │   ├─ sched_init() - 初始化调度器
-    │   ├─ init_IRQ()【设置硬件中断门】
-    │   │   └─ idt_setup_apic_and_irq_gates()
-    │   └─ local_irq_enable() - 首次开启中断
+    │   ├─ sched_init()（kernel/sched/core.c:10056）
+    │   ├─ init_IRQ()（arch/x86/kernel/irqinit.c:75）【设置硬件中断门】
+    │   │   └─ idt_setup_apic_and_irq_gates()（arch/x86/kernel/idt.c:278）
+    │   └─ local_irq_enable()
     │
     ├─ 【子系统初始化】
-    │   ├─ console_init() - 初始化控制台
-    │   ├─ vfs_caches_init() - 初始化文件系统
-    │   └─ rest_init() - 创建 init 进程
+    │   ├─ console_init()（drivers/tty/tty_io.c:2872）
+    │   ├─ vfs_caches_init()（fs/dcache.c:3277）
+    │   └─ rest_init()（init/main.c:711）
     │
     └─ rest_init()
-        ├─ 创建 PID 1（kernel_init） → 启动用户空间 init
-        ├─ 创建 PID 2（kthreadd） → 管理内核线程
-        └─ PID 0 进入 idle 循环
+        ├─ 创建 PID 1（kernel_init）（kernel/fork.c:2718） → 启动用户空间 init
+        ├─ 创建 PID 2（kthreadd）（kernel/fork.c:2697） → 管理内核线程
+        └─ PID 0 进入 idle 循环（kernel/sched/idle.c:393）
 
 ### 文件路径约定
 
