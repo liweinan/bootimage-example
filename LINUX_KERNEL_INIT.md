@@ -706,7 +706,7 @@ SYM_CODE_END(startup_64)
 > **相关文档**：
 > - [POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)：详细分析了 `__pi_` 前缀的含义、位置无关代码编译机制（-fPIC、objcopy --prefix-symbols）、RIP 相对寻址、SYM_PIC_ALIAS 宏的实现原理，以及 `startup_64_setup_gdt_idt()` 如何通过 `rip_rel_ptr()` 访问符号
 > - [GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)：GDT 详解，包含 GDT 的完整演化过程（GRUB GDT → 压缩内核 GDT → 主内核 GDT → per-CPU GDT）、段描述符结构、长模式下的作用
-> - [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)：IDT 表的完整演进流程，包含 5 个演进阶段、两个 IDT 表的切换、IST 机制详解
+> - [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)：IDT 表的演进流程详解 - 两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
 
 **为何说这里是"早期/初步"的 GDT/IDT**：
 - **时机**：这次 lgdt/lidt 发生在 head_64.S，尚在**切到虚拟地址之前**、**进入完整 C 内核**（setup_arch、trap_init、init_IRQ 等）之前，因而是启动顺序里**最早**的一次 GDT/IDT 设置。
@@ -751,7 +751,7 @@ early_gdt_descr_base:
 - 大部分中断向量为空（全零），属于**最小 IDT**
 - 这是一个**临时 IDT**，后续会被完整 IDT 取代
 
-**IDT 演化过程**（详见 [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)）：
+**IDT 演化过程**（详见 [IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md)）：
 1. **阶段 0**：startup_64_setup_gdt_idt() 加载 bringup_idt_table（← **当前阶段**）
 2. **阶段 1**：idt_setup_early_handler() 切换到 idt_table，填充早期异常向量
 3. **阶段 2**：idt_setup_early_traps() 补充 DB、BP、PF 等异常
@@ -942,7 +942,7 @@ Linux 内核使用**两个独立的 IDT 表**，在启动过程中逐步完善�
 - trap_init → init_IRQ：中断关闭（IF=0）
 - init_IRQ 之后：调用 local_irq_enable() 开启中断（IF=1）
 
-> **详细内容**：完整的 IDT 演进流程、代码实现、GDT/IDT 对比、IST 机制、中断状态详解，请参见 **[IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md)**。
+> **详细内容**：两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、代码实现、GDT/IDT 对比、IST 机制、中断状态管理的完整分析，请参见 **[IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md)**。
 
 
 ## 四、start_kernel() 流程概述
@@ -1255,7 +1255,7 @@ int kthreadd(void *unused)
 
 ### 中断与系统调用
 
-- **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解（两个 IDT 表、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态）
+- **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解 - 两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
 - **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - 系统调用初始化详解（trap_init、syscall_init、INT 0x80 vs SYSCALL/SYSENTER 对比、MSR 配置）
 - **[LINUX_INTERRUPT_HANDLING.md](LINUX_INTERRUPT_HANDLING.md)** - Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue）
 - **[BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)** - BIOS IVT 与 Kernel IDT 对比
