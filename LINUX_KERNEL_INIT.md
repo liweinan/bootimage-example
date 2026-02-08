@@ -1079,371 +1079,41 @@ void __init idt_setup_early_handler(void)
 | 条目内容 | 段描述符（基址、界限、权限等） | 中断门/陷阱门（处理程序地址） |
 | 主要功能 | 内存分段和保护 | 中断与异常处理 |
 
+
 ### IDT 表的演进流程：从临时表到运行时表
 
-Linux 内核使用**两个独立的 IDT 表**，有明确的切换和逐步完善过程。这是为了避免早期启动代码被 tracing/KASAN instrumentation 干扰。
+Linux 内核使用**两个独立的 IDT 表**，在启动过程中逐步完善，经历 **5 个演进阶段**。
 
 #### 两个 IDT 表
 
-**1. bringup_idt_table（临时表，极早期）**
+| IDT 表 | 大小 | 使用时机 | 用途 |
+|--------|------|---------|------|
+| **bringup_idt_table** | 32 个异常向量 | 极早期（startup_64 汇编） | 临时表，避免 tracing/KASAN 干扰 |
+| **idt_table** | 256 个向量 | start_kernel 之后 | 运行时表，支持全部中断/异常 |
+
+#### 5 个演进阶段
+
+| 阶段 | 函数 | 时机 | 覆盖范围 | 状态 |
+|------|------|------|---------|------|
+| **阶段 0** | startup_64_load_idt() | 主内核 startup_64 | bringup_idt_table（几乎为空） | 临时占位 |
+| **阶段 1** | idt_setup_early_handler() | x86_64_start_kernel | 切换到 idt_table，填充早期异常向量 | 早期异常处理 |
+| **阶段 2** | idt_setup_early_traps() | setup_arch | 补充 DB, BP, PF 等（带 IST） | 支持页表初始化 |
+| **阶段 3** | idt_setup_traps() | trap_init | 补全所有异常向量并设置 IST | 完整异常处理 |
+| **阶段 4** | idt_setup_apic_and_irq_gates() | init_IRQ | 填充 APIC/IRQ 并设为只读 | **IDT 完全就绪** |
+
+**关键设计**：
+- **临时表**：避免早期启动代码被 tracing/KASAN instrumentation 干扰
+- **渐进完善**：从异常处理 → 硬件中断 → 软件中断（INT 0x80）
+- **IST 机制**：关键异常（#DF, #NMI, #MC）使用独立栈，避免栈溢出
+
+**启动过程中的中断状态**：
+- startup_64 → x86_64_start_kernel：中断关闭（IF=0）
+- start_kernel → trap_init：中断关闭（IF=0）
+- trap_init → init_IRQ：中断关闭（IF=0）
+- init_IRQ 之后：调用 local_irq_enable() 开启中断（IF=1）
+
+> **详细内容**：完整的 IDT 演进流程、代码实现、GDT/IDT 对比、IST 机制、中断状态详解，请参见 **[IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md)**。
 
-定义在 `arch/x86/boot/startup/gdt_idt.c:24`：
-```c
-static gate_desc bringup_idt_table[NUM_EXCEPTION_VECTORS] __page_aligned_data;
-```
-
-- **大小**：只有 32 个异常向量（`NUM_EXCEPTION_VECTORS`）
-- **使用时机**：主内核 startup_64 汇编代码中（`head_64.S:74`）
-- **加载位置**：`startup_64_setup_gdt_idt()` → `startup_64_load_idt()`
-- **用途**：极早期阶段，只能处理 #VC (VMM Communication Exception)
-- **限制**：内容几乎为空（除非启用 AMD SEV），仅作为占位，避免 CPU 访问无效 IDT
-
-**为什么需要临时表？** 注释（`gdt_idt.c:12-23`）说明：
-> The bringup-IDT is used until the idt_table takes over. The idt_table can't be used that early because all the code modifying it is in idt.c and can be **instrumented by tracing or KASAN**, which both don't work during early CPU bringup. Also the idt_table has the runtime vectors configured which require certain CPU state to be setup already (like TSS), which also hasn't happened yet in early CPU bringup.
-
-#### bringup_idt_table 的具体内容定义
-
-**初始化方式**：
-
-```c
-// arch/x86/boot/startup/gdt_idt.c:24
-static gate_desc bringup_idt_table[NUM_EXCEPTION_VECTORS] __page_aligned_data;
-```
-
-- `__page_aligned_data` 宏定义（`include/linux/linkage.h:39`）：
-  ```c
-  #define __page_aligned_data __section(".data..page_aligned") __aligned(PAGE_SIZE)
-  ```
-- 放在 `.data..page_aligned` section 中，页对齐
-- **初始化为全零**（静态变量，编译器自动清零）
-
-**运行时填充**：
-
-```c
-// arch/x86/boot/startup/gdt_idt.c:27-44
-void startup_64_load_idt(void *vc_handler)
-{
-    struct desc_ptr desc = {
-        .address = (unsigned long)rip_rel_ptr(bringup_idt_table),
-        .size    = sizeof(bringup_idt_table) - 1,
-    };
-    struct idt_data data;
-    gate_desc idt_desc;
-
-    /* @vc_handler is set only for a VMM Communication Exception */
-    if (vc_handler) {
-        init_idt_data(&data, X86_TRAP_VC, vc_handler);      // 初始化 #VC 数据
-        idt_init_desc(&idt_desc, &data);                    // 创建门描述符
-        native_write_idt_entry((gate_desc *)desc.address, X86_TRAP_VC, &idt_desc);
-    }
-
-    native_load_idt(&desc);  // lidt 指令加载
-}
-```
-
-**表的内容总结**：
-
-| 条件 | IDT 内容 | 说明 |
-|------|---------|------|
-| **默认情况**（大多数系统） | 32 个全零的 gate_desc 条目 | 所有条目都是无效门描述符 |
-| **启用 AMD SEV**（虚拟化环境） | 只有 `IDT[29]` (#VC 异常) 被填充 | 其他 31 个条目仍为 0 |
-| **任何情况** | 没有硬件中断门 | 因为此时中断已关闭（见下文） |
-
-**为什么几乎为空是安全的？**
-
-1. **中断已关闭**：早期启动阶段 `EFLAGS.IF = 0`，不会响应硬件中断
-2. **代码非常简单**：从 `startup_64_setup_gdt_idt()` 到 `idt_setup_early_handler()` 之间的代码很少，几乎不会触发异常
-3. **如果触发未处理的异常**：
-   - CPU 查找 `bringup_idt_table[vector]`
-   - 发现是全零（无效门描述符）
-   - 触发 **Double Fault (#DF)**
-   - #DF 也没有处理函数 → **Triple Fault** → CPU 重启
-4. **这是可接受的**：如果在这个简单阶段触发异常，说明有严重错误，重启是合理的
-
-**2. idt_table（运行时表，最终表）**
-
-定义在 `arch/x86/kernel/idt.c:173`：
-```c
-static gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
-```
-
-- **大小**：256 个条目（`IDT_ENTRIES`）
-- **使用范围**：从 `idt_setup_early_handler()` 开始，一直到内核运行结束
-- **完全替换** `bringup_idt_table`，而不是在其基础上添加
-
-#### 切换时机和逐步完善流程
-
-**完整的 IDT 演进时间线**：
-
-```
-阶段 0: 汇编启动阶段（head_64.S）
-    └─ startup_64_setup_gdt_idt() → startup_64_load_idt()
-       ├─ 加载 bringup_idt_table（临时表）
-       ├─ 只填充 #VC 向量（如果启用 AMD SEV）
-       └─ lidt → CPU 开始使用 bringup_idt_table
-       【bringup_idt_table 生效期：从此处到下一个 lidt】
-
-阶段 1: x86_64_start_kernel() → idt_setup_early_handler()
-    └─ idt_setup_early_handler()（idt.c:320-331）
-       ├─ 遍历 NUM_EXCEPTION_VECTORS（32 个异常向量）
-       ├─ 每个向量调用 set_intr_gate(i, early_idt_handler_array[i])
-       │       └─ 直接写入 idt_table[i]  ✨ 第一次写入 idt_table
-       ├─ load_idt(&idt_descr) → lidt
-       └─ 【切换点】从此处开始，bringup_idt_table 被废弃！
-       【idt_table 生效期：从此处开始，一直到内核运行结束】
-
-       填充内容：
-       - 所有 CPU 异常向量（0-31）→ early_idt_handler_array
-       - 作用：处理启动早期的异常（#PF, #DE, #GP 等）
-       - 限制：尚无 IST（中断栈），尚无硬件 IRQ 门，尚无 INT 0x80
-
-阶段 2: setup_arch() → idt_setup_early_traps()
-    └─ idt_setup_early_traps()
-       ├─ idt_setup_from_table(idt_table, early_idts, ...)
-       │       └─ 写入 early_idts[]：DB, BP, PF (x86_32), VE
-       ├─ load_idt(&idt_descr)
-       └─ 继续完善 idt_table（仍是同一个表）
-
-阶段 3: trap_init() → idt_setup_traps()
-    └─ idt_setup_traps()
-       ├─ idt_setup_from_table(idt_table, def_idts, ...)
-       │       └─ 写入 def_idts[]：DE, NMI, BR, UD, NM, DF, GP, AC, MF, MC 等
-       │       └─ 这次会设置 IST（中断栈）：NMI, DF, DB, MC, VC 等使用独立栈
-       └─ 继续完善 idt_table（仍是同一个表）
-
-阶段 4: init_IRQ() → idt_setup_apic_and_irq_gates()
-    └─ idt_setup_apic_and_irq_gates()
-       ├─ idt_setup_from_table(idt_table, apic_idts, ...)
-       │       └─ 写入 apic_idts[]：RESCHEDULE, CALL_FUNCTION, LOCAL_TIMER 等
-       ├─ 填充外部中断向量（FIRST_EXTERNAL_VECTOR - FIRST_SYSTEM_VECTOR）
-       │       └─ for_each_clear_bit: set_intr_gate(i, irq_entries_start + ...)
-       ├─ 填充系统中断向量（FIRST_SYSTEM_VECTOR - NR_VECTORS）
-       ├─ idt_map_in_cea() → 映射 IDT 到 CPU entry area（只读）
-       ├─ load_idt(&idt_descr)
-       ├─ set_memory_ro(&idt_table, 1) → 设置 IDT 表为只读
-       └─ idt_setup_done = true  ✨ IDT 完全就绪！
-
-       填充内容：
-       - APIC 中断：IPI、timer、spurious 等
-       - 外部硬件 IRQ：0x20-0x2F（8259A PIC）等
-       - 所有剩余向量
-       - 【此后 CPU 拥有完整的中断处理能力】
-
-阶段 5（可选）: idt_setup_ia32_syscall_gate()
-    └─ 如果启用 CONFIG_IA32_EMULATION
-       └─ 填充 INT 0x80 → entry_INT80_32
-```
-
-#### 关键代码证据
-
-**idt_setup_from_table**（`idt.c:194-204`）每次都是**直接写入** `idt_table`：
-```c
-static __init void
-idt_setup_from_table(gate_desc *idt, const struct idt_data *t, int size, bool sys)
-{
-    gate_desc desc;
-    for (; size > 0; t++, size--) {
-        idt_init_desc(&desc, t);
-        write_idt_entry(idt, t->vector, &desc);  // 直接写入指定向量
-        if (sys)
-            set_bit(t->vector, system_vectors);
-    }
-}
-```
-
-每次调用都传入 `idt_table` 作为目标：
-- `idt_setup_early_handler()` → `set_intr_gate()` → 写入 `idt_table`
-- `idt_setup_early_traps()` → `idt_setup_from_table(idt_table, early_idts, ...)`
-- `idt_setup_traps()` → `idt_setup_from_table(idt_table, def_idts, ...)`
-- `idt_setup_apic_and_irq_gates()` → `idt_setup_from_table(idt_table, apic_idts, ...)`
-
-#### 总结
-
-**答案**：`bringup_idt_table` **会被完全替换**（准确说是被 `idt_table` 取代），后续所有的 IDT 设置都是在新的 `idt_table` 基础上逐步**填充新的服务**。
-
-| 对比项 | bringup_idt_table | idt_table |
-|--------|-------------------|-----------|
-| **定义位置** | `arch/x86/boot/startup/gdt_idt.c:24` | `arch/x86/kernel/idt.c:173` |
-| **大小** | 32 个条目（`NUM_EXCEPTION_VECTORS`） | 256 个条目（`IDT_ENTRIES`） |
-| **生效期** | 从 `startup_64_setup_gdt_idt()` 到 `idt_setup_early_handler()` | 从 `idt_setup_early_handler()` 到内核运行结束 |
-| **内容** | 几乎为空（只有可选的 #VC） | 逐步填充所有中断/异常向量 |
-| **用途** | 临时占位，避免 CPU 访问无效 IDT | 运行时中断处理 |
-| **是否可被 instrumentation** | 否（设计目标） | 是（在 idt.c 中，可被 KASAN/tracing） |
-| **内存关系** | 完全独立的内存区域 | 完全独立的内存区域 |
-
-**设计原因**：
-- 避免早期启动代码被 tracing/KASAN instrumentation 干扰
-- 早期阶段 CPU 状态不完整（TSS 未设置，无法使用 IST）
-- 临时表设计简单，只需应对极少数早期异常
-- 正式表功能完整，支持所有运行时需求
-
-### 内核启动过程的中断状态
-
-**核心结论：内核在早期启动阶段一直处于关中断状态，直到 `local_irq_enable()` 才第一次开启中断。**
-
-#### 中断关闭的完整时间线
-
-```
-【压缩内核 startup_32】(arch/x86/boot/compressed/head_64.S)
-    ├─ cli (90行)  ← 第一次关中断 (EFLAGS.IF = 0)
-    └─ 切换到 64 位长模式
-
-【压缩内核 startup_64】(arch/x86/boot/compressed/head_64.S)
-    ├─ cli (291行) ← 再次确保关中断
-    ├─ 重定位拷贝
-    ├─ 解压内核
-    └─ 跳转到主内核 startup_64
-
-【主内核 startup_64】(arch/x86/kernel/head_64.S)
-    ├─ pushq $0; popfq (408-410行) ← 清零 RFLAGS（包括 IF 位）
-    ├─ startup_64_setup_gdt_idt()  ← 加载 bringup_idt_table
-    │       └─ 此时：中断关闭 + IDT 几乎为空 = 双重保护
-    └─ 进入 x86_64_start_kernel()
-
-【x86_64_start_kernel()】(arch/x86/kernel/head64.c)
-    ├─ 仍处于关中断状态
-    ├─ idt_setup_early_handler() ← 切换到 idt_table（填充早期异常向量）
-    │       └─ 此时：中断关闭 + IDT 有异常处理 = 可处理同步异常
-    └─ start_kernel()
-
-【start_kernel()】(init/main.c)
-    ├─ setup_arch()       ← 中断仍关闭
-    ├─ trap_init()        ← 中断仍关闭，设置 SYSCALL/SYSENTER
-    ├─ init_IRQ()         ← 中断仍关闭，完善 IDT、初始化 PIC/APIC
-    │       └─ idt_setup_apic_and_irq_gates() ← IDT 完全就绪
-    └─ local_irq_enable() ← ✨ 第一次开中断！(main.c:1071)
-            asm volatile("sti": : :"memory");
-```
-
-#### EFLAGS.IF 位的状态跟踪
-
-| 阶段 | IF 位 | 代码位置 | 说明 |
-|------|-------|---------|------|
-| GRUB 跳转前 | 0 | GRUB relocator | GRUB 在跳转前执行 `cli` |
-| startup_32 | 0 | compressed/head_64.S:90 | `cli` 指令 |
-| startup_64（压缩） | 0 | compressed/head_64.S:291 | `cli` 指令 |
-| startup_64（主内核） | 0 | kernel/head_64.S:408-410 | `pushq $0; popfq` |
-| x86_64_start_kernel | 0 | head64.c | 继承 |
-| start_kernel 前期 | 0 | main.c | 继承 |
-| setup_arch() | 0 | setup.c | 仍关闭 |
-| trap_init() | 0 | traps.c | 仍关闭 |
-| init_IRQ() | 0 | irqinit.c | 仍关闭 |
-| **local_irq_enable()** | **1** | main.c:1071 | ✨ **第一次开启** |
-
-#### 为什么要关中断这么久？
-
-**原因 1：硬件中断处理机制未就绪**
-
-- **PIC/APIC 未初始化**：
-  - 8259A PIC 的 ICW（Initialization Command Words）还没有设置
-  - Local APIC 还没有使能和配置
-  - 中断向量映射还没有建立（PIC 默认映射 0x08-0x0F 与 CPU 异常冲突）
-
-- **IDT 不完整**：
-  - `bringup_idt_table` 几乎为空，无法处理硬件中断
-  - 早期的 `idt_table` 只有异常向量，没有硬件 IRQ 门
-  - 直到 `idt_setup_apic_and_irq_gates()` 才填充硬件中断向量
-
-- **没有中断栈**：
-  - IST（Interrupt Stack Table）还没有设置
-  - TSS（Task State Segment）还没有初始化
-  - 中断处理可能栈溢出
-
-**原因 2：CPU 状态不稳定**
-
-- **GDT 可能在切换**：`startup_64_setup_gdt_idt()` 正在加载新的 GDT
-- **页表在建立中**：`init_mem_mapping()` 正在建立完整页表
-- **栈在切换**：从临时栈切换到内核栈
-- **如果此时发生中断**：可能访问无效的段、页表或栈，导致 Triple Fault
-
-**原因 3：内存管理未就绪**
-
-- **memblock 未初始化**：`setup_arch()` 才建立 memblock
-- **buddy 系统未初始化**：`mm_core_init()` 才建立伙伴系统
-- **如果中断处理需要分配内存**：会导致系统崩溃
-
-**原因 4：并发安全**
-
-- 早期初始化代码**不是并发安全的**
-- 没有锁机制保护
-- 如果中断打断，可能导致数据竞争
-- 例如：全局变量正在初始化，中断处理函数读取到不一致的值
-
-**原因 5：调试和可预测性**
-
-- 关中断保证了启动过程的**确定性**
-- 不会被异步中断打断，便于调试
-- 启动顺序完全可控
-
-#### 中断关闭期间可能发生的异常
-
-虽然硬件中断被关闭，但以下**同步异常**仍可能发生（通过 IDT 处理）：
-
-| 异常类型 | 向量 | 何时可能发生 | 处理方式 |
-|---------|------|-------------|---------|
-| **#PF (Page Fault)** | 14 | `init_mem_mapping()` 建立页表时 | `idt_setup_early_handler()` 后有处理函数 |
-| **#GP (General Protection)** | 13 | 访问无效段或特权级错误 | `idt_setup_early_handler()` 后有处理函数 |
-| **#UD (Invalid Opcode)** | 6 | CPU 不支持的指令 | `idt_setup_early_handler()` 后有处理函数 |
-| **#DF (Double Fault)** | 8 | 异常处理时又发生异常 | `idt_setup_traps()` 后有处理函数 + IST |
-| **#VC (VMM Communication)** | 29 | SEV-SNP 虚拟化环境 | `bringup_idt_table` 中就有处理函数 |
-
-**关键点**：
-- 这些都是**同步异常**，由当前执行的指令触发
-- 不受 `EFLAGS.IF` 影响
-- 可以通过 IDT 处理（如果有处理函数）
-- 如果 IDT 中没有处理函数 → Double Fault → Triple Fault → 重启
-
-#### 何时真正开始响应硬件中断？
-
-```c
-// init/main.c
-asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protector
-void start_kernel(void)
-{
-    ...
-    trap_init();               // 设置完整的 IDT + SYSCALL
-    init_IRQ();                // 初始化 PIC/APIC + 填充硬件中断向量
-    ...
-    /* Do the rest non-__init'ed, we're now alive */
-    local_irq_enable();        // ← main.c:1071，第一次开中断 ✨
-    ...
-    rest_init();               // 创建 init 和 kthreadd 进程
-}
-```
-
-**`local_irq_enable()` 的实现**：
-
-```c
-// include/linux/irqflags.h
-#define local_irq_enable() \
-    do { \
-        asm volatile("sti": : :"memory"); \
-    } while (0)
-```
-
-**开中断后的状态**：
-- ✅ IDT 完全就绪（所有 256 个向量）
-- ✅ PIC/APIC 已初始化
-- ✅ TSS 和 IST 已设置
-- ✅ 内存管理系统就绪
-- ✅ 可以安全响应硬件中断（时钟、键盘、网卡等）
-
-#### 总结：双重保护机制
-
-内核启动早期采用**双重保护**策略：
-
-1. **关中断（EFLAGS.IF = 0）**：
-   - 防止硬件中断打断
-   - 确保启动流程的确定性
-
-2. **空 IDT（bringup_idt_table 几乎为空）**：
-   - 即使误开中断或发生异常
-   - 也会因为无效门描述符导致 Triple Fault 重启
-   - 而不是进入未知状态
-
-这种设计确保了**启动过程的稳定性和可预测性**，只有在所有硬件和软件机制都就绪后，才开启中断，开始响应外部事件。
-
----
 
 ## 四、start_kernel() 流程概述
 
@@ -1506,265 +1176,60 @@ void start_kernel(void)
 
 **关键步骤**：`setup_arch(&command_line)`。此前仅有身份映射与 early 页表；**完整物理内存接管**在 setup_arch() 中：解析 e820/EFI、memblock、`init_mem_mapping()`、`paging_init()`。详见 [PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md](PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md)。
 
-### 2. trap_init() 与 syscall
 
-**cpu_init()** 在 **trap_init()** 中调用（非 setup_arch）。用户态 `syscall` 跳转到 entry_SYSCALL_64 → do_syscall_64 → sys_call_table[nr]。
+### 2. trap_init() 与系统调用初始化
 
-**调用层级：**
+**trap_init()** 在 start_kernel() 阶段 2 被调用，主要完成：
+1. 补全 IDT 异常门（idt_setup_traps()）
+2. 设置 IST 陷阱门（idt_setup_ist_traps()）
+3. **初始化系统调用入口**（cpu_init() → syscall_init()）
+4. 设置调试器门（idt_setup_debuggers()）
+
+**调用层级**：
 
 ```
 start_kernel()
-    └─ trap_init()（main.c:958 → traps.c:1561）  【内核接管 syscall】
-        └─ cpu_init()（cpu/common.c:2384）
-            └─ syscall_init()
-                └─ idt_syscall_init()（同文件:2198）
-                    └─ MSR_STAR、MSR_LSTAR(entry_SYSCALL_64)、MSR_SYSCALL_MASK 等
+    └─ trap_init()（arch/x86/kernel/traps.c:1680）
+        ├─ idt_setup_traps()（补全异常向量）
+        ├─ idt_setup_ist_traps()（设置 IST）
+        ├─ cpu_init()
+        │   └─ syscall_init()【内核接管 syscall】
+        │       ├─ wrmsr(MSR_STAR, ...)           // 段选择子
+        │       ├─ wrmsrl(MSR_LSTAR, ...)         // SYSCALL 入口（entry_SYSCALL_64）
+        │       ├─ wrmsrl(MSR_CSTAR, ...)         // 32位兼容入口
+        │       └─ wrmsrl(MSR_SYSCALL_MASK, ...)  // RFLAGS 掩码
+        └─ idt_setup_debuggers()
 ```
 
-**syscall_init()**：
+**系统调用的两种机制**：
 
-```c
-void syscall_init(void)
-{
-	wrmsr(MSR_STAR, 0, (__USER32_CS << 16) | __KERNEL_CS);
-	if (!cpu_feature_enabled(X86_FEATURE_FRED))
-		idt_syscall_init();
-}
+| 机制 | 指令 | 是否使用 IDT | 设置时机 | 性能 | 适用 |
+|------|------|-------------|---------|------|------|
+| **传统** | `INT 0x80` | ✅ 是（IDT[0x80]） | init_IRQ() | 慢 | 32位兼容 |
+| **现代** | `SYSCALL`/`SYSENTER` | ❌ 否（MSR） | trap_init() | 快 | 64位主流 |
+
+**关键区别**：
+- **INT 0x80**：软件中断，查询 IDT 表第 0x80 个条目，由 init_IRQ() 中的 idt_setup_ia32_syscall_gate() 设置
+- **SYSCALL**：专用 CPU 指令，通过 MSR 寄存器（MSR_LSTAR）配置入口地址，**完全绕过 IDT**
+- **MSR_LSTAR**：存储 entry_SYSCALL_64 的地址，用户态执行 `syscall` 指令时 CPU 直接跳转到此地址
+
+**流程**：
+```
+用户态程序
+    ↓ syscall 指令
+CPU 读取 MSR_LSTAR
+    ↓ 跳转
+entry_SYSCALL_64（arch/x86/entry/entry_64.S）
+    ↓ 保存 pt_regs
+do_syscall_64
+    ↓ 查表
+sys_call_table[nr]（系统调用表）
+    ↓ 执行
+具体系统调用（如 sys_read）
 ```
 
-**idt_syscall_init()**：
+> **详细内容**：完整的 syscall_init() 代码、INT 0x80 vs SYSCALL/SYSENTER 详细对比、MSR 寄存器配置、entry_SYSCALL_64 入口机制、32位兼容机制，请参见 **[系统调用初始化详解](LINUX_KERNEL_SYSCALL_INIT.md)**。
 
-```c
-static inline void idt_syscall_init(void)
-{
-	wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);  // 64 位 syscall 入口
-	if (ia32_enabled()) {
-		wrmsrq_cstar((unsigned long)entry_SYSCALL_compat);
-		wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)__KERNEL_CS);
-		wrmsrq_safe(MSR_IA32_SYSENTER_ESP, ...);
-		wrmsrq_safe(MSR_IA32_SYSENTER_EIP, (u64)entry_SYSENTER_compat);
-	}
-	wrmsrq(MSR_SYSCALL_MASK, X86_EFLAGS_CF|...|X86_EFLAGS_ID);  // syscall 时清除的 RFLAGS
-}
-```
-
-entry_SYSCALL_64 在 `arch/x86/entry/entry_64.S`，保存 pt_regs 后调用 do_syscall_64；系统调用表在 `arch/x86/entry/syscall_64.c`（sys_call_table）。
-
-#### 系统调用的两种机制：IDT (INT 0x80) vs MSR (SYSCALL/SYSENTER)
-
-Linux 内核支持**两种系统调用机制**，它们的设置阶段和实现方式完全不同：
-
-**1. 基于 IDT 的传统机制：INT 0x80（32位兼容）**
-
-| 特性 | 说明 |
-|------|------|
-| **原理** | 软件中断，查询 IDT 表第 0x80 个条目 |
-| **设置时机** | `init_IRQ()` → `idt_setup_ia32_syscall_gate()`（IDT 演进阶段 5） |
-| **设置位置** | `arch/x86/kernel/idt.c` |
-| **触发方式** | `int $0x80` 指令 |
-| **入口函数** | `entry_INT80_32`（`arch/x86/entry/entry_32.S` 或 `entry_64.S`） |
-| **系统调用号** | %eax |
-| **参数传递** | %ebx, %ecx, %edx, %esi, %edi, %ebp（32位寄存器） |
-| **系统调用表** | `ia32_sys_call_table`（兼容表） |
-| **性能** | 慢（需要查 IDT、特权级切换、栈切换） |
-| **适用范围** | 32位程序（CONFIG_IA32_EMULATION），64位程序也可用但不推荐 |
-
-**设置代码**（在 `init_IRQ()` 之后）：
-```c
-// arch/x86/kernel/idt.c
-#ifdef CONFIG_IA32_EMULATION
-static inline void idt_setup_ia32_syscall_gate(void) {
-    idt_setup_from_table(idt_table, &ia32_syscall, 1, true);
-    // ia32_syscall = {.vector = IA32_SYSCALL_VECTOR (0x80), .addr = entry_INT80_32}
-}
-#endif
-```
-
-**2. 基于 MSR 的快速机制：SYSCALL/SYSENTER（现代方式）**
-
-| 特性 | SYSCALL（AMD/Intel 64位） | SYSENTER（Intel 32位） |
-|------|---------------------------|------------------------|
-| **原理** | 专用指令，直接从 MSR 读取入口地址 | 专用指令，从 MSR 读取入口 |
-| **设置时机** | `trap_init()` → `cpu_init()` → `syscall_init()`（早于 `init_IRQ()`） |
-| **设置位置** | `arch/x86/kernel/cpu/common.c` |
-| **MSR 寄存器** | MSR_LSTAR (入口地址)<br>MSR_STAR (段选择子)<br>MSR_SYSCALL_MASK (RFLAGS 掩码) | MSR_IA32_SYSENTER_CS<br>MSR_IA32_SYSENTER_ESP<br>MSR_IA32_SYSENTER_EIP |
-| **触发方式** | `syscall` 指令 | `sysenter` 指令 |
-| **入口函数** | `entry_SYSCALL_64` | `entry_SYSENTER_compat` |
-| **系统调用号** | %rax | %eax |
-| **参数传递** | %rdi, %rsi, %rdx, %r10, %r8, %r9（64位寄存器） | %ebx, %ecx, %edx, %esi, %edi, %ebp |
-| **系统调用表** | `sys_call_table`（64位原生表） | `ia32_sys_call_table` |
-| **性能** | 快（专用硬件支持，无需查表） | 快 |
-| **适用范围** | 64位程序（主要使用） | 32位程序（Intel CPU） |
-
-**设置代码**（在 `trap_init()` 中）：
-```c
-// arch/x86/kernel/cpu/common.c:2234
-void syscall_init(void)
-{
-    // 设置段选择子：用户态 CS/SS、内核态 CS
-    wrmsr(MSR_STAR, 0, (__USER32_CS << 16) | __KERNEL_CS);
-
-    if (!cpu_feature_enabled(X86_FEATURE_FRED))
-        idt_syscall_init();  // 设置 SYSCALL/SYSENTER 入口
-}
-
-static inline void idt_syscall_init(void)
-{
-    // 64位 SYSCALL 入口
-    wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);
-
-    // 32位兼容模式入口（如果启用）
-    if (ia32_enabled()) {
-        wrmsrq_cstar((unsigned long)entry_SYSCALL_compat);  // CSTAR: 32位 syscall
-        wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)__KERNEL_CS);
-        wrmsrq_safe(MSR_IA32_SYSENTER_ESP, ...);
-        wrmsrq_safe(MSR_IA32_SYSENTER_EIP, (u64)entry_SYSENTER_compat);
-    }
-
-    // syscall 指令执行时清除的 RFLAGS 位
-    wrmsrq(MSR_SYSCALL_MASK, X86_EFLAGS_TF|X86_EFLAGS_DF|...|X86_EFLAGS_AC);
-}
-```
-
-#### 设置阶段的时间线对比
-
-```
-内核启动流程中的系统调用机制设置：
-
-start_kernel()
-    │
-    ├─ 阶段 2a: trap_init()  ← 第一阶段
-    │       └─ cpu_init()
-    │           └─ syscall_init()
-    │               └─ idt_syscall_init()
-    │                   ├─ wrmsr(MSR_STAR) → 设置段选择子
-    │                   ├─ wrmsr(MSR_LSTAR, entry_SYSCALL_64) ✨ 64位 syscall 就绪
-    │                   ├─ wrmsr(MSR_CSTAR, entry_SYSCALL_compat) → 32位 syscall
-    │                   ├─ wrmsr(MSR_IA32_SYSENTER_EIP, entry_SYSENTER_compat) ✨ sysenter 就绪
-    │                   └─ wrmsr(MSR_SYSCALL_MASK) → RFLAGS 掩码
-    │       【此时 SYSCALL/SYSENTER 机制已可用，但 INT 0x80 尚未就绪】
-    │
-    ├─ 阶段 2b: early_irq_init()
-    │
-    ├─ 阶段 2c: init_IRQ()  ← 第二阶段
-    │       ├─ idt_setup_traps() → 补全异常向量
-    │       ├─ init_8259A() → 重编程 PIC
-    │       ├─ idt_setup_apic_and_irq_gates() → 设置 APIC/IRQ 门
-    │       └─ idt_setup_ia32_syscall_gate()
-    │           └─ idt_table[0x80] = entry_INT80_32 ✨ INT 0x80 就绪
-    │       【此时 INT 0x80 机制也可用，所有系统调用机制完全就绪】
-    │
-    └─ 阶段 2d: local_irq_enable()
-```
-
-#### 关键区别与设计考虑
-
-**为什么需要两套机制？**
-
-1. **性能差异**：
-   - `INT 0x80`：需要查 IDT 表、特权级检查、栈切换，约 100-300 CPU 周期
-   - `SYSCALL`：硬件优化路径，约 60-100 CPU 周期
-   - 现代程序优先使用 SYSCALL/SYSENTER
-
-2. **兼容性需求**：
-   - `INT 0x80`：古老但通用，所有 x86 CPU 都支持
-   - `SYSCALL`：AMD64/Intel 64位特有
-   - `SYSENTER`：Intel Pentium II+ 才有
-   - 老旧 32位程序仍依赖 `INT 0x80`
-
-3. **设置时机不同**：
-   - **MSR 机制（SYSCALL/SYSENTER）**：在 `trap_init()` 中设置，**早于** IDT 的完善
-   - **IDT 机制（INT 0x80）**：在 `init_IRQ()` 中设置，作为 IDT 表的一部分
-   - 原因：MSR 写入简单（几条 wrmsr），IDT 需要完整的中断框架就绪
-
-4. **是否依赖 IDT**：
-   - `SYSCALL/SYSENTER`：**不依赖 IDT**，直接从 MSR 跳转
-   - `INT 0x80`：**依赖 IDT**，必须等 IDT 表完善后才能使用
-
-#### 系统调用表的统一与分离
-
-虽然有多种调用机制，但**系统调用表（syscall table）是统一的**：
-
-```c
-// arch/x86/entry/syscall_64.c
-asmlinkage const sys_call_ptr_t sys_call_table[] = {
-    [0] = __x64_sys_read,
-    [1] = __x64_sys_write,
-    [2] = __x64_sys_open,
-    // ... 所有系统调用
-};
-
-// arch/x86/entry/syscall_32.c (32位兼容表)
-__visible const sys_call_ptr_t ia32_sys_call_table[] = {
-    [0] = __ia32_sys_restart_syscall,
-    [1] = __ia32_sys_exit,
-    // ... 32位系统调用
-};
-```
-
-**调用路径**：
-```
-64位程序：
-    syscall → entry_SYSCALL_64 → do_syscall_64 → sys_call_table[rax]
-
-32位程序（Intel CPU）：
-    sysenter → entry_SYSENTER_compat → do_SYSENTER_32 → ia32_sys_call_table[eax]
-
-32位程序（所有 CPU，兼容路径）：
-    int $0x80 → entry_INT80_32 → do_int80_syscall_32 → ia32_sys_call_table[eax]
-```
-
-#### 实际运行时如何选择？
-
-**用户空间库（glibc/musl）的选择逻辑**：
-
-```c
-// glibc 中的 syscall 封装（简化）
-static inline long syscall(long number, ...)
-{
-#ifdef __x86_64__
-    // 64位程序：优先使用 SYSCALL
-    asm volatile("syscall" : ...);
-#else
-    // 32位程序
-    #if defined(__i386__) && defined(USE_VSYSCALL)
-        // 现代 32位：尝试 sysenter（通过 vDSO）
-        return __kernel_vsyscall(...);
-    #else
-        // 传统 32位：回退到 int $0x80
-        asm volatile("int $0x80" : ...);
-    #endif
-#endif
-}
-```
-
-#### IDT 与系统调用机制的关联总结
-
-| 对比维度 | IDT 表（中断描述符表） | 系统调用机制 |
-|---------|----------------------|-------------|
-| **主要用途** | 处理硬件中断和 CPU 异常 | 用户态进入内核态的接口 |
-| **设置阶段** | 5 个阶段逐步完善（见第三节） | 2 个阶段：trap_init() 设置 MSR，init_IRQ() 设置 INT 0x80 |
-| **INT 0x80 的关系** | INT 0x80 是 IDT[0x80] 的一个条目 | INT 0x80 是系统调用的一种实现方式 |
-| **SYSCALL 的关系** | 完全不使用 IDT | SYSCALL 通过 MSR 实现，绕过 IDT |
-| **演进时间线** | bringup_idt_table → idt_table（5 阶段） | MSR 机制先就绪 → IDT 机制后就绪 |
-| **依赖关系** | 不依赖系统调用机制 | INT 0x80 依赖 IDT 表完善 |
-
-**关键洞察**：
-- **trap_init() 阶段**：设置 MSR，让 SYSCALL/SYSENTER 可用（不依赖 IDT）
-- **init_IRQ() 阶段**：设置 IDT[0x80]，让 INT 0x80 可用（依赖 IDT 完善）
-- 两者相互独立，但共同完成系统调用机制的初始化
-- 现代程序主要使用 SYSCALL，INT 0x80 主要用于兼容
-
-**与 IDT 内容的关系**：
-- **IDT 表包含三类条目**：
-  1. **CPU 异常**（0-31）：#DE, #PF, #GP 等 → idt_setup_early_handler() → idt_setup_traps()
-  2. **硬件中断**（32+）：时钟、键盘、网卡等 IRQ → idt_setup_apic_and_irq_gates()
-  3. **软件中断**（特定向量）：INT 0x80（32位系统调用兼容）→ idt_setup_ia32_syscall_gate()
-
-- **SYSCALL/SYSENTER 不在 IDT 中**，它们通过 MSR 寄存器配置：
-  - MSR_LSTAR：SYSCALL 入口地址（entry_SYSCALL_64）
-  - MSR_STAR：段选择子（内核态 CS / 用户态 CS）
-  - MSR_SYSCALL_MASK：RFLAGS 掩码（syscall 时清除的标志位）
 
 ### 3. init_IRQ() 与接管 INT 服务的过程
 
@@ -1956,6 +1421,13 @@ int kthreadd(void *unused)
 
 - **[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md)** - near/long jump 与 long mode 下 CS 的作用
 - **[POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)** - 位置无关代码（`__pi_` 前缀）实现机制
+
+### 中断与系统调用
+
+- **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解（两个 IDT 表、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态）
+- **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - 系统调用初始化详解（trap_init、syscall_init、INT 0x80 vs SYSCALL/SYSENTER 对比、MSR 配置）
+- **[LINUX_INTERRUPT_HANDLING.md](LINUX_INTERRUPT_HANDLING.md)** - Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue）
+- **[BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)** - BIOS IVT 与 Kernel IDT 对比
 
 ### 重定位与解压专题
 
