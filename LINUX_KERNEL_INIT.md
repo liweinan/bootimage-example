@@ -705,7 +705,8 @@ SYM_CODE_END(startup_64)
 
 > **相关文档**：
 > - [POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)：详细分析了 `__pi_` 前缀的含义、位置无关代码编译机制（-fPIC、objcopy --prefix-symbols）、RIP 相对寻址、SYM_PIC_ALIAS 宏的实现原理，以及 `startup_64_setup_gdt_idt()` 如何通过 `rip_rel_ptr()` 访问符号
-> - [GDT 详解：从保护模式到长模式](GDT_DETAILED_GUIDE.md)：GDT 的完整演化过程（GRUB GDT → 压缩内核 GDT → 主内核 GDT → per-CPU GDT）、段描述符结构详解、长模式下的作用
+> - [GDT 详解：从保护模式到长模式](GDT_DETAILED_GUIDE.md)：GDT 的完整演化过程（GRUB GDT → 压缩内核 GDT → 主内核 GDT → per-CPU GDT）、段描述符结构详解、长模式下的作用、GDT Identity Mapping 平滑过渡机制
+> - [x86-64 多级页表设计详解](PAGE_TABLE_DESIGN.md)：页表建立过程、x86-64 硬件要求、多级页表设计原理、MMU 硬件遍历机制
 > - [IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md)：两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
 
 **为何说这里是"早期/初步"的 GDT/IDT**：
@@ -1245,7 +1246,8 @@ int kthreadd(void *unused)
 ### 内存管理
 
 - **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)** - Linux 内核分页机制完整指南 - 理论基础、Phase 1 早期页表、Phase 2 完整页表（E820/memblock/zone）
-- **[GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)** - GDT 详解：从保护模式到长模式 - GDT 演化（4阶段）、段描述符详解、与分页的协作
+- **[GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)** - GDT 详解：从保护模式到长模式 - GDT 演化（4阶段）、段描述符详解、与分页的协作、GDT Identity Mapping 机制
+- **[PAGE_TABLE_DESIGN.md](PAGE_TABLE_DESIGN.md)** - x86-64 多级页表设计详解 - 页表建立过程、硬件要求、多级设计原理、MMU 遍历伪代码、实战计算示例
 - **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解 - 伙伴系统原理与实现、Slab/SLUB 分配器、从 memblock 到 buddy 的转换
 
 ### 架构细节

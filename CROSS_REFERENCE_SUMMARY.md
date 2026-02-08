@@ -1,6 +1,35 @@
 # 文档交叉引用总结
 
-## 最新更新：内存管理文档重组（2026-02）
+## 最新更新（2026-02-08）
+
+### 新增专题文档与内容增强
+
+#### PAGE_TABLE_DESIGN.md（新建）
+- **新建专题文档**：x86-64 多级页表设计详解
+- **新增内容**：
+  - 实战计算：映射 1MB 区域需要多少页表项（4KB 页 vs 4MB 页对比）
+  - MMU 硬件页表遍历伪代码（walk_virtual_address 完整实现）
+  - 包含五级页表变体和 TLB 优化说明
+- **引用位置**：README.md、LINUX_PAGING_COMPLETE_GUIDE.md、LINUX_KERNEL_INIT.md、GDT_DETAILED_GUIDE.md
+
+#### GDT_DETAILED_GUIDE.md（内容增强）
+- **新增 4.4 节**：GDT Identity Mapping：启动时的平滑过渡机制
+  - GDT Identity Mapping 核心概念（段基址 = 0）
+  - 为什么需要（实模式→保护模式平滑过渡）
+  - 实际例子：MBR 引导扇区（0x7C00）
+  - GDT Identity Mapping vs Paging Identity Mapping 区分
+  - 两层 Identity Mapping 协作示例（三阶段演示）
+- **相关提交**：commit 6749192
+
+#### 更新的文档引用
+- **README.md**：添加 PAGE_TABLE_DESIGN.md 到"深入专题"，更新 GDT_DETAILED_GUIDE.md 描述
+- **LINUX_KERNEL_INIT.md**：添加 PAGE_TABLE_DESIGN.md 引用，更新 GDT_DETAILED_GUIDE.md 描述
+- **LINUX_PAGING_COMPLETE_GUIDE.md**：添加 PAGE_TABLE_DESIGN.md 到相关专题，更新 GDT_DETAILED_GUIDE.md 描述
+- **CROSS_REFERENCE_SUMMARY.md**：更新文档引用关系图，添加 PAGE_TABLE_DESIGN.md 节点
+
+---
+
+## 内存管理文档重组（2026-02）
 
 ### 文档合并与专题提取
 
@@ -42,18 +71,46 @@
 - 长模式下 GDT 的简化与作用
 - GDT 与分页的协作关系
 - Linux 内核启动过程中的 GDT 演化（GRUB → compressed kernel → main kernel → per-CPU）
+- **新增**：GDT Identity Mapping 平滑过渡机制（实模式→保护模式）
 
 **被引用位置**：
 - `README.md` - "深入专题"部分
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - 第一部分理论基础（第 93 行）
-- `LINUX_KERNEL_INIT.md` - "相关文档 > 内存管理"章节
+- `LINUX_PAGING_COMPLETE_GUIDE.md` - 第一部分理论基础（第 13 行、93 行）
+- `LINUX_KERNEL_INIT.md` - "相关文档 > 内存管理"章节（第 708、1249 行）
+- `PAGE_TABLE_DESIGN.md` - 相关文档引用（第 20 行）
 
 **引用其他文档**：
 - `LINUX_PAGING_COMPLETE_GUIDE.md` - 分页主文档
+- `PAGE_TABLE_DESIGN.md` - 页表详细设计
 - `LINUX_KERNEL_INIT.md` - 启动流程
 - `X86_NEAR_VS_LONG_JUMP.md` - 长模式跳转
 
-#### 3. BUDDY_ALLOCATOR_GUIDE.md（专题提取）
+#### 3. PAGE_TABLE_DESIGN.md（专题提取，2026-02 新增）
+**主题**：x86-64 多级页表设计详解
+
+**提取来源**：从 GDT_DETAILED_GUIDE.md 和相关讨论中提取页表设计细节
+
+**核心内容**：
+- 页表的建立过程和时间线（代码级实现）
+- 阶段 2-3 的分页目的与 x86-64 硬件要求
+- 多级页表设计原理与内存开销对比（512GB vs 68KB）
+- **新增**：实战计算示例（映射 1MB 区域需要多少页表项）
+- **新增**：MMU 硬件页表遍历伪代码（walk_virtual_address）
+- 书籍目录类比：直观理解多级页表
+- 页表的动态管理机制（读取 vs 修改）
+
+**被引用位置**：
+- `README.md` - "深入专题"部分
+- `LINUX_PAGING_COMPLETE_GUIDE.md` - 相关专题文档（第 14 行）
+- `LINUX_KERNEL_INIT.md` - "相关文档 > 内存管理"章节（第 708、1249 行）
+- `GDT_DETAILED_GUIDE.md` - 相关文档引用（第 19、151 行）
+
+**引用其他文档**：
+- `GDT_DETAILED_GUIDE.md` - GDT 与页表的协作关系
+- `LINUX_PAGING_COMPLETE_GUIDE.md` - 分页机制完整演化
+- `LINUX_KERNEL_INIT.md` - 内核启动流程
+
+#### 4. BUDDY_ALLOCATOR_GUIDE.md（专题提取）
 **主题**：伙伴系统与 Slab 分配器详解
 
 **提取来源**：从 LINUX_PAGING_COMPLETE_GUIDE 中提取内存分配器相关详细内容
@@ -85,9 +142,13 @@
 
 ```
 LINUX_PAGING_COMPLETE_GUIDE.md（核心指南）
-    ├─→ GDT_DETAILED_GUIDE.md（深入专题：GDT 演化）
-    │   └─→ LINUX_KERNEL_INIT.md（启动流程）
+    ├─→ GDT_DETAILED_GUIDE.md（深入专题：GDT 演化与 Identity Mapping）
+    │   ├─→ PAGE_TABLE_DESIGN.md（深入专题：页表设计与 MMU）
+    │   ├─→ LINUX_KERNEL_INIT.md（启动流程）
     │   └─→ X86_NEAR_VS_LONG_JUMP.md（跳转指令）
+    ├─→ PAGE_TABLE_DESIGN.md（深入专题：多级页表设计）
+    │   ├─→ GDT_DETAILED_GUIDE.md（GDT 与页表协作）
+    │   └─→ LINUX_PAGING_COMPLETE_GUIDE.md（分页机制演化）
     ├─→ BUDDY_ALLOCATOR_GUIDE.md（深入专题：内存分配器）
     ├─→ E820_MEMORY_MAP.md（子文档：E820 表）
     ├─→ SEABIOS_E820_CONSTRUCTION.md（子文档：BIOS 构建）

@@ -10,7 +10,8 @@
 - **第三部分：Phase 2 - 完整页表建立** - setup_arch() 中的 E820、memblock、init_mem_mapping、zone 初始化
 
 **相关专题文档**（深入细节）：
-- [GDT 详解：从保护模式到长模式](GDT_DETAILED_GUIDE.md) - GDT 的演化与作用
+- [GDT 详解：从保护模式到长模式](GDT_DETAILED_GUIDE.md) - GDT 的演化与作用、GDT Identity Mapping 机制
+- [x86-64 多级页表设计详解](PAGE_TABLE_DESIGN.md) - 页表建立过程、多级设计原理、MMU 硬件遍历、实战计算
 - [伙伴系统与 Slab 分配器详解](BUDDY_ALLOCATOR_GUIDE.md) - 物理页框和小对象分配
 
 **相关子文档**（技术细节）：
@@ -1193,7 +1194,8 @@ Linux 内核
 ### 核心相关文档
 
 - [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) - Linux 内核完整启动流程（包含 startup_64 和 start_kernel）
-- [GDT 详解：从保护模式到长模式](GDT_DETAILED_GUIDE.md) - GDT 的演化与作用
+- [GDT 详解：从保护模式到长模式](GDT_DETAILED_GUIDE.md) - GDT 的演化与作用、GDT Identity Mapping 平滑过渡机制
+- [x86-64 多级页表设计详解](PAGE_TABLE_DESIGN.md) - 页表建立过程、多级设计原理、MMU 硬件遍历伪代码、实战计算示例
 - [伙伴系统与 Slab 分配器详解](BUDDY_ALLOCATOR_GUIDE.md) - 物理页框和小对象分配
 
 ### 子文档（技术细节）

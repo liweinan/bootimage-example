@@ -204,6 +204,13 @@ DISPLAY=:1 make run-gui
   - GDT 演化（GRUB → Compressed Kernel → Main Kernel → per-CPU）
   - 段描述符结构详解（二进制拆解、字段含义）
   - 长模式下的作用与分页协作
+  - GDT Identity Mapping：启动时平滑过渡机制（实模式→保护模式）
+- **[PAGE_TABLE_DESIGN.md](PAGE_TABLE_DESIGN.md)** - x86-64 多级页表设计详解
+  - 页表建立过程与时间线（代码级实现）
+  - 阶段 2-3 分页目的与 x86-64 硬件要求
+  - 多级页表设计原理与内存开销对比（512GB vs 68KB）
+  - MMU 硬件页表遍历伪代码（walk_virtual_address）
+  - 书籍目录类比与动态管理机制
 - **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解
   - 伙伴系统原理、算法与实现
   - Slab/SLUB 分配器设计与 per-CPU 缓存
