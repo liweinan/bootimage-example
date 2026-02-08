@@ -1029,7 +1029,7 @@ ptr = kmalloc(size, GFP_KERNEL | GFP_DMA32);
 
 ### 核心文档
 
-- **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)** - 分页机制与物理内存管理的关系
+- **[Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md)** - 分页机制与物理内存管理的关系
 - **[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)** - 内核启动流程中的内存管理初始化
 
 ### 源码参考

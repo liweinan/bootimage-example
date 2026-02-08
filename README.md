@@ -194,14 +194,20 @@ DISPLAY=:1 make run-gui
 ### 内存管理文档
 
 #### 核心指南
-- **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)** - Linux 内核分页机制完整指南：从理论到实践
+- **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)** - Linux 内核分页机制完整指南
   - 第一部分：理论基础（Flat Model、GDT、MMU、页表抽象）
   - 第二部分：Phase 1 - 早期页表（compressed kernel 身份映射）
   - 第三部分：Phase 2 - 完整页表（E820、memblock、init_mem_mapping、zone）
 
 #### 深入专题
 - **[GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)** - GDT 详解：从保护模式到长模式
+  - GDT 演化（GRUB → Compressed Kernel → Main Kernel → per-CPU）
+  - 段描述符结构详解（二进制拆解、字段含义）
+  - 长模式下的作用与分页协作
 - **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解
+  - 伙伴系统原理、算法与实现
+  - Slab/SLUB 分配器设计与 per-CPU 缓存
+  - 从 memblock 到 buddy 的转换流程
 
 #### 子文档（技术细节）
 - **[E820_MEMORY_MAP.md](E820_MEMORY_MAP.md)** - E820 内存映射表详解

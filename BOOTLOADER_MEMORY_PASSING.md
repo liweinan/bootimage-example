@@ -20,7 +20,7 @@
 **相关文档**：
 - [SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md) - SeaBIOS 如何构建 E820 表
 - [E820_MEMORY_MAP.md](E820_MEMORY_MAP.md) - E820 表的总体说明
-- [LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md) - Linux 内核如何使用 E820
+- [Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md) - Linux 内核如何使用 E820
 
 ## 代码来源
 
@@ -603,7 +603,7 @@ efi.memmap (EFI 原始映射，用于 Runtime Services)
 
 - **[SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md)**：固件层如何构建 E820
 - **[E820_MEMORY_MAP.md](E820_MEMORY_MAP.md)**：E820 表的总体说明和数据结构
-- **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)**：内核如何使用 E820
+- **[Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md)**：内核如何使用 E820
 
 ---
 

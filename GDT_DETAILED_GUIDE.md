@@ -1320,7 +1320,7 @@ void update_tss_descriptor(int cpu, unsigned long base, unsigned long limit) {
 
 ### 核心相关文档
 
-- **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)** - Linux 内核分页机制完整指南（包含 GDT 与分页的协作关系）
+- **[Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md)** - 包含 GDT 与分页的协作关系
 - **[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)** - Linux 内核启动流程（GDT 在启动中的使用）
 - **[X86_CPU_MODES.md](X86_CPU_MODES.md)** - x86 CPU 模式详解
 

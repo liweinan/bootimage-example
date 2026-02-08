@@ -13,7 +13,7 @@
 **相关文档**：
 - [SeaBIOS E820 构建流程](SEABIOS_E820_CONSTRUCTION.md) - BIOS 固件如何构建 E820 表
 - [Bootloader 内存信息传递](BOOTLOADER_MEMORY_PASSING.md) - GRUB 如何传递 E820 表给内核
-- [主文档：Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md) - 内核接管内存的完整流程（包含 E820 解析、memblock、init_mem_mapping）
+- [Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md) - 内核接管内存的完整流程（包含 E820 解析、memblock、init_mem_mapping）
 
 ---
 
@@ -1153,6 +1153,6 @@ PML4[0] → PDPT[0] → PD[0] → PT[256-...]
 E820 表是连接"硬件物理内存布局"与"内核虚拟内存管理"的桥梁。
 
 > **相关文档**：
-> - [LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md) - 第一部分详细分析了 GDT（Segment）与 Paging 的两阶段地址转换关系
+> - [Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md) - 第一部分详细分析了 GDT（Segment）与 Paging 的两阶段地址转换关系
 > - [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) - 完整启动流程
 
