@@ -451,4 +451,6 @@ void start_kernel(void)
 
 ---
 
-## 四、start_kernel() 流程概述
+**文档版本**：基于 Linux 内核 v6.x 源码整理
+**最后更新**：2026-02
+**维护者**：Linux 内核启动文档项目
