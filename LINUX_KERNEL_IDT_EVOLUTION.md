@@ -101,6 +101,71 @@ void startup_64_load_idt(void *vc_handler)
    - #DF 也没有处理函数 → **Triple Fault** → CPU 重启
 4. **这是可接受的**：如果在这个简单阶段触发异常，说明有严重错误，重启是合理的
 
+#### 为什么 #VC 是唯一需要的异常？
+
+**关键问题**：既然中断已关闭（IF=0），为什么还要设置 #VC 处理函数？
+
+**答案**：`EFLAGS.IF` 只控制**硬件中断**，不控制**异常**。
+
+**中断 vs 异常的根本区别**：
+
+| 类型 | 触发方式 | 受 IF 控制？ | 示例 |
+|------|---------|------------|------|
+| **硬件中断** | 异步，外部硬件 | ✅ 是（IF=0 时被屏蔽） | IRQ 0（时钟）、IRQ 1（键盘） |
+| **异常** | 同步，当前指令 | ❌ 否（IF=0 时仍会触发） | #PF、#GP、#VC |
+
+**#VC 的特殊性（AMD SEV-SNP 环境）**：
+
+在 SEV-SNP 虚拟化环境中，**CPUID 指令会自动触发 #VC 异常**，用于虚拟机与 Hypervisor 通信：
+
+```c
+// arch/x86/kernel/head_64.S
+startup_64:
+    // ...
+    call verify_cpu  // ← 内部执行 CPUID 检测 CPU 特性
+
+    // SEV-SNP 环境下：
+    // 1. CPUID 指令 → 自动触发 #VC 异常（向量 29）
+    // 2. 即使 IF=0 也会触发（异常不受 IF 控制）
+    // 3. CPU 查找 IDT[29]
+    // 4. 如果没有处理函数 → Triple Fault → 重启 💥
+```
+
+**为什么其他异常不需要？**
+
+| 异常 | 极早期是否可能触发？ | 原因 |
+|------|------------------|------|
+| **#VC** | ✅ 是（SEV 环境） | `verify_cpu` 等代码会执行 CPUID |
+| #PF | ❌ 否 | 页表已建立，内存访问有效 |
+| #GP | ❌ 否 | 段选择子正确，特权级正确 |
+| #UD | ❌ 否 | 代码都是标准 x86-64 指令 |
+| #DF | ❌ 否 | 无嵌套异常场景 |
+
+**#VC 处理函数的简化实现**（`arch/x86/boot/startup/sev-shared.c`）：
+
+```c
+void do_vc_no_ghcb(struct pt_regs *regs, unsigned long exit_code)
+{
+    /* Only CPUID is supported via MSR protocol */
+    if (exit_code != SVM_EXIT_CPUID)
+        goto fail;  // ← 只处理 CPUID，其他操作直接失败
+
+    // ... 通过 MSR 与 Hypervisor 通信获取 CPUID 结果 ...
+
+    regs->ip += 2;  // ← 跳过 CPUID 指令（2 字节）
+    return;
+
+fail:
+    sev_es_terminate(...);  // ← 终止虚拟机
+}
+```
+
+**总结**：#VC 是**唯一**需要在极早期设置的异常，因为：
+1. SEV-SNP 环境下 CPUID 必定触发 #VC
+2. 启动代码必须执行 CPUID（检测 CPU 特性）
+3. 异常不受 `EFLAGS.IF` 控制，即使关中断也会触发
+4. 如果没有处理函数，系统无法启动
+
 **2. idt_table（运行时表，最终表）**
 
 定义在 `arch/x86/kernel/idt.c:173`：
