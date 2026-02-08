@@ -13,6 +13,7 @@
 
 ### BIOS/GRUB 启动路径
 
+```
 GRUB/入口
     ↓
 【阶段 1】压缩内核 startup_32（32 位模式切换）
@@ -34,9 +35,11 @@ init_IRQ（IDT硬件中断门 + INT 0x80）
 rest_init（创建 PID 1/2）
     ↓
 核心进程启动
+```
 
 ### UEFI 启动路径
 
+```
 UEFI 固件
     ↓
 efi_pe_entry
@@ -50,6 +53,7 @@ enter_kernel
 【阶段 3】主内核 startup_64（直接跳到这里，跳过阶段 1 和 2）
     ↓
 后续流程与 BIOS 路径相同
+```
 
 > **重要**：UEFI 路径**完全跳过**压缩内核的 startup_32/startup_64，直接通过 EFI stub 解压并进入主内核。详见 [UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md)。
 
@@ -95,6 +99,7 @@ Linux 内核支持两种系统调用机制，**它们的实现方式完全不同
 - **16MB (0x1000000)**：解压后内核的目标位置（CONFIG_PHYSICAL_START 配置，或 KASLR 随机地址）
 - **16MB+ (约 38MB)**：重定位后的压缩内核位置（%rbx），从这里解压内核到 16MB（详见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
 
+```
 GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
     ↓
 【阶段1】压缩内核 startup_32（arch/x86/boot/compressed/head_64.S:82）
@@ -107,7 +112,7 @@ GRUB grub_relocator32_boot()（grub/grub-core/lib/i386/relocator.c）
 【阶段2】压缩内核 startup_64（arch/x86/boot/compressed/head_64.S:278）
     │   64位长模式
     ├─ 设置 64 位环境（段寄存器、栈、GDT）
-    ├─ 重定位拷贝到高地址（约 38MB，详见 [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)）
+    ├─ 重定位拷贝到高地址（约 38MB，详见 WHY_RELOCATE_COMPRESSED_KERNEL.md）
     ├─ 解压内核到 16MB
     │   extract_kernel()（arch/x86/boot/compressed/misc.c:334）
     └─ 跳转到主内核入口
@@ -130,7 +135,7 @@ start_kernel()（init/main.c:1005）
     ├─ 【早期初始化】
     │   ├─ local_irq_disable()
     │   ├─ boot_cpu_init()
-    │   ├─ setup_arch()（arch/x86/kernel/setup.c:880）【内核接管物理内存，详见 [LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)】
+    │   ├─ setup_arch()（arch/x86/kernel/setup.c:880）【内核接管物理内存，详见 LINUX_PAGING_COMPLETE_GUIDE.md】
     │   │   ├─ e820__memory_setup()（arch/x86/kernel/e820.c:1354）
     │   │   ├─ e820__memblock_setup()（arch/x86/kernel/e820.c:1242）
     │   │   ├─ init_mem_mapping()（arch/x86/mm/init.c:758）
@@ -156,6 +161,7 @@ start_kernel()（init/main.c:1005）
         ├─ 创建 PID 1（kernel_init）（kernel/fork.c:2718） → 启动用户空间 init
         ├─ 创建 PID 2（kthreadd）（kernel/fork.c:2697） → 管理内核线程
         └─ PID 0 进入 idle 循环（kernel/sched/idle.c:393）
+```
 
 ### 文件路径约定
 
@@ -189,9 +195,11 @@ start_kernel()（init/main.c:1005）
 
 **入口点**：BIOS/Legacy（如 GRUB）→ code32_start 处即 **startup_32**（x86_64：`arch/x86/boot/compressed/head_64.S:82`，`SYM_FUNC_START(startup_32)`）。UEFI → PE 的 AddressOfEntryPoint 跳转到 EFI stub（`efi_pe_entry` 等）。64 位内核用 `head_64.S`（压缩与主内核各一份，路径不同）；32 位用 `head_32.S`。
 
+```
 grub_relocator32_boot() → EIP = code32_start
     ↓
 【阶段1】压缩内核 startup_32（32 位保护模式，arch/x86/boot/compressed/head_64.S:82）
+```
 
 ---
 
@@ -215,6 +223,7 @@ grub_relocator32_boot() → EIP = code32_start
 
 实际源码中 **无** `setup_identity_mapping` 调用；身份映射页表在 startup_32 内**内联**构建（Build Level 4/3/2），且 **GDT/栈/段** 在 **CR4/页表/CR3/EFER/CR0** 之前。
 
+```
 startup_32
     ├─ cld, cli；算加载偏移 %ebp（89-103行）
     ├─ lgdt（GDT）、段寄存器 = __BOOT_DS、栈 = boot_stack_end、lretl 切到 __KERNEL32_CS（106-125行）
@@ -227,6 +236,7 @@ startup_32
     ├─ lldt/ltr（244-247行）
     ├─ push rva(startup_64); push __KERNEL_CS；CR0.PG = 1（264-270行）
     └─ lret → 【阶段2】压缩内核 startup_64（273行，跳转到同文件278行）
+```
 
 **关键步骤说明**（与源码 head_64.S 对应）：
 
@@ -298,6 +308,7 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
 
 **压缩内核 startup_64 关键步骤**：
 
+```
 压缩内核 startup_64（.code64）
     ├─ cld, cli；设置段寄存器（290-299行）
     ├─ 计算解压目标 %rbp（LOAD_PHYSICAL_ADDR，通常 16MB）与重定位目标 %rbx（通常 38MB）（314-331行）
@@ -308,7 +319,7 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
     ├─ sev_enable（390行，CONFIG_AMD_MEM_ENCRYPT）
     ├─ configure_5level_paging（409行）
     ├─ 【重定位拷贝】rep movsq：将压缩内核从 1MB 拷贝到 %rbx（通常 38MB）（419-425行）
-    │       └─ 为何重定位？见 [COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md)
+    │       └─ 为何重定位？见 COMPRESSED_KERNEL_RELOCATION.md
     ├─ 重新加载 GDT（432-435行）
     └─ jmp .Lrelocated（440-441行）→ 跳转到重定位后的 .Lrelocated 标签
         ↓
@@ -324,6 +335,7 @@ Near jump 与 long jump 的区别、long mode 下 CS 仍起的作用（CPL、L/D
     │       ├─ 解析解压后 ELF，handle_relocations()
     │       └─ 返回主内核入口地址到 %rax
     └─ jmp *%rax（475行）→ 【阶段3】跳转到主内核 startup_64
+```
 
 **关键地址说明**：
 - **1MB (0x100000)**：GRUB 加载压缩内核的初始位置
