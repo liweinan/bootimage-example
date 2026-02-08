@@ -31,3 +31,9 @@ initrd-alpine-*.img
 # 文档备份文件
 *.backup
 *.backup_step*
+
+# 临时输出文件
+tmp.txt
+output.txt
+output*.txt
+tree.txt
