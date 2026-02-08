@@ -713,22 +713,33 @@ SYM_CODE_END(startup_64)
 
 #### GDT 加载详解
 
-**加载的 GDT**：cpu/common.c 里定义的 **gdt_page**（内核正式 GDT），包含内核代码段、数据段、TSS 等描述符。
+**加载的 GDT**：通过 **early_gdt_descr**（arch/x86/kernel/head_64.S）引用的 **gdt_page**（arch/x86/kernel/cpu/common.c），这是主内核的早期 GDT，包含内核代码段、数据段、TSS 等描述符。
 
 **GDT 演化过程**（详见 [GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)）：
 1. **GRUB GDT**（grub/grub-core/lib/i386/relocator.c）：GRUB 设置的临时 GDT，仅供进入内核前使用
 2. **压缩内核 GDT**（arch/x86/boot/compressed/head_64.S::gdt）：压缩内核 startup_32/startup_64 使用的临时 GDT
-3. **主内核早期 GDT**（arch/x86/kernel/cpu/common.c::gdt_page）：← **这里加载的 GDT**
-4. **运行时 per-CPU GDT**（arch/x86/kernel/cpu/common.c::gdt_page）：每个 CPU 一份，动态更新 TSS 等
+3. **主内核早期 GDT**（arch/x86/kernel/head_64.S::early_gdt_descr → gdt_page）：← **这里加载的 GDT**
+4. **运行时 per-CPU GDT**（arch/x86/kernel/cpu/common.c::gdt_page）：每个 CPU 一份，在 cpu_init() 中加载
 
-**GDT 的后续使用**：
-- 这里加载后，内核一直沿用这张 **gdt_page**，只是**第一次**让 CPU 用上这张表
-- 后续在 trap_init() → cpu_init() 中会设置 TSS、LDT 等，但仍使用同一张 GDT
-- 多核启动后，每个 CPU 有自己的 gdt_page 副本（per-CPU），但结构相同
+**GDT 的后续演进**：
+- **startup_64_setup_gdt_idt() 阶段**：加载 early_gdt_descr，这是主内核的第一个 GDT，是**全局共享**的
+- **cpu_init() 阶段**：调用 load_direct_gdt(cpu)，**替换**为 per-CPU GDT
+- **替换原因**：
+  - 每个 CPU 需要独立的 TSS 描述符（指向该 CPU 的内核栈）
+  - 避免多个 CPU 同时修改共享 GDT 导致的竞态条件
+  - 支持 CPU 热插拔和动态配置
 
-**关键段描述符**：
-- **__KERNEL_CS**（代码段）：64位长模式代码段（CS.L=1，CS.D=0）
-- **__KERNEL_DS**（数据段）：内核数据段（DS/SS/ES/GS 使用）
+**early_gdt_descr 定义**（arch/x86/kernel/head_64.S）：
+```asm
+early_gdt_descr:
+    .word   GDT_ENTRIES*8-1
+early_gdt_descr_base:
+    .quad   INIT_PER_CPU_VAR(gdt_page)  # 指向 gdt_page
+```
+
+**关键段描述符**（在 gdt_page 中定义）：
+- **__KERNEL_CS**（GDT_ENTRY_KERNEL_CS）：64位长模式代码段（CS.L=1，CS.D=0）
+- **__KERNEL_DS**（GDT_ENTRY_KERNEL_DS）：内核数据段（DS/SS/ES/GS 使用）
 - **__BOOT_TSS**：任务状态段，存储栈指针、I/O 位图等
 
 #### IDT 加载详解
@@ -758,8 +769,12 @@ SYM_CODE_END(startup_64)
 #### 总结
 
 因此"初步"主要指**时机最早**，以及两者的后续演进：
-- **GDT**：一次加载，后续沿用（仅在 cpu_init() 中更新 TSS/LDT）
-- **IDT**：最小表，后续被 early IDT 取代，最终演进为完整 IDT
+- **GDT**：加载早期 GDT（early_gdt_descr），在 cpu_init() 中**被替换**为 per-CPU GDT
+- **IDT**：加载最小 IDT（bringup_idt_table），后续被 early IDT 取代，最终演进为完整 IDT
+
+**对比 GDT 和 IDT 的演进**：
+- **GDT**：2 次加载（early_gdt_descr → per-CPU GDT），替换原因是多核并发需求
+- **IDT**：5 次演进（bringup → early → early_traps → traps → apic_and_irq），逐步完善功能
 
 **汇编如何调用 C 函数**：通过链接时的符号解析。
 
