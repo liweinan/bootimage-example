@@ -217,9 +217,15 @@ DISPLAY=:1 make run-gui
   - 多级页表设计原理与内存开销对比（512GB vs 68KB）
   - MMU 硬件页表遍历伪代码（walk_virtual_address）
   - 书籍目录类比与动态管理机制
-- **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解
+- **[SLAB_ALLOCATOR_EXPLAINED.md](SLAB_ALLOCATOR_EXPLAINED.md)** - Slab 分配器原理与实践
+  - Slab 解决的问题（传统页分配器的不足）
+  - 三层架构（Cache → Slab → Object）
+  - 核心优势（性能 5-10 倍、内存利用率提升、缓存友好性）
+  - 实战使用（创建自定义缓存、监控与调试）
+  - 现代变体（SLAB/SLUB/SLOB 对比）
+- **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解（源码级）
   - 伙伴系统原理、算法与实现
-  - Slab/SLUB 分配器设计与 per-CPU 缓存
+  - Slab/SLUB 分配器源码分析与 per-CPU 缓存
   - 从 memblock 到 buddy 的转换流程
 
 #### 子文档（技术细节）

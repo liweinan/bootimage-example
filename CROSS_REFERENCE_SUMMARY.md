@@ -2,6 +2,64 @@
 
 ## 最新更新（2026-02-08）
 
+### SLAB_ALLOCATOR_EXPLAINED.md（新建独立文档）
+
+**主题**：Slab 分配器原理与实践
+
+**定位**：问题驱动的教学文档，回答"为什么需要 Slab"和"如何使用 Slab"
+
+**核心内容**：
+- Slab 解决的问题（传统页分配器的不足）
+  - 内部碎片严重（592B 对象需要 4KB 页，浪费 85.5%）
+  - 频繁分配释放导致性能低下
+  - 无法保持对象初始化状态
+- 三层架构详解：
+  - Cache 层（对象缓存、Per-CPU 缓存、构造函数）
+  - Slab 层（物理页容器、状态管理：满/部分满/空）
+  - Object 层（对象布局、空闲链表）
+- 核心优势：
+  - 性能提升：分配速度快 5-10 倍（100+ CPU 周期 → 10-20 周期）
+  - 内存节省：利用率从 14.5% 提升到 88.6%（节省 6 倍内存）
+  - 缓存友好：同类对象物理相邻，CPU 缓存命中率高
+  - 构造函数机制：保持对象初始化状态
+  - 可观测性：/proc/slabinfo 详细统计
+- 现代变体对比：
+  - SLAB（经典实现）：复杂但内存利用率高
+  - SLUB（默认）：简化设计，性能好，Linux 默认
+  - SLOB（嵌入式）：极简设计，适合内存 < 64MB 系统
+- 实战使用：
+  - 创建自定义对象缓存（kmem_cache_create）
+  - 监控与调试（slabtop、/proc/slabinfo）
+  - 内存泄漏检测
+- 局限性分析：
+  - 内部碎片（对象大小不整除页大小）
+  - 缓存污染（不相关对象混在同一缓存行）
+  - NUMA 架构挑战
+
+**文档规模**：600+ 行，完整独立体系
+
+**被引用位置**：
+- `README.md` - "深入专题"部分（BUDDY_ALLOCATOR_GUIDE 之前）
+- `WHY_VIRTUAL_MEMORY.md` - "内存分配器"延伸阅读部分
+- `BUDDY_ALLOCATOR_GUIDE.md` - "相关文档"部分（推荐先读）
+
+**引用其他文档**：
+- `WHY_VIRTUAL_MEMORY.md` - 前置阅读，理解分页系统
+- `BUDDY_ALLOCATOR_GUIDE.md` - 深入源码实现
+
+**教学价值**：
+- 问题驱动：从"传统方法的问题"切入
+- 量化对比：具体的性能数据和内存节省数据
+- 实战导向：完整的代码示例和监控命令
+- 类比总结：批发商（伙伴系统）vs 零售商（Slab）vs 便利店（kmalloc）
+
+**与 BUDDY_ALLOCATOR_GUIDE.md 的关系**：
+- SLAB_ALLOCATOR_EXPLAINED.md：原理教学，回答"为什么"和"怎么用"
+- BUDDY_ALLOCATOR_GUIDE.md：源码分析，回答"如何实现"
+- 建议阅读顺序：SLAB_ALLOCATOR_EXPLAINED → BUDDY_ALLOCATOR_GUIDE
+
+---
+
 ### WHY_VIRTUAL_MEMORY.md（新建独立文档）
 
 **主题**：为什么需要虚拟内存：从物理地址到分页的必然性

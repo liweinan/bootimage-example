@@ -730,9 +730,15 @@ P_opt = √(2 × S_pte × C_table / C_frag)
 
 ### 内存分配器
 
-- [伙伴系统与 Slab 分配器详解](BUDDY_ALLOCATOR_GUIDE.md) - 物理页框分配
+- [Slab 分配器原理与实践](SLAB_ALLOCATOR_EXPLAINED.md) - 小对象分配器
+  - Slab 解决的问题（传统页分配器的不足）
+  - 三层架构（Cache → Slab → Object）
+  - 核心优势（性能 5-10 倍提升、内存利用率优化）
+  - 实战使用与监控调试
+
+- [伙伴系统与 Slab 分配器详解](BUDDY_ALLOCATOR_GUIDE.md) - 物理页框分配（源码级）
   - 伙伴系统原理、算法与实现
-  - Slab/SLUB 分配器设计
+  - Slab/SLUB 分配器源码分析
   - 从 memblock 到 buddy 的转换
 
 ### 用户空间内存

@@ -16,6 +16,7 @@
 - 对操作系统底层实现感兴趣的学习者
 
 **相关文档**：
+- [Slab 分配器原理与实践](SLAB_ALLOCATOR_EXPLAINED.md) - Slab 分配器的原理教学（推荐先读）
 - [Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md) - 页表管理与物理内存分配的关系
 - [Linux 内核启动流程](LINUX_KERNEL_INIT.md) - memblock 和 buddy 系统的初始化时机
 
