@@ -1233,6 +1233,85 @@ int kthreadd(void *unused)
 
 ---
 
+## 常见问题
+
+### Q: Linux 是否只提供 INT 0x80 软件中断服务？
+
+**A: 不是。** Linux 提供了多个用户态可触发的软件中断向量：
+
+#### 用户态可触发的中断（DPL=3）
+
+| 向量 | 名称 | 用途 | 现代使用情况 |
+|------|------|------|------------|
+| **0x80** | INT 0x80 | 32位系统调用 | 32位兼容，64位很少用 |
+| **3** | INT 3 (BP) | 断点异常 | ✅ 调试器（gdb）使用 |
+| **4** | INTO (OF) | 溢出异常 | ❌ 64位已废弃 |
+
+**源码证据**（`arch/x86/kernel/idt.c`）：
+
+```c
+// SYSG = System Gate (DPL=3，用户态可触发)
+static const __initconst struct idt_data early_idts[] = {
+    SYSG(X86_TRAP_BP,  asm_exc_int3),      // INT 3：断点
+    SYSG(X86_TRAP_OF,  asm_exc_overflow),  // INTO：溢出（32位）
+};
+
+static const struct idt_data ia32_idt[] __initconst = {
+    SYSG(IA32_SYSCALL_VECTOR,  asm_int80_emulation),  // 0x80：系统调用
+};
+```
+
+#### 其他向量
+
+- **异常向量（0-31）**：DPL=0，用户态不能主动触发（如 #PF、#GP、#UD）
+- **硬件中断（32-255）**：DPL=0，外部硬件触发（如 IRQ 0、IRQ 1）
+- **APIC 中断**：DPL=0，CPU 间通信、时钟等
+
+### Q: 现代系统调用使用 SYSCALL 还是 SYSENTER？
+
+**A: 取决于架构和兼容性需求。**
+
+| 机制 | 架构 | 性能 | 实现方式 | 主要用途 |
+|------|------|------|---------|---------|
+| **SYSCALL** | AMD64/Intel 64位 | 快（~60-80 周期） | MSR（MSR_LSTAR） | **64位主流** |
+| **SYSENTER** | Intel 32位 | 快（~60-80 周期） | MSR（MSR_IA32_SYSENTER_EIP） | 32位快速系统调用 |
+| **INT 0x80** | x86（32/64位通用） | 慢（~100-200 周期） | IDT[0x80] | 32位兼容 |
+
+**SYSCALL vs SYSENTER 的关键区别**：
+
+1. **CPU 支持**：
+   - SYSCALL：AMD 在 K6/Athlon 时代引入，Intel 在 x86-64 才支持
+   - SYSENTER：Intel 在 Pentium II 时代引入，AMD 也支持
+
+2. **架构差异**：
+   - SYSCALL：主要用于 **64 位模式**（Long Mode）
+   - SYSENTER：主要用于 **32 位保护模式**
+
+3. **Linux 内核的使用策略**：
+   ```c
+   // arch/x86/kernel/cpu/common.c:2234
+   void syscall_init(void) {
+       // 64位 SYSCALL 入口
+       wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);
+
+       // 32位兼容模式
+       if (ia32_enabled()) {
+           wrmsrq_cstar((unsigned long)entry_SYSCALL_compat);
+           // 32位 SYSENTER 入口
+           wrmsrq_safe(MSR_IA32_SYSENTER_EIP, (u64)entry_SYSENTER_compat);
+       }
+   }
+   ```
+
+4. **实际使用情况**：
+   - **64 位程序**：使用 `syscall` 指令 → entry_SYSCALL_64
+   - **32 位程序（Intel CPU）**：使用 `sysenter` 指令 → entry_SYSENTER_compat
+   - **32 位程序（兼容路径）**：使用 `int $0x80` → entry_INT80_32
+
+> **详细对比**：完整的 SYSCALL/SYSENTER/INT 0x80 对比、MSR 配置、性能分析，请参见 [系统调用初始化详解](LINUX_KERNEL_SYSCALL_INIT.md)。
+
+---
+
 ## 相关文档
 
 ### 启动流程

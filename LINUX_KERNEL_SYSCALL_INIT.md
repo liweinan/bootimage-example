@@ -261,11 +261,118 @@ static inline long syscall(long number, ...)
 | **演进时间线** | bringup_idt_table → idt_table（5 阶段） | MSR 机制先就绪 → IDT 机制后就绪 |
 | **依赖关系** | 不依赖系统调用机制 | INT 0x80 依赖 IDT 表完善 |
 
+#### SYSCALL vs SYSENTER 详细对比
+
+虽然都是快速系统调用机制，SYSCALL 和 SYSENTER 有重要区别：
+
+| 特性 | SYSCALL | SYSENTER |
+|------|---------|----------|
+| **引入者** | AMD（K6/Athlon 时代） | Intel（Pentium II） |
+| **主要架构** | **64 位模式（Long Mode）** | **32 位保护模式** |
+| **AMD 支持** | ✅ 原生支持（AMD64） | ✅ 支持（兼容 Intel） |
+| **Intel 支持** | ✅ x86-64 后支持 | ✅ 原生支持（IA-32） |
+| **指令对** | `syscall` / `sysret` | `sysenter` / `sysexit` |
+| **使用场景** | 64 位程序系统调用 | 32 位程序快速系统调用 |
+| **返回指令** | `sysret`（对称） | `sysexit`（对称） |
+| **MSR 配置** | MSR_LSTAR（入口）<br>MSR_STAR（段选择子）<br>MSR_SYSCALL_MASK（RFLAGS 掩码） | MSR_IA32_SYSENTER_CS（段选择子）<br>MSR_IA32_SYSENTER_ESP（栈指针）<br>MSR_IA32_SYSENTER_EIP（入口地址） |
+| **返回地址保存** | RCX ← RIP | 调用者需手动保存 |
+| **RFLAGS 保存** | R11 ← RFLAGS | 不保存 |
+| **性能** | ~60-80 周期 | ~60-80 周期 |
+
+**硬件行为差异**：
+
+1. **SYSCALL 自动保存返回信息**：
+   ```asm
+   ; 用户态执行 syscall
+   syscall
+   ; 硬件自动完成：
+   ; RCX ← RIP（保存返回地址）
+   ; R11 ← RFLAGS（保存标志位）
+   ; RFLAGS ← RFLAGS & ~MSR_SYSCALL_MASK
+   ; RIP ← MSR_LSTAR（跳转到内核入口）
+   ; CS ← MSR_STAR[47:32]
+   ; SS ← MSR_STAR[47:32] + 8
+   ```
+
+2. **SYSENTER 需要手动管理**：
+   ```asm
+   ; 用户态执行 sysenter（通常通过 vDSO）
+   ; 调用者必须先保存 EIP 和 ESP
+   push ebp
+   mov ebp, esp
+   sysenter
+   ; 硬件完成：
+   ; EIP ← MSR_IA32_SYSENTER_EIP
+   ; ESP ← MSR_IA32_SYSENTER_ESP
+   ; CS ← MSR_IA32_SYSENTER_CS
+   ; SS ← MSR_IA32_SYSENTER_CS + 8
+   ; （不保存 EFLAGS）
+   ```
+
+**Linux 内核的使用策略**：
+
+```c
+// arch/x86/kernel/cpu/common.c:2234
+void syscall_init(void) {
+    wrmsr(MSR_STAR, 0, (__USER32_CS << 16) | __KERNEL_CS);
+
+    if (!cpu_feature_enabled(X86_FEATURE_FRED))
+        idt_syscall_init();
+}
+
+static inline void idt_syscall_init(void) {
+    // 64位 SYSCALL（主流路径）
+    wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);
+
+    if (ia32_enabled()) {
+        // 32位兼容模式 SYSCALL
+        wrmsrq_cstar((unsigned long)entry_SYSCALL_compat);
+
+        // 32位 SYSENTER（Intel CPU）
+        wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)__KERNEL_CS);
+        wrmsrq_safe(MSR_IA32_SYSENTER_ESP, (unsigned long)(cpu_entry_stack(smp_processor_id()) + 1));
+        wrmsrq_safe(MSR_IA32_SYSENTER_EIP, (u64)entry_SYSENTER_compat);
+    }
+
+    wrmsrq(MSR_SYSCALL_MASK, X86_EFLAGS_TF|X86_EFLAGS_DF|...|X86_EFLAGS_AC);
+}
+```
+
+**用户态库的选择逻辑**：
+
+| 程序类型 | CPU | 优先选择 | 备选 | 说明 |
+|---------|-----|---------|-----|------|
+| 64 位 | Intel/AMD | `syscall` | - | SYSCALL 是唯一选择 |
+| 32 位 | Intel | `sysenter` (vDSO) | `int $0x80` | 通过 vDSO 提供 |
+| 32 位 | AMD（旧 CPU） | `int $0x80` | - | 旧 AMD CPU 不支持 SYSENTER |
+| 32 位 | AMD（新 CPU） | `sysenter` (vDSO) | `int $0x80` | 现代 AMD 已支持 |
+
+**为什么需要 vDSO（Virtual Dynamic Shared Object）？**
+
+SYSENTER 不保存返回地址，用户态程序无法直接使用。内核通过 vDSO 提供包装函数：
+
+```c
+// vDSO 中的 __kernel_vsyscall（简化）
+__kernel_vsyscall:
+    push %ecx          // 保存 ECX
+    push %edx          // 保存 EDX
+    push %ebp          // 保存 EBP
+    mov %esp, %ebp     // 保存栈指针
+    sysenter           // 进入内核
+    // 内核返回到这里（通过 sysexit）
+    pop %ebp
+    pop %edx
+    pop %ecx
+    ret
+```
+
 **关键洞察**：
 - **trap_init() 阶段**：设置 MSR，让 SYSCALL/SYSENTER 可用（不依赖 IDT）
 - **init_IRQ() 阶段**：设置 IDT[0x80]，让 INT 0x80 可用（依赖 IDT 完善）
 - 两者相互独立，但共同完成系统调用机制的初始化
 - 现代程序主要使用 SYSCALL，INT 0x80 主要用于兼容
+- **64 位程序**：只用 SYSCALL
+- **32 位程序**：优先 SYSENTER（通过 vDSO），备选 INT 0x80
 
 **与 IDT 内容的关系**：
 - **IDT 表包含三类条目**：
