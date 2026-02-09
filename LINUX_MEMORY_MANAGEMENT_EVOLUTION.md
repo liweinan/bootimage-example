@@ -883,6 +883,186 @@ $7 = 0x02012000    # CR3 已切换到新页表
 
 主内核（Main Kernel）建立完整的内存管理体系，包括最终的 GDT 和动态页表。
 
+### 重要概念澄清：GDT 表 vs GDT 描述符结构
+
+**❓ 常见困惑**：看到代码中有 `early_gdt_descr`、`startup_gdt_descr`，是不是有多个不同的 GDT 表？
+
+**✅ 核心区别**：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. GDT 表（Segment Descriptor Array）                       │
+│    - 实际的段描述符数组                                      │
+│    - 每个条目 8 字节，包含 Base、Limit、Access 等字段        │
+│    - 存储在内存中的实际数据结构                              │
+│                                                              │
+│ 2. GDT 描述符结构（struct desc_ptr）                         │
+│    - 用于 lgdt 指令的参数                                    │
+│    - 只包含两个字段：                                        │
+│      • size: GDT 表的大小 - 1                                │
+│      • address: GDT 表的地址                                 │
+│    - 相当于"指针"，指向真正的 GDT 表                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**🔍 实际数量统计**：
+
+```c
+/* ============================================
+ * Linux 内核启动过程中的 GDT 表数量
+ * ============================================ */
+
+// ========== 3 个不同的 GDT 表（内容不同） ==========
+
+// GDT 表 1: GRUB 的 GDT
+// 位置：grub-core/lib/i386/relocator.c
+// 内容：基本的 64 位段（4个条目）
+static struct grub_relocator_gdt {
+    grub_uint16_t size;
+    grub_uint64_t address;
+} __attribute__((packed));
+
+// GDT 表 2: 压缩内核的 boot_gdt
+// 位置：arch/x86/boot/compressed/head_64.S
+// 内容：临时的内核段（5个条目）
+.data
+SYM_DATA_START_LOCAL(boot_gdt)
+    .quad   0x0000000000000000    /* NULL */
+    .quad   0x00cf9a000000ffff    /* __KERNEL32_CS (兼容) */
+    .quad   0x00af9a000000ffff    /* __KERNEL_CS (64位) */
+    .quad   0x00cf92000000ffff    /* __KERNEL_DS */
+    .quad   0x0080890000000000    /* TSS */
+SYM_DATA_END(boot_gdt)
+
+// GDT 表 3: 主内核的 gdt_page（唯一的，但每 CPU 一份）
+// 位置：arch/x86/kernel/cpu/common.c
+// 内容：完整的 32 个条目
+DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = { .gdt = {
+    [GDT_ENTRY_KERNEL_CS]   = GDT_ENTRY_INIT(DESC_CODE64, 0, 0xfffff),
+    [GDT_ENTRY_KERNEL_DS]   = GDT_ENTRY_INIT(DESC_DATA64, 0, 0xfffff),
+    // ... 共 32 个条目
+}};
+
+// ========== 多个 GDT 描述符结构（都指向 gdt_page） ==========
+
+// 描述符结构 1: early_gdt_descr（静态定义，汇编代码）
+// 位置：arch/x86/kernel/head_64.S
+// 指向：gdt_page
+SYM_DATA_START_LOCAL(early_gdt_descr)
+    .word   GDT_ENTRIES*8-1                    // size 字段
+SYM_DATA_END_LABEL(early_gdt_descr, SYM_L_LOCAL, early_gdt_descr_base)
+SYM_DATA_START_LOCAL(early_gdt_descr_base)
+    .quad   INIT_PER_CPU_VAR(gdt_page)         // address 字段 ← 指向 gdt_page！
+SYM_DATA_END(early_gdt_descr_base)
+
+// 描述符结构 2: startup_gdt_descr（局部变量，C 代码）
+// 位置：arch/x86/boot/startup/gdt_idt.c
+// 指向：gdt_page
+void __head startup_64_setup_gdt_idt(void) {
+    struct gdt_page *gp = rip_rel_ptr((void *)&gdt_page);  // ← 获取 gdt_page 地址
+
+    struct desc_ptr startup_gdt_descr = {                   // ← 局部变量
+        .address = (unsigned long)gp->gdt,                  // ← 指向 gdt_page！
+        .size = GDT_SIZE - 1
+    };
+
+    native_load_gdt(&startup_gdt_descr);                    // lgdt
+}
+
+// 描述符结构 3: 每个 CPU 初始化时的描述符
+// 位置：arch/x86/kernel/cpu/common.c
+// 指向：当前 CPU 的 gdt_page
+void cpu_init(void) {
+    struct desc_ptr gdt_descr;                              // ← 又一个局部变量
+    gdt_descr.address = (unsigned long)get_cpu_gdt_rw(smp_processor_id());
+    gdt_descr.size = GDT_SIZE - 1;
+
+    load_gdt(&gdt_descr);                                   // lgdt
+}
+```
+
+**📊 对比总结**：
+
+| 项目 | GDT 表数量 | GDT 描述符结构数量 |
+|------|-----------|-------------------|
+| **定义** | 实际的段描述符数组 | `struct desc_ptr`，指向 GDT 表 |
+| **大小** | 每个表几十到几百字节<br>（boot_gdt: 40字节<br>gdt_page: 256字节） | 固定 10 字节<br>（2字节size + 8字节address） |
+| **启动过程中的数量** | **3 个不同的表**<br>① GRUB GDT<br>② boot_gdt<br>③ gdt_page | **多个描述符结构**<br>（大多数指向 gdt_page） |
+| **是否共享** | 不共享，内容完全不同 | 多个描述符可以指向同一个 GDT 表 |
+| **类比** | 数据库中的实际表 | 表的指针/引用 |
+| **内存位置** | `.data` 段或 per-CPU 区域 | 通常是栈上的局部变量 |
+| **生命周期** | 持续存在于内存中 | 只在 lgdt 调用时使用 |
+
+**🎯 答案**：
+
+```
+问：Linux 内核启动过程中有几个 GDT？
+
+答：
+  - 如果问"有几个不同的 GDT 表"        → 3 个
+  - 如果问"有几次 lgdt 指令调用"       → 至少 4 次
+  - 如果问"有几个 desc_ptr 结构"       → 很多个（大多数指向 gdt_page）
+
+early_gdt_descr 和 startup_gdt_descr 都是 desc_ptr 结构，
+它们都指向同一个 GDT 表：gdt_page
+```
+
+**🔧 验证方法**：
+
+```bash
+# 查看汇编代码中的定义
+$ grep -A5 "early_gdt_descr" arch/x86/kernel/head_64.S
+SYM_DATA_START_LOCAL(early_gdt_descr)
+    .word   GDT_ENTRIES*8-1
+SYM_DATA_END_LABEL(early_gdt_descr, SYM_L_LOCAL, early_gdt_descr_base)
+SYM_DATA_START_LOCAL(early_gdt_descr_base)
+    .quad   INIT_PER_CPU_VAR(gdt_page)    # ← 看！指向 gdt_page
+SYM_DATA_END(early_gdt_descr_base)
+
+# 查看 C 代码中的使用
+$ grep -B2 -A5 "startup_gdt_descr" arch/x86/boot/startup/gdt_idt.c
+    struct gdt_page *gp = rip_rel_ptr((void *)&gdt_page);  # ← 获取 gdt_page
+    struct desc_ptr startup_gdt_descr = {
+        .address = (unsigned long)gp->gdt,                  # ← 指向 gdt_page->gdt
+        .size = GDT_SIZE - 1
+    };
+```
+
+**💡 为什么需要多个描述符结构？**
+
+1. **early_gdt_descr**（静态）
+   - 在汇编代码中定义，编译时地址已知
+   - 用于早期启动阶段（head_64.S）
+   - 优点：不需要动态计算地址
+
+2. **startup_gdt_descr**（局部变量）
+   - 在 C 代码中动态构建
+   - 使用 `rip_rel_ptr()` 计算 position-independent 地址
+   - 优点：支持可重定位代码
+
+3. **cpu_init 中的 gdt_descr**（局部变量）
+   - 每个 CPU 初始化时使用
+   - 需要获取当前 CPU 的 gdt_page 地址
+   - 优点：支持多处理器系统
+
+**🎓 关键要点**：
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ GDT 表的演化（3 个不同的表）                               │
+│                                                            │
+│  GRUB GDT  →  boot_gdt  →  gdt_page (per-CPU)             │
+│  (固件)      (压缩内核)    (主内核)                        │
+│   ↑           ↑            ↑                               │
+│   替换        替换         最终使用                        │
+│                                                            │
+│ 每次替换时使用 lgdt 指令，参数是 desc_ptr 结构             │
+│ desc_ptr 只是"指针"，不是 GDT 表本身                       │
+└────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ### 主内核的 GDT 演化
 
 主内核的 GDT 经历两次演化：
