@@ -625,13 +625,6 @@ ENTRY(phys_startup_64)
 
 **重要**：这是第二个 startup_64（【阶段3】主内核），与【阶段2】压缩内核中的 startup_64（`arch/x86/boot/compressed/head_64.S:278`）是**不同的文件**。注：【阶段1】是 startup_32，不是 startup_64。
 
-> **关于 `__pi_` 前缀与位置无关代码**：
->
-> 在主内核 startup_64 的早期阶段（如 `call startup_64_setup_gdt_idt`），内核尚未完全建立虚拟地址映射，此时需要使用**位置无关代码（Position Independent Code, PIC）**来访问全局符号。你可能会在代码中看到带 `__pi_` 前缀的符号（如 `__pi_startup_64_setup_gdt_idt`），这些符号是通过 `objcopy --prefix-symbols=__pi_` 自动生成的 PIC 版本。
->
-> 详细的实现机制（包括 `-fPIC` 编译选项、`objcopy` 符号前缀处理、RIP 相对寻址、`rip_rel_ptr()` 宏、`SYM_PIC_ALIAS` 宏等）请参阅：
-> - **[POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)** - 位置无关代码完整分析
-
 **主内核 startup_64**：保存 boot_params（%RSI→%R15）、设置初始栈与 GS 基址、**设置 GDT 和早期 IDT**（`startup_64_setup_gdt_idt`）、切换到 __KERNEL_CS、可选 SEV/SME、verify_cpu，然后进入 C 代码。
 
 **主内核 startup_64 关键步骤**：
@@ -704,7 +697,6 @@ SYM_CODE_END(startup_64)
 **startup_64_setup_gdt_idt 的实现**（`arch/x86/boot/startup/gdt_idt.c`）：主内核入口在切换到虚拟地址和 C 环境之前需要可用的 GDT 与一个最小 IDT。
 
 > **相关文档**：
-> - [POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)：详细分析了 `__pi_` 前缀的含义、位置无关代码编译机制（-fPIC、objcopy --prefix-symbols）、RIP 相对寻址、SYM_PIC_ALIAS 宏的实现原理，以及 `startup_64_setup_gdt_idt()` 如何通过 `rip_rel_ptr()` 访问符号
 > - [GDT 详解：从保护模式到长模式](GDT_DETAILED_GUIDE.md)：GDT 的完整演化过程（GRUB GDT → 压缩内核 GDT → 主内核 GDT → per-CPU GDT）、段描述符结构详解、长模式下的作用、GDT Identity Mapping 平滑过渡机制
 > - [x86-64 多级页表设计详解](PAGE_TABLE_DESIGN.md)：页表建立过程、x86-64 硬件要求、多级页表设计原理、MMU 硬件遍历机制
 > - [IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md)：两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
@@ -970,6 +962,29 @@ Linux 内核使用**两个独立的 IDT 表**，在启动过程中逐步完善�
 
 > **详细内容**：两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、代码实现、GDT/IDT 对比、IST 机制、中断状态管理的完整分析，请参见 **[IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md)**。
 
+---
+
+### 补充说明：位置无关代码（PIC）与 `__pi_` 前缀
+
+**背景**：在主内核 startup_64 的早期阶段（如 `call startup_64_setup_gdt_idt`），内核尚未完全建立虚拟地址映射，此时需要使用**位置无关代码（Position Independent Code, PIC）**来访问全局符号。
+
+**`__pi_` 前缀的含义**：
+
+你可能在代码中看到带 `__pi_` 前缀的符号（如 `__pi_startup_64_setup_gdt_idt`），这些符号是通过 `objcopy --prefix-symbols=__pi_` 自动生成的 PIC 版本。
+
+**实现机制**：
+- **编译时**：使用 `-fPIC` 选项编译，生成位置无关代码
+- **链接时**：使用 `objcopy --prefix-symbols=__pi_` 为符号添加前缀
+- **运行时**：通过 RIP 相对寻址访问全局符号，使用 `rip_rel_ptr()` 宏计算实际地址
+
+**为何需要 PIC**：
+- 早期阶段页表尚未完全建立，虚拟地址映射可能不完整
+- 代码可能在不同的物理地址运行（如 KASLR 随机化）
+- 需要通过相对寻址而非绝对地址访问全局数据
+
+> **详细内容**：位置无关代码的完整实现机制（`-fPIC` 编译选项、`objcopy` 符号前缀处理、RIP 相对寻址、`rip_rel_ptr()` 宏、`SYM_PIC_ALIAS` 宏、以及 `startup_64_setup_gdt_idt()` 如何访问全局符号等），请参见 **[POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)**。
+
+---
 
 ## 四、start_kernel() 流程概述
 
