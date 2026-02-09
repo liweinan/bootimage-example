@@ -397,6 +397,488 @@ asmlinkage __visible void *extract_kernel(
 
 ---
 
+## 重要时间线：长模式和分页的激活顺序
+
+**常见误解澄清**：
+
+很多人误以为主内核的 `startup_64_setup_gdt_idt()` 执行时还未启用分页，或者还不在长模式。实际情况是：
+
+```
+❌ 错误理解：
+   startup_64_setup_gdt_idt() 执行时 → 还在保护模式 → 分页未启用
+
+✅ 正确理解：
+   startup_64_setup_gdt_idt() 执行时 → 已在长模式 ✓ → 分页已启用 ✓
+   使用的是压缩内核建立的临时页表（pgtable）
+```
+
+### 完整的时间线详解
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【时间点 1】压缩内核 startup_32（32位保护模式）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+位置：arch/x86/boot/compressed/head_64.S
+
+SYM_FUNC_START(startup_32)
+    # 当前状态：
+    # - CPU模式：32位保护模式
+    # - 分页状态：CR0.PG = 0（分页未启用）
+    # - 使用：GRUB 的 GDT
+
+    # ... 初始化代码 ...
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 步骤 1：建立 4 级页表（pgtable，6 页 = 24KB）      │
+    └─────────────────────────────────────────────────────┘
+
+    # 计算页表位置
+    leal    rva(pgtable)(%ebx), %edi
+
+    # 清零 6 页
+    xorl    %eax, %eax
+    movl    $(BOOT_PGT_SIZE >> 2), %ecx
+    rep     stosl
+
+    # 设置 PML4[0] → PDPT
+    leal    rva(pgtable)(%ebx), %edi
+    leal    0x1000(%edi), %eax
+    orl     $0x03, %eax
+    movl    %eax, 0(%edi)
+
+    # 设置 PDPT[0-3] → PD0-3（映射 4GB）
+    leal    0x1000(%edi), %edi
+    leal    0x1000(%edi), %eax
+    orl     $0x03, %eax
+    movl    $4, %ecx
+1:  movl    %eax, 0(%edi)
+    addl    $0x1000, %eax
+    addl    $8, %edi
+    decl    %ecx
+    jnz     1b
+
+    # 设置 PD（使用 2MB 大页）
+    leal    rva(pgtable)(%ebx), %edi
+    addl    $0x2000, %edi
+    movl    $0x00000083, %eax     # Present + R/W + PS (2MB)
+    movl    $2048, %ecx           # 2048 × 2MB = 4GB
+1:  movl    %eax, 0(%edi)
+    addl    $0x200000, %eax
+    addl    $8, %edi
+    decl    %ecx
+    jnz     1b
+
+    ✓ 页表建立完成
+    ✓ 映射：Identity Mapping 0-4GB
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 步骤 2：加载 CR3（页表基址寄存器）                  │
+    └─────────────────────────────────────────────────────┘
+
+    leal    rva(pgtable)(%ebx), %eax
+    movl    %eax, %cr3            ← CR3 已设置
+
+    状态更新：
+    ✓ CR3 = pgtable 物理地址
+    ✗ CR0.PG = 0（分页仍未启用）
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 步骤 3：启用 PAE（物理地址扩展）                    │
+    └─────────────────────────────────────────────────────┘
+
+    movl    %cr4, %eax
+    orl     $X86_CR4_PAE, %eax
+    movl    %eax, %cr4
+
+    状态更新：
+    ✓ CR4.PAE = 1（必须，长模式要求）
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 步骤 4：设置 EFER.LME = 1（Long Mode Enable）      │
+    └─────────────────────────────────────────────────────┘
+
+    movl    $MSR_EFER, %ecx
+    rdmsr
+    btsl    $_EFER_LME, %eax      # EFER.LME = 1
+    wrmsr
+
+    状态更新：
+    ✓ EFER.LME = 1（长模式已使能，但未激活）
+    ✗ EFER.LMA = 0（长模式尚未激活）
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 步骤 5：启用分页 → 激活长模式！                     │
+    └─────────────────────────────────────────────────────┘
+
+    # 同时设置 PG（分页）和 PE（保护模式）
+    movl    $(X86_CR0_PG | X86_CR0_PE), %eax
+    movl    %eax, %cr0            ← 关键时刻！
+
+    硬件自动操作：
+    ✓ CR0.PG = 1（分页启用）
+    ✓ EFER.LME=1 + CR0.PG=1 → EFER.LMA=1（长模式激活）
+    ✓ CPU 从此在 IA-32e 模式（64位长模式）
+
+    重要：从此刻起，分页一直启用，长模式一直激活！
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 步骤 6：跳转到 64 位代码                             │
+    └─────────────────────────────────────────────────────┘
+
+    # 远跳转（加载 64 位代码段选择子到 CS）
+    pushl   $__KERNEL_CS
+    leal    startup_64(%ebp), %eax
+    pushl   %eax
+    lretq
+
+    # 或者：
+    ljmpl   $__KERNEL_CS, $(.Llong_mode)
+
+.Llong_mode:
+    # ← 从这里开始，已经在真正的 64 位长模式
+    # ← CS.L = 1（64位代码段）
+    # ← 默认操作数大小 = 64 位
+    # ← 可以使用 64 位寄存器（RAX, RBX, ...）
+
+SYM_FUNC_END(startup_32)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【时间点 2】压缩内核 startup_64（64位长模式）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+位置：arch/x86/boot/compressed/head_64.S
+
+SYM_FUNC_START(startup_64)
+    # 进入时的状态（从 startup_32 继承）：
+    # ✓ CPU模式：64位长模式（EFER.LMA=1）
+    # ✓ 分页状态：CR0.PG = 1（已启用）
+    # ✓ 页表：pgtable（6页，Identity Mapping 0-4GB）
+    # ✓ GDT：GRUB 或早期临时 GDT
+
+    # 初始化段寄存器
+    xorl    %eax, %eax
+    movl    %eax, %ds
+    movl    %eax, %es
+    movl    %eax, %ss
+
+    # ... 设置栈 ...
+
+    # 解压内核
+    call    extract_kernel
+
+    # 跳转到主内核（解压后的内核）
+    jmp     *%rax             # RAX = 主内核 startup_64 的地址
+
+SYM_FUNC_END(startup_64)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【时间点 3】主内核 startup_64（64位长模式）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+位置：arch/x86/kernel/head_64.S
+
+SYM_CODE_START(startup_64)
+    # 进入时的状态（从压缩内核继承）：
+    # ✓ CPU模式：64位长模式
+    # ✓ 分页状态：CR0.PG = 1（仍然启用）
+    # ✓ 页表：pgtable（压缩内核的临时页表）
+    # ✓ GDT：压缩内核的临时 GDT
+
+    # 清理段寄存器
+    xorl    %eax, %eax
+    movl    %eax, %ds
+    movl    %eax, %es
+    movl    %eax, %ss
+
+    # 设置栈
+    leaq    (__end_init_task - FRAME_SIZE)(%rip), %rsp
+
+    # 清零 EFLAGS
+    pushq   $0
+    popfq
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 关键调用：加载主内核的 GDT 和 IDT                   │
+    └─────────────────────────────────────────────────────┘
+
+    leaq    _text(%rip), %rdi
+    call    startup_64_setup_gdt_idt  ← 就是这里！
+
+    # 此时的状态（startup_64_setup_gdt_idt 执行时）：
+    # ✓ CPU模式：64位长模式
+    # ✓ EFER.LMA = 1
+    # ✓ CR0.PG = 1（分页已启用，从步骤5开始就一直启用）
+    # ✓ CR3 = pgtable（压缩内核的临时页表）
+    # ✓ 页表内容：Identity Mapping 0-4GB（2MB大页）
+    # ✗ 主内核的完整页表还未建立
+
+    ┌─────────────────────────────────────────────────────┐
+    │ startup_64_setup_gdt_idt() 函数内部                 │
+    └─────────────────────────────────────────────────────┘
+
+void __head startup_64_setup_gdt_idt(void)
+{
+    # 当前状态：
+    # ✓ 长模式 ✓
+    # ✓ 分页启用 ✓
+    # ✓ 使用临时页表（pgtable）
+
+    struct gdt_page *gp = rip_rel_ptr((void *)&gdt_page);
+    struct desc_ptr startup_gdt_descr = {
+        .address = (unsigned long)gp->gdt,
+        .size = GDT_SIZE - 1
+    };
+
+    native_load_gdt(&startup_gdt_descr);  ← 你问的这里
+    # ← 此时：长模式 ✓，分页 ✓，临时页表 ✓
+    # ← lgdt 指令只改变 GDT，不影响分页状态
+    # ← CR0.PG 仍然是 1
+    # ← CR3 仍然指向 pgtable
+
+    # 重载段寄存器
+    asm volatile("movl %%eax, %%ds\n"
+                 "movl %%eax, %%ss\n"
+                 "movl %%eax, %%es\n"
+                 : : "a"(__KERNEL_DS) : "memory");
+
+    # 加载早期 IDT
+    startup_64_load_idt(handler);
+}
+
+    ✓ GDT 已更新（从压缩内核的临时 GDT → 主内核的 gdt_page）
+    ✓ 分页仍然启用（从未禁用过）
+    ✓ 页表仍然是 pgtable（临时的）
+
+    # 继续初始化
+    # ...
+
+SYM_CODE_END(startup_64)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【时间点 4】x86_64_start_kernel（C代码初始化）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+位置：arch/x86/kernel/head64.c
+
+asmlinkage __visible void __init x86_64_start_kernel(char *real_mode_data)
+{
+    # 当前状态：
+    # ✓ 长模式
+    # ✓ 分页启用
+    # ✓ GDT：gdt_page
+    # ✓ 页表：pgtable（压缩内核的临时页表，仍在使用）
+
+    # 重置早期页表（仍然是临时页表）
+    reset_early_page_tables();
+
+    # 清零 BSS
+    clear_bss();
+
+    # 清零早期页表
+    clear_page(init_top_pgt);
+
+    # ... 其他初始化 ...
+
+    # 跳转到通用内核初始化
+    x86_64_start_reservations(real_mode_data);
+}
+
+void __init x86_64_start_reservations(char *real_mode_data)
+{
+    # ...
+    start_kernel();  ← 通用内核入口
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【时间点 5】setup_arch() → init_mem_mapping()
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+位置：arch/x86/kernel/setup.c → arch/x86/mm/init.c
+
+start_kernel()
+    → setup_arch(&command_line)
+        → init_mem_mapping()  ← 在这里才建立主内核的完整页表！
+
+void __init init_mem_mapping(void)
+{
+    # 当前状态：
+    # ✓ 长模式
+    # ✓ 分页启用
+    # ✓ 页表：pgtable（临时的，只映射 0-4GB）
+
+    # 探测页大小（4KB/2MB/1GB）
+    probe_page_size_mask();
+
+    # 设置 KASLR（内核地址空间随机化）
+    setup_arch_memory_layout();
+
+    # 计算最大物理地址
+    end = max_pfn << PAGE_SHIFT;
+
+    # 映射所有物理内存（从高地址到低地址）
+    memory_map_top_down(ISA_END_ADDRESS, end);
+
+    # 映射低端内存（ISA 设备需要）
+    if (max_pfn > ISA_END_ADDRESS >> PAGE_SHIFT)
+        memory_map_bottom_up(0, ISA_END_ADDRESS);
+
+    ┌─────────────────────────────────────────────────────┐
+    │ 关键操作：切换到新的完整页表                        │
+    └─────────────────────────────────────────────────────┘
+
+    # 加载新的页表
+    load_cr3(swapper_pg_dir);  ← 切换到主内核的完整页表
+    __flush_tlb_all();
+
+    ✓ 页表切换完成
+    ✓ 从临时页表（pgtable，6页）→ 完整页表（swapper_pg_dir）
+    ✓ 映射范围：0-4GB → 所有物理内存（可能数百GB）
+    ✓ 支持：Direct Mapping、vmalloc、内核代码段映射等
+
+    # 初始化内存映射区域
+    early_memremap_init();
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【最终状态】内核完全运行
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    # ✓ CPU模式：64位长模式
+    # ✓ 分页状态：CR0.PG = 1（一直启用，从步骤5开始）
+    # ✓ GDT：gdt_page（每个CPU一份）
+    # ✓ 页表：swapper_pg_dir（完整的动态页表）
+    # ✓ 地址映射：Direct Mapping（整个物理内存）
+```
+
+### 关键时间点总结
+
+| 时间点 | 位置 | 长模式 | 分页 | 页表 | GDT |
+|--------|------|--------|------|------|-----|
+| **1** | 压缩内核 startup_32（开始） | ❌ 保护模式 | ❌ CR0.PG=0 | ❌ 无 | GRUB GDT |
+| **2** | 压缩内核 startup_32（建表） | ❌ 保护模式 | ❌ CR0.PG=0 | ✅ pgtable（建立中） | GRUB GDT |
+| **3** | 压缩内核 startup_32（CR3） | ❌ 保护模式 | ❌ CR0.PG=0 | ✅ pgtable（CR3已设） | GRUB GDT |
+| **4** | 压缩内核 startup_32（EFER） | ⚠️ 已使能 | ❌ CR0.PG=0 | ✅ pgtable | GRUB GDT |
+| **5** | 压缩内核 startup_32（PG=1） | ✅ **激活** | ✅ **启用** | ✅ pgtable | GRUB GDT |
+| **6** | 压缩内核 startup_64 | ✅ 长模式 | ✅ CR0.PG=1 | ✅ pgtable | 临时 GDT |
+| **7** | 主内核 startup_64 | ✅ 长模式 | ✅ CR0.PG=1 | ✅ pgtable | 临时 GDT |
+| **8** | **startup_64_setup_gdt_idt()** | ✅ 长模式 | ✅ CR0.PG=1 | ✅ pgtable | **gdt_page** |
+| **9** | x86_64_start_kernel() | ✅ 长模式 | ✅ CR0.PG=1 | ✅ pgtable | gdt_page |
+| **10** | init_mem_mapping() | ✅ 长模式 | ✅ CR0.PG=1 | ✅ **swapper_pg_dir** | gdt_page |
+
+**关键观察**：
+
+1. **时间点 5 是分水岭**：从此刻起，长模式和分页一直保持启用
+2. **startup_64_setup_gdt_idt() 在时间点 8**：此时长模式和分页都已启用
+3. **页表演化**：pgtable（临时，6页）→ swapper_pg_dir（完整，动态）
+4. **GDT 演化**：GRUB GDT → 临时 GDT → gdt_page（主内核）
+
+### 临时页表 vs 完整页表对比
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 临时页表（pgtable）                                          │
+├──────────────────────────────────────────────────────────────┤
+│ 建立时机：压缩内核 startup_32                                │
+│ 大小：    6 页（24KB）= 1 PML4 + 1 PDPT + 4 PD              │
+│ 映射范围：0-4GB                                              │
+│ 映射类型：Identity Mapping（虚拟地址 = 物理地址）           │
+│ 页大小：  2MB 大页                                           │
+│ 使用阶段：压缩内核 → 主内核早期（startup_64_setup_gdt_idt） │
+│ 特点：    静态、预先计算、足够运行早期代码                   │
+└──────────────────────────────────────────────────────────────┘
+                              ↓
+                   init_mem_mapping() 切换
+                              ↓
+┌──────────────────────────────────────────────────────────────┐
+│ 完整页表（swapper_pg_dir）                                   │
+├──────────────────────────────────────────────────────────────┤
+│ 建立时机：init_mem_mapping()                                 │
+│ 大小：    动态分配（可能数百KB）                             │
+│ 映射范围：所有物理内存（可能数百GB）                         │
+│ 映射类型：Direct Mapping + 内核代码映射 + vmalloc 等        │
+│ 页大小：  混合（4KB + 2MB + 1GB）                           │
+│ 使用阶段：内核完全运行                                       │
+│ 特点：    动态、按需分配、完整的地址空间布局                 │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 为什么长模式必须启用分页？
+
+这是 Intel/AMD 架构的硬性规定：
+
+```
+【Intel SDM 规定】
+进入 IA-32e 模式（64位长模式）的必要条件：
+1. ✓ CR4.PAE = 1（启用物理地址扩展）
+2. ✓ EFER.LME = 1（长模式使能）
+3. ✓ CR0.PG = 1（分页启用）← 必须！
+
+【违反的后果】
+if (EFER.LME == 1 && CR0.PG == 0) {
+    // 触发 #GP（General Protection Fault）
+    // 系统无法启动
+}
+
+【在长模式下禁用分页】
+不可能！长模式运行期间：
+- CR0.PG 必须保持为 1
+- 试图设置 CR0.PG = 0 → #GP 异常
+- 长模式和分页是绑定的
+
+【设计原因】
+长模式设计为纯虚拟内存模式：
+- 段基址强制为 0（扁平模式）
+- 所有地址转换依赖分页机制
+- 内存保护完全依赖页表权限位
+- 不允许物理地址直接访问
+```
+
+### 验证方法
+
+你可以在 GDB 中验证每个时间点的状态：
+
+```gdb
+# 在 startup_32 的 movl %eax, %cr0 之前设置断点
+(gdb) break *startup_32 + 偏移
+(gdb) p/x $cr0
+$1 = 0x00000033    # Bit 31 (PG) = 0 → 分页未启用
+
+# 单步执行 movl %eax, %cr0
+(gdb) stepi
+(gdb) p/x $cr0
+$2 = 0x80050033    # Bit 31 (PG) = 1 → 分页已启用
+
+# 检查 EFER 寄存器
+(gdb) p/x $msr_efer
+$3 = 0x500         # Bit 8 (LME)=1, Bit 10 (LMA)=1 → 长模式已激活
+
+# 在 startup_64_setup_gdt_idt 设置断点
+(gdb) break startup_64_setup_gdt_idt
+(gdb) continue
+(gdb) p/x $cr0
+$4 = 0x80050033    # PG=1，分页仍然启用
+(gdb) p/x $cr3
+$5 = 0x102000      # 指向 pgtable（临时页表）
+
+# 在 init_mem_mapping 的 load_cr3 设置断点
+(gdb) break load_cr3
+(gdb) continue
+(gdb) p/x swapper_pg_dir
+$6 = 0xffffffff82012000    # 新的页表地址
+(gdb) continue
+(gdb) p/x $cr3
+$7 = 0x02012000    # CR3 已切换到新页表
+```
+
+### 常见误解纠正
+
+| 误解 | 正确理解 |
+|------|---------|
+| ❌ "startup_64_setup_gdt_idt() 执行时还在保护模式" | ✅ 已经在长模式（从压缩内核就进入了） |
+| ❌ "startup_64_setup_gdt_idt() 执行时分页未启用" | ✅ 分页已启用（CR0.PG=1，从压缩内核就启用了） |
+| ❌ "主内核启动时才建立页表" | ✅ 压缩内核就建立了临时页表（pgtable） |
+| ❌ "lgdt 会影响分页状态" | ✅ lgdt 只改变 GDT，不影响 CR0.PG 和 CR3 |
+| ❌ "长模式可以不启用分页" | ✅ 长模式强制要求分页，无法禁用 |
+| ❌ "只有一套页表" | ✅ 有两套：临时页表（pgtable）→ 完整页表（swapper_pg_dir） |
+
+---
+
 ## 阶段 ④：主内核阶段
 
 主内核（Main Kernel）建立完整的内存管理体系，包括最终的 GDT 和动态页表。
