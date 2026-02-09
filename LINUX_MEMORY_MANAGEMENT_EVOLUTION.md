@@ -1132,6 +1132,727 @@ malloc/mmap（用户空间 API）
 
 ---
 
+## 三套 GDT 详细对比：源代码级分析
+
+### 为什么有三套 GDT？
+
+在 Linux 内核启动过程中，GDT 经历了三次演化：
+
+```
+GRUB GDT → 压缩内核 boot_gdt → 主内核 gdt_page
+
+【为什么不能一套 GDT 用到底？】
+
+问题1：GRUB GDT 为什么不能继续用？
+- GRUB GDT 在 GRUB 控制的内存区域
+- 内核解压和加载会覆盖这块内存
+- 不在内核控制范围内，不可靠
+
+问题2：压缩内核 boot_gdt 为什么不能用到最后？
+- boot_gdt 太简单：只有 3-4 个段描述符
+- 缺少用户态段（USER_CS, USER_DS）
+- 缺少 TSS（任务状态段）
+- 不支持 Per-CPU（每个 CPU 需要独立的 GDT）
+- 不支持系统调用（SYSCALL/SYSRET 需要特定布局）
+
+问题3：为什么需要 Per-CPU GDT？
+- 每个 CPU 需要独立的 TSS
+- 每个 CPU 需要独立的内核栈
+- 支持 SMP（对称多处理器）
+```
+
+### GDT 1：GRUB 的 GDT
+
+**源代码位置**：`grub-core/lib/i386/relocator.c`（GRUB 源代码）
+
+```c
+/* GRUB 的 GDT 定义 */
+static struct grub_relocator64_gdt_ent {
+    grub_uint64_t entry;
+} __attribute__ ((packed));
+
+static struct grub_relocator64_gdt_ent grub_relocator_gdt[] = {
+    /* GDT[0]: NULL 描述符 */
+    { .entry = 0x0000000000000000ULL },
+
+    /* GDT[1]: 32位代码段 */
+    { .entry = 0x00CF9A000000FFFFULL },
+    /*
+     * 详细解析：
+     * Base:  0x00000000 (段基址)
+     * Limit: 0xFFFFF (段界限, 4GB)
+     * G:     1 (粒度 4KB)
+     * D:     1 (32位默认操作数)
+     * L:     0 (不是64位段)
+     * P:     1 (存在)
+     * DPL:   0 (Ring 0)
+     * S:     1 (代码/数据段)
+     * Type:  0xA (1010, 代码段, 可执行, 可读)
+     */
+
+    /* GDT[2]: 32位数据段 */
+    { .entry = 0x00CF92000000FFFFULL },
+    /*
+     * 详细解析：
+     * Base:  0x00000000
+     * Limit: 0xFFFFF (4GB)
+     * G:     1 (粒度 4KB)
+     * D:     1 (32位)
+     * L:     0
+     * P:     1
+     * DPL:   0 (Ring 0)
+     * S:     1
+     * Type:  0x2 (0010, 数据段, 可读写)
+     */
+
+    /* GDT[3]: 64位代码段 */
+    { .entry = 0x00AF9A000000FFFFULL },
+    /*
+     * 详细解析：
+     * Base:  0x00000000
+     * Limit: 0xFFFFF (在长模式下被忽略)
+     * G:     1
+     * D:     0 (64位段必须为0)
+     * L:     1 ← 关键！标识64位代码段
+     * P:     1
+     * DPL:   0 (Ring 0)
+     * S:     1
+     * Type:  0xA (代码段, 可执行, 可读)
+     */
+
+    /* GDT[4]: 64位数据段 */
+    { .entry = 0x00AF92000000FFFFULL },
+    /*
+     * 详细解析：
+     * Base:  0x00000000
+     * Limit: 0xFFFFF (被忽略)
+     * G:     1
+     * D:     0
+     * L:     1 ← 64位数据段
+     * P:     1
+     * DPL:   0 (Ring 0)
+     * S:     1
+     * Type:  0x2 (数据段, 可读写)
+     */
+};
+
+/* GRUB 加载 GDT */
+static void
+grub_relocator64_boot (struct grub_relocator64_state state)
+{
+    /* 设置 GDTR */
+    struct {
+        grub_uint16_t limit;
+        grub_uint64_t base;
+    } __attribute__ ((packed)) gdtr = {
+        .limit = sizeof(grub_relocator_gdt) - 1,
+        .base = (grub_uint64_t) grub_relocator_gdt
+    };
+
+    asm volatile ("lgdt %0" : : "m" (gdtr));
+
+    /* 跳转到内核 */
+    /* CS = GDT[3] (64位代码段) */
+    /* DS/SS/ES = GDT[4] (64位数据段) */
+}
+```
+
+**GRUB GDT 特点**：
+
+```
+段数量：5 个（NULL + 32位CS/DS + 64位CS/DS）
+使用时期：GRUB → 压缩内核 startup_32 早期
+段选择子：
+  - 0x08: 32位代码段
+  - 0x10: 32位数据段
+  - 0x18: 64位代码段
+  - 0x20: 64位数据段
+
+优点：
+✓ 支持从保护模式到长模式的过渡
+✓ 同时有32位和64位段
+✓ 扁平模式（Base=0）
+
+缺点：
+✗ 只有内核态段（DPL=0）
+✗ 没有用户态段
+✗ 没有 TSS
+✗ 位于 GRUB 内存区域，不可靠
+✗ 内核无法控制
+```
+
+### GDT 2：压缩内核的 boot_gdt
+
+**源代码位置**：`arch/x86/boot/compressed/head_64.S`（Linux 内核源代码）
+
+```asm
+/*
+ * 压缩内核的 GDT 定义
+ * 位置：.rodata 段（只读数据）
+ */
+    .section ".rodata", "a"
+    .balign 16
+SYM_DATA_START_LOCAL(gdt64)
+    /* GDTR 结构（10字节） */
+    .word   gdt_end - gdt - 1           /* Limit: GDT大小 - 1 */
+    .long   0                           /* Base低32位（运行时修正） */
+    .word   0                           /* Base高16位 */
+
+    /* GDT 表内容 */
+SYM_DATA_START_LOCAL(gdt)
+    /* GDT[0]: NULL 描述符 */
+    .quad   0x0000000000000000
+
+    /* GDT[1]: __KERNEL32_CS (32位代码段) */
+    .quad   0x00cf9a000000ffff
+    /*
+     * 二进制详解：
+     *   63    56 55  52 51   48 47     40 39  32
+     *   00 cf 9a 00 00 00 ff ff
+     *
+     *   Base[31:24] = 0x00
+     *   G  = 1 (4KB granularity)
+     *   D  = 1 (32-bit)
+     *   L  = 0 (not 64-bit) ← 关键
+     *   AVL= 0
+     *   Limit[19:16] = 0xF
+     *   P  = 1 (Present)
+     *   DPL= 0 (Ring 0)
+     *   S  = 1 (code/data)
+     *   Type = 0xA (1010, code, exec, read)
+     *   Base[23:16] = 0x00
+     *   Base[15:0]  = 0x0000
+     *   Limit[15:0] = 0xFFFF
+     *
+     *   段基址 = 0x00000000
+     *   段界限 = 0xFFFFF (4GB)
+     *
+     * 用途：在 startup_32 中使用，进入长模式前的代码段
+     */
+
+    /* GDT[2]: __KERNEL_CS (64位代码段) */
+    .quad   0x00af9a000000ffff
+    /*
+     * 二进制详解：
+     *   63    56 55  52 51   48 47     40 39  32
+     *   00 af 9a 00 00 00 ff ff
+     *
+     *   Base[31:24] = 0x00
+     *   G  = 1
+     *   D  = 0 (must be 0 for 64-bit) ← 关键
+     *   L  = 1 (64-bit code segment) ← 关键
+     *   AVL= 0
+     *   Limit[19:16] = 0xF (被忽略)
+     *   P  = 1
+     *   DPL= 0 (Ring 0)
+     *   S  = 1
+     *   Type = 0xA (code, exec, read)
+     *   Base[23:16] = 0x00
+     *   Base[15:0]  = 0x0000 (强制为0)
+     *   Limit[15:0] = 0xFFFF (被忽略)
+     *
+     *   段基址 = 0x00000000 (长模式强制)
+     *   段界限 = 被忽略
+     *
+     * 用途：进入长模式后的代码段
+     *       压缩内核 startup_64 使用
+     *       主内核 startup_64 使用（直到 startup_64_setup_gdt_idt）
+     */
+
+    /* GDT[3]: __KERNEL_DS (数据段) */
+    .quad   0x00cf92000000ffff
+    /*
+     * 二进制详解：
+     *   63    56 55  52 51   48 47     40 39  32
+     *   00 cf 92 00 00 00 ff ff
+     *
+     *   Base[31:24] = 0x00
+     *   G  = 1
+     *   D  = 1
+     *   L  = 0
+     *   AVL= 0
+     *   Limit[19:16] = 0xF
+     *   P  = 1
+     *   DPL= 0 (Ring 0)
+     *   S  = 1
+     *   Type = 0x2 (0010, data, read/write)
+     *   Base[23:16] = 0x00
+     *   Base[15:0]  = 0x0000
+     *   Limit[15:0] = 0xFFFF
+     *
+     *   段基址 = 0x00000000
+     *   段界限 = 0xFFFFF (4GB, 在长模式下被忽略)
+     *
+     * 用途：DS/SS/ES 数据段
+     *       压缩内核和主内核早期使用
+     */
+SYM_DATA_END_LABEL(gdt, SYM_L_LOCAL, gdt_end)
+SYM_DATA_END(gdt64)
+
+/*
+ * 在 startup_32 中加载 boot_gdt
+ */
+SYM_FUNC_START(startup_32)
+    /* ... 前面的代码 ... */
+
+    /*
+     * 加载 GDT
+     * 需要修正 GDT 基址（因为使用 RIP 相对寻址）
+     */
+    leal    rva(gdt)(%ebp), %eax        /* 计算 gdt 的物理地址 */
+    movl    %eax, 2(%eax)               /* 修正 gdt64 结构中的 Base 字段 */
+    lgdt    (%eax)                      /* 加载 GDTR */
+
+    /* 重新加载段寄存器 */
+    movl    $__KERNEL_DS, %eax          /* EAX = 0x18 (GDT[3]) */
+    movl    %eax, %ds
+    movl    %eax, %es
+    movl    %eax, %ss
+
+    /* ... 建立页表、进入长模式 ... */
+
+    /*
+     * 跳转到 64 位代码
+     * CS 将被设置为 __KERNEL_CS (0x10, GDT[2])
+     */
+    pushl   $__KERNEL_CS
+    leal    startup_64(%ebp), %eax
+    pushl   %eax
+    lretq                               /* 远返回，切换到 64 位 */
+
+SYM_FUNC_END(startup_32)
+```
+
+**boot_gdt 特点**：
+
+```
+段数量：4 个（NULL + KERNEL32_CS + KERNEL_CS + KERNEL_DS）
+使用时期：压缩内核 startup_32
+         → 压缩内核 startup_64
+         → 主内核 startup_64（直到 startup_64_setup_gdt_idt）
+段选择子：
+  - 0x08: 32位代码段（__KERNEL32_CS）
+  - 0x10: 64位代码段（__KERNEL_CS）← 长模式使用
+  - 0x18: 数据段（__KERNEL_DS）
+
+设计特点：
+✓ 极简设计：只有进入长模式必需的段
+✓ 位于内核镜像内：随内核一起加载，可控
+✓ 使用 RIP 相对寻址：位置无关
+✓ 支持 32→64 位过渡
+
+优点：
+✓ 足够压缩内核运行
+✓ 足够主内核早期初始化
+✓ 静态定义，编译时确定
+✓ 不依赖外部内存分配
+
+缺点：
+✗ 只有内核态段（DPL=0）
+✗ 没有用户态段（无法运行用户进程）
+✗ 没有 TSS（无法任务切换、系统调用）
+✗ 不是 Per-CPU（不支持 SMP）
+✗ 不满足 SYSCALL/SYSRET 的 GDT 布局要求
+```
+
+### GDT 3：主内核的 gdt_page
+
+**源代码位置**：`arch/x86/kernel/cpu/common.c`（Linux 内核源代码）
+
+```c
+/*
+ * 主内核的 GDT 定义
+ * 这是完整的、Per-CPU 的 GDT
+ */
+
+/* GDT 结构定义 */
+struct gdt_page {
+    struct desc_struct gdt[GDT_ENTRIES];  /* 32 个段描述符 */
+} __attribute__((aligned(PAGE_SIZE)));    /* 页对齐（4096字节） */
+
+/*
+ * Per-CPU GDT 定义
+ * 每个 CPU 都有独立的一份
+ */
+DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = { .gdt = {
+    /*
+     * GDT[0]: NULL 描述符
+     * 访问 NULL 段选择子会触发异常
+     */
+    [GDT_ENTRY_NULL] = GDT_ENTRY_INIT(0, 0, 0),
+
+    /*
+     * GDT[1]: 保留（以前是 KERNEL32_CS）
+     * 现代内核不使用
+     */
+
+    /*
+     * GDT[2]: __KERNEL_CS (64位内核代码段)
+     * 段选择子 = 0x10
+     */
+    [GDT_ENTRY_KERNEL_CS] = GDT_ENTRY_INIT(DESC_CODE64, 0, 0xfffff),
+    /*
+     * DESC_CODE64 展开：
+     *   .type = 0xA (代码段, 可执行, 可读)
+     *   .s = 1 (代码/数据段)
+     *   .dpl = 0 (Ring 0)
+     *   .p = 1 (存在)
+     *   .l = 1 (64位) ← 关键
+     *   .d = 0 (must be 0 for 64-bit)
+     *   .g = 1 (4KB granularity)
+     *
+     * Base = 0 (长模式强制)
+     * Limit = 0xfffff (被忽略)
+     *
+     * 用途：内核态代码执行
+     */
+
+    /*
+     * GDT[3]: __KERNEL_DS (内核数据段)
+     * 段选择子 = 0x18
+     */
+    [GDT_ENTRY_KERNEL_DS] = GDT_ENTRY_INIT(DESC_DATA64, 0, 0xfffff),
+    /*
+     * DESC_DATA64 展开：
+     *   .type = 0x2 (数据段, 可读写)
+     *   .s = 1
+     *   .dpl = 0 (Ring 0)
+     *   .p = 1
+     *   .l = 0
+     *   .d = 1
+     *   .g = 1
+     *
+     * Base = 0
+     * Limit = 0xfffff (被忽略)
+     *
+     * 用途：DS/SS/ES 数据段
+     */
+
+    /*
+     * GDT[4]: __USER32_CS (32位用户代码段)
+     * 段选择子 = 0x23 (索引4, RPL=3)
+     */
+    [GDT_ENTRY_DEFAULT_USER32_CS] = GDT_ENTRY_INIT(DESC_CODE32 | DESC_USER, 0, 0xfffff),
+    /*
+     * DESC_CODE32 | DESC_USER 展开：
+     *   .type = 0xA (代码段)
+     *   .s = 1
+     *   .dpl = 3 (Ring 3) ← 用户态
+     *   .p = 1
+     *   .l = 0 (32位)
+     *   .d = 1 (32位默认)
+     *   .g = 1
+     *
+     * 用途：运行 32 位用户程序（兼容模式）
+     */
+
+    /*
+     * GDT[5]: __USER_DS (用户数据段)
+     * 段选择子 = 0x2B (索引5, RPL=3)
+     */
+    [GDT_ENTRY_DEFAULT_USER_DS] = GDT_ENTRY_INIT(DESC_DATA64 | DESC_USER, 0, 0xfffff),
+    /*
+     * DESC_DATA64 | DESC_USER 展开：
+     *   .type = 0x2 (数据段)
+     *   .s = 1
+     *   .dpl = 3 (Ring 3) ← 用户态
+     *   .p = 1
+     *   .l = 0
+     *   .d = 1
+     *   .g = 1
+     *
+     * 用途：用户态数据段（DS/SS/ES）
+     */
+
+    /*
+     * GDT[6]: __USER_CS (64位用户代码段)
+     * 段选择子 = 0x33 (索引6, RPL=3)
+     */
+    [GDT_ENTRY_DEFAULT_USER_CS] = GDT_ENTRY_INIT(DESC_CODE64 | DESC_USER, 0, 0xfffff),
+    /*
+     * DESC_CODE64 | DESC_USER 展开：
+     *   .type = 0xA (代码段)
+     *   .s = 1
+     *   .dpl = 3 (Ring 3) ← 用户态
+     *   .p = 1
+     *   .l = 1 (64位) ← 关键
+     *   .d = 0
+     *   .g = 1
+     *
+     * 用途：运行 64 位用户程序
+     */
+
+    /*
+     * GDT[7-11]: TSS (Task State Segment)
+     * 每个 CPU 的 TSS（动态设置）
+     *
+     * 注意：TSS 在 64 位模式下占用两个 GDT 条目（16字节）
+     */
+
+    /*
+     * GDT[12-14]: LDT (Local Descriptor Table)
+     * 现代 Linux 很少使用 LDT
+     */
+
+    /*
+     * GDT[15-31]: 其他用途
+     * - TLS (Thread Local Storage) 段
+     * - 其他系统段
+     */
+} };
+EXPORT_PER_CPU_SYMBOL_GPL(gdt_page);
+
+/*
+ * 在 startup_64_setup_gdt_idt() 中加载
+ */
+void __head startup_64_setup_gdt_idt(void)
+{
+    /* 获取当前 CPU 的 gdt_page 地址 */
+    struct gdt_page *gp = rip_rel_ptr((void *)&gdt_page);
+
+    /* 构建 GDTR 结构 */
+    struct desc_ptr startup_gdt_descr = {
+        .address = (unsigned long)gp->gdt,
+        .size = GDT_SIZE - 1                /* 32 * 8 - 1 = 255 */
+    };
+
+    /* 加载 GDT */
+    native_load_gdt(&startup_gdt_descr);    /* lgdt 指令 */
+
+    /* 重新加载段寄存器 */
+    asm volatile("movl %%eax, %%ds\n"
+                 "movl %%eax, %%ss\n"
+                 "movl %%eax, %%es\n"
+                 : : "a"(__KERNEL_DS) : "memory");
+
+    /* 从此使用主内核的 gdt_page */
+}
+
+/*
+ * 每个 CPU 初始化时加载自己的 GDT
+ */
+void cpu_init(void)
+{
+    int cpu = smp_processor_id();
+
+    /* 加载 Per-CPU GDT */
+    load_direct_gdt(cpu);
+
+    /* 设置 TSS */
+    struct tss_struct *tss = &per_cpu(cpu_tss_rw, cpu);
+    set_tss_desc(cpu, &get_cpu_entry_area(cpu)->tss);
+    load_TR_desc();
+
+    /* 设置内核栈 */
+    load_sp0((unsigned long)(cpu_entry_stack(cpu) + 1));
+
+    /* ... 其他初始化 ... */
+}
+```
+
+**gdt_page 特点**：
+
+```
+段数量：32 个（GDT_ENTRIES）
+使用时期：startup_64_setup_gdt_idt() → 内核完全运行
+段选择子：
+  内核态：
+    - 0x10: __KERNEL_CS (64位内核代码)
+    - 0x18: __KERNEL_DS (内核数据)
+  用户态：
+    - 0x23: __USER32_CS (32位用户代码)
+    - 0x2B: __USER_DS (用户数据)
+    - 0x33: __USER_CS (64位用户代码)
+  系统：
+    - TSS 段（每个CPU不同）
+    - LDT 段（可选）
+    - TLS 段
+
+设计特点：
+✓ 完整功能：支持内核态和用户态
+✓ Per-CPU：每个 CPU 独立的 GDT
+✓ 支持系统调用：满足 SYSCALL/SYSRET 布局要求
+✓ 支持任务切换：包含 TSS
+✓ 支持 SMP：多处理器支持
+✓ 支持线程：TLS 段
+
+优点：
+✓ 功能完整
+✓ 支持所有内核特性
+✓ Per-CPU 隔离
+✓ 性能优化
+
+缺点：
+✗ 复杂（32个段）
+✗ 需要动态初始化（Per-CPU）
+```
+
+### 三套 GDT 详细对比表
+
+```
+┌─────────────────┬──────────────┬───────────────┬──────────────┐
+│ 特性            │ GRUB GDT     │ boot_gdt      │ gdt_page     │
+├─────────────────┼──────────────┼───────────────┼──────────────┤
+│ 段描述符数量    │ 5 个         │ 4 个          │ 32 个        │
+├─────────────────┼──────────────┼───────────────┼──────────────┤
+│ NULL 描述符     │ ✓ GDT[0]     │ ✓ GDT[0]      │ ✓ GDT[0]     │
+│ 32位代码段      │ ✓ GDT[1]     │ ✓ GDT[1]      │ ✗ (废弃)     │
+│ 64位代码段      │ ✓ GDT[3]     │ ✓ GDT[2]      │ ✓ GDT[2]     │
+│ 数据段          │ ✓ GDT[2,4]   │ ✓ GDT[3]      │ ✓ GDT[3]     │
+│ 用户代码段      │ ✗            │ ✗             │ ✓ GDT[4,6]   │
+│ 用户数据段      │ ✗            │ ✗             │ ✓ GDT[5]     │
+│ TSS             │ ✗            │ ✗             │ ✓ GDT[7-11]  │
+│ LDT             │ ✗            │ ✗             │ ✓ GDT[12-14] │
+│ TLS             │ ✗            │ ✗             │ ✓ GDT[15-31] │
+├─────────────────┼──────────────┼───────────────┼──────────────┤
+│ 支持内核态      │ ✓            │ ✓             │ ✓            │
+│ 支持用户态      │ ✗            │ ✗             │ ✓            │
+│ 支持系统调用    │ ✗            │ ✗             │ ✓            │
+│ 支持任务切换    │ ✗            │ ✗             │ ✓            │
+│ 支持 SMP        │ ✗            │ ✗             │ ✓ Per-CPU    │
+│ 支持线程        │ ✗            │ ✗             │ ✓ TLS        │
+├─────────────────┼──────────────┼───────────────┼──────────────┤
+│ 定义位置        │ relocator.c  │ head_64.S     │ common.c     │
+│ 存储位置        │ GRUB 内存    │ 内核镜像      │ Per-CPU 区域 │
+│ 加载方式        │ GRUB lgdt    │ startup_32    │ startup_64_  │
+│                 │              │   lgdt        │   setup_gdt  │
+│ 使用时期        │ GRUB 运行时  │ 压缩→主内核   │ 主内核运行   │
+│                 │              │   早期        │              │
+├─────────────────┼──────────────┼───────────────┼──────────────┤
+│ 段基址(Base)    │ 0x00000000   │ 0x00000000    │ 0x00000000   │
+│ 段界限(Limit)   │ 0xFFFFF      │ 0xFFFFF       │ 0xFFFFF      │
+│                 │ (4GB)        │ (4GB, 忽略)   │ (忽略)       │
+│ 扁平模式        │ ✓            │ ✓             │ ✓            │
+│ 长模式兼容      │ ✓            │ ✓             │ ✓            │
+├─────────────────┼──────────────┼───────────────┼──────────────┤
+│ 主要目的        │ GRUB 加载    │ 进入长模式    │ 完整内核     │
+│                 │ 内核         │ 解压内核      │ 运行         │
+├─────────────────┼──────────────┼───────────────┼──────────────┤
+│ 优点            │ 简单         │ 最小化        │ 功能完整     │
+│                 │ 支持32/64位  │ 位置无关      │ Per-CPU      │
+│                 │              │ 可控          │ 支持所有特性 │
+├─────────────────┼──────────────┼───────────────┼──────────────┤
+│ 缺点            │ 不可靠       │ 功能有限      │ 复杂         │
+│                 │ 内核不可控   │ 无用户态      │ 需要初始化   │
+│                 │              │ 无 TSS        │              │
+└─────────────────┴──────────────┴───────────────┴──────────────┘
+```
+
+### 段选择子对比
+
+```
+【GRUB GDT 的段选择子】
+NULL:       0x00 (GDT[0])
+32位CS:     0x08 (GDT[1])
+32位DS:     0x10 (GDT[2])
+64位CS:     0x18 (GDT[3]) ← GRUB 用这个进入长模式
+64位DS:     0x20 (GDT[4])
+
+【boot_gdt 的段选择子】
+NULL:       0x00 (GDT[0])
+32位CS:     0x08 (GDT[1], __KERNEL32_CS)
+64位CS:     0x10 (GDT[2], __KERNEL_CS) ← 长模式主要使用
+数据段:     0x18 (GDT[3], __KERNEL_DS)
+
+【gdt_page 的段选择子】
+NULL:       0x00 (GDT[0])
+保留:       0x08 (GDT[1])
+内核CS:     0x10 (GDT[2], __KERNEL_CS)   ← 内核态代码
+内核DS:     0x18 (GDT[3], __KERNEL_DS)   ← 内核态数据
+用户32CS:   0x23 (GDT[4], __USER32_CS, RPL=3)
+用户DS:     0x2B (GDT[5], __USER_DS, RPL=3) ← 用户态数据
+用户64CS:   0x33 (GDT[6], __USER_CS, RPL=3)  ← 用户态代码
+TSS:        动态分配（GDT[7-11]）
+LDT:        可选（GDT[12-14]）
+TLS:        线程相关（GDT[15-31]）
+```
+
+### SYSCALL/SYSRET 的 GDT 布局要求
+
+这解释了为什么 gdt_page 必须有特定的布局：
+
+```c
+/*
+ * SYSCALL/SYSRET 指令对 GDT 布局的硬性要求
+ */
+
+/* IA32_STAR MSR 寄存器设置 */
+wrmsrl(MSR_STAR,
+       ((u64)__USER32_CS << 48) |      /* SYSRET 用户态 CS 基值 */
+       ((u64)__KERNEL_CS << 32));      /* SYSCALL 内核态 CS */
+
+/*
+ * SYSCALL 指令（用户态 → 内核态）
+ * 硬件自动操作：
+ */
+CS = MSR_STAR[47:32] + 0  = __KERNEL_CS (0x10)  // GDT[2]
+SS = MSR_STAR[47:32] + 8  = __KERNEL_DS (0x18)  // GDT[3]
+                                         ↑
+                            必须紧跟在 __KERNEL_CS 后面！
+
+/*
+ * SYSRET 指令（内核态 → 用户态）
+ * 硬件自动操作：
+ */
+CS = MSR_STAR[63:48] + 16 = __USER_CS (0x33)    // GDT[6]
+SS = MSR_STAR[63:48] + 8  = __USER_DS (0x2B)    // GDT[5]
+                                         ↑
+                            __USER_DS 必须在 __USER_CS 前面！
+
+/*
+ * 这就是为什么 gdt_page 必须有这个布局：
+ * GDT[2] = __KERNEL_CS
+ * GDT[3] = __KERNEL_DS  ← 必须紧跟
+ * GDT[4] = __USER32_CS
+ * GDT[5] = __USER_DS
+ * GDT[6] = __USER_CS    ← __USER_DS 必须在前
+ *
+ * boot_gdt 不满足这个要求，所以无法支持系统调用！
+ */
+```
+
+### GDT 演化的原因总结
+
+```
+【为什么需要三套 GDT？】
+
+阶段1：GRUB GDT
+原因：
+- GRUB 需要从实模式进入保护模式/长模式
+- GRUB 需要加载内核到内存
+问题：
+- 位于 GRUB 控制的内存区域
+- 内核解压会覆盖这块内存
+- 内核无法控制
+解决：→ 切换到 boot_gdt
+
+阶段2：boot_gdt（压缩内核）
+原因：
+- 需要可控的 GDT（在内核镜像内）
+- 需要支持进入长模式（L=1 的代码段）
+- 需要解压内核
+问题：
+- 太简单：只有 3-4 个段
+- 无用户态段：无法运行用户进程
+- 无 TSS：无法系统调用、任务切换
+- 不是 Per-CPU：无法支持 SMP
+- 不满足 SYSCALL/SYSRET 布局
+解决：→ 切换到 gdt_page
+
+阶段3：gdt_page（主内核）
+原因：
+- 需要完整功能：内核态 + 用户态
+- 需要系统调用：SYSCALL/SYSRET
+- 需要任务切换：TSS
+- 需要 SMP：Per-CPU GDT
+- 需要线程：TLS 段
+结果：
+✓ 功能完整
+✓ 一直使用到系统关机
+```
+
+---
+
 ## 总结：四阶段演化对比
 
 | 阶段 | GDT | GDT 来源 | 页表 | 页表来源 | 地址映射 | 主要目的 |
