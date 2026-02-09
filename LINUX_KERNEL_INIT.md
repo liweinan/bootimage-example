@@ -725,10 +725,52 @@ early_gdt_descr_base:
     .quad   INIT_PER_CPU_VAR(gdt_page)  # 指向 gdt_page
 ```
 
-**关键段描述符**（在 gdt_page 中定义）：
-- **__KERNEL_CS**（GDT_ENTRY_KERNEL_CS）：64位长模式代码段（CS.L=1，CS.D=0）
-- **__KERNEL_DS**（GDT_ENTRY_KERNEL_DS）：内核数据段（DS/SS/ES/GS 使用）
-- **__BOOT_TSS**：任务状态段，存储栈指针、I/O 位图等
+**GDT 表的具体内容**（arch/x86/kernel/cpu/common.c:201-243）：
+
+```c
+DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = { .gdt = {
+#ifdef CONFIG_X86_64
+    [GDT_ENTRY_KERNEL32_CS]      = GDT_ENTRY_INIT(DESC_CODE32, 0, 0xfffff),  // 索引 1
+    [GDT_ENTRY_KERNEL_CS]        = GDT_ENTRY_INIT(DESC_CODE64, 0, 0xfffff),  // 索引 2
+    [GDT_ENTRY_KERNEL_DS]        = GDT_ENTRY_INIT(DESC_DATA64, 0, 0xfffff),  // 索引 3
+    [GDT_ENTRY_DEFAULT_USER32_CS]= GDT_ENTRY_INIT(DESC_CODE32|DESC_USER, 0, 0xfffff), // 索引 4
+    [GDT_ENTRY_DEFAULT_USER_DS]  = GDT_ENTRY_INIT(DESC_DATA64|DESC_USER, 0, 0xfffff), // 索引 5
+    [GDT_ENTRY_DEFAULT_USER_CS]  = GDT_ENTRY_INIT(DESC_CODE64|DESC_USER, 0, 0xfffff), // 索引 6
+#endif
+} };
+```
+
+**x86_64 GDT 布局详解**（arch/x86/include/asm/segment.h:165-194）：
+
+| 索引 | 段选择子 | 描述 | 用途 |
+|------|----------|------|------|
+| 0 | - | NULL 描述符 | 必须为 0，访问会触发 #GP |
+| 1 | `__KERNEL32_CS` | 32位内核代码段 | 兼容模式代码（IRET 需要） |
+| 2 | `__KERNEL_CS` | **64位内核代码段** | **主要的内核代码段（CS.L=1）** |
+| 3 | `__KERNEL_DS` | **内核数据段** | **DS/SS/ES 使用** |
+| 4 | `__USER32_CS` | 32位用户代码段 | 32位用户程序（兼容模式） |
+| 5 | `__USER_DS` | 用户数据段 | 用户空间 DS/SS |
+| 6 | `__USER_CS` | 64位用户代码段 | 64位用户程序 |
+| 8-9 | - | TSS 描述符（两个槽位） | 任务状态段（稍后设置） |
+| 10-11 | - | LDT 描述符（两个槽位） | 局部描述符表（如果使用） |
+
+**为何这样布局？** （arch/x86/include/asm/segment.h:173-186）
+
+这个布局是为了支持 **SYSCALL/SYSRET 指令**的硬编码要求：
+
+```
+SYSRET 指令硬编码选择子：
+- 返回 32位用户空间：CS = STAR.SYSRET_CS (索引 4)
+- 返回 64位用户空间：CS = STAR.SYSRET_CS+16 (索引 6)
+- SS = STAR.SYSRET_CS+8 (索引 5，在任何情况下)
+
+因此用户数据段（索引 5）必须在 32位和 64位用户代码段之间！
+```
+
+**在 startup_64_setup_gdt_idt 中实际使用的段**：
+- **CS**：索引 2（`__KERNEL_CS`），在后续的 `pushq $__KERNEL_CS; lretq` 中切换
+- **DS/SS/ES**：索引 3（`__KERNEL_DS`），在 `asm volatile("movl %%eax, %%ds\n"...)` 中设置
+- **TSS**：此阶段尚未设置，在后续 `cpu_init()` 中设置
 
 #### IDT 加载详解
 
