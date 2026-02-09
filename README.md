@@ -200,18 +200,18 @@ DISPLAY=:1 make run-gui
 ### 内存管理文档
 
 #### 核心指南
-- **[LINUX_PAGING_GUIDE.md](LINUX_PAGING_GUIDE.md)** - Linux 内核分页机制完整指南
+- **[Linux 内存管理演化篇](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)(LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - Linux 内核分页机制完整指南
   - 第一部分：理论基础（Flat Model、GDT、MMU、页表抽象）
   - 第二部分：Phase 1 - 早期页表（compressed kernel 身份映射）
   - 第三部分：Phase 2 - 完整页表（E820、memblock、init_mem_mapping、zone）
 
 #### 深入专题
-- **[LINUX_KERNEL_GDT_EVOLUTION.md](LINUX_KERNEL_GDT_EVOLUTION.md)** - GDT 详解：从保护模式到长模式
+- **[Linux 内存管理理论篇](X86_MEMORY_MANAGEMENT_THEORY.md)(X86_MEMORY_MANAGEMENT_THEORY.md)** - GDT 详解：从保护模式到长模式
   - GDT 演化（GRUB → Compressed Kernel → Main Kernel → per-CPU）
   - 段描述符结构详解（二进制拆解、字段含义）
   - 长模式下的作用与分页协作
   - GDT Identity Mapping：启动时平滑过渡机制（实模式→保护模式）
-- **[X86_PAGE_TABLE_DESIGN.md](X86_PAGE_TABLE_DESIGN.md)** - x86-64 多级页表设计详解
+- **[Linux 内存管理实现篇](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)(LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)** - x86-64 多级页表设计详解
   - 页表建立过程与时间线（代码级实现）
   - 阶段 2-3 分页目的与 x86-64 硬件要求
   - 多级页表设计原理与内存开销对比（512GB vs 68KB）

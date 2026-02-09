@@ -23,8 +23,8 @@
 - 对操作系统底层机制感兴趣的学习者
 
 **相关文档**:
-- [GDT 详解：从保护模式到长模式](LINUX_KERNEL_GDT_EVOLUTION.md) - GDT 与页表的协作关系
-- [Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md) - 分页机制的完整演化
+- [GDT 详解：从保护模式到长模式](X86_MEMORY_MANAGEMENT_THEORY.md) - GDT 与页表的协作关系
+- [Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md) - 分页机制的完整演化
 
 ---
 
@@ -440,8 +440,8 @@ PD[511] = 0x000000003FE00183  → 物理页框 0x3FE00000
 
 ### 📚 深入阅读
 
-- 完整的分页机制演化：[Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md)
-- Identity vs Direct Mapping 详解：LINUX_PAGING_GUIDE.md 第2-3部分
+- 完整的分页机制演化：[Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)
+- Identity vs Direct Mapping 详解：LINUX_MEMORY_MANAGEMENT_EVOLUTION.md 第2-3部分
 - x86-64 Long Mode 激活过程：LINUX_KERNEL_INIT.md 阶段2-3
 
 ---
@@ -1753,8 +1753,8 @@ fork() 后：
 
 ### 📚 深入阅读
 
-- 缺页异常处理：LINUX_PAGING_GUIDE.md 第三部分
-- 写时复制机制：LINUX_PAGING_GUIDE.md 第三部分
+- 缺页异常处理：LINUX_MEMORY_MANAGEMENT_EVOLUTION.md 第三部分
+- 写时复制机制：LINUX_MEMORY_MANAGEMENT_EVOLUTION.md 第三部分
 - Buddy System 和 Slab 详解：[伙伴系统与 Slab 分配器详解](BUDDY_ALLOCATOR_GUIDE.md)
-- 多级页表实现细节：[Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md)
-- TLB 优化和性能分析：LINUX_PAGING_GUIDE.md 第一部分
+- 多级页表实现细节：[Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)
+- TLB 优化和性能分析：LINUX_MEMORY_MANAGEMENT_EVOLUTION.md 第一部分

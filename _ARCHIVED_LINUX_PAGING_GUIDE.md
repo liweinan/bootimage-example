@@ -16,8 +16,8 @@
 - **第三部分：Phase 2 - 完整页表建立** - setup_arch() 中的 E820、memblock、init_mem_mapping、zone 初始化
 
 **相关专题文档**（深入细节）：
-- [GDT 详解：从保护模式到长模式](LINUX_KERNEL_GDT_EVOLUTION.md) - GDT 的演化与作用、GDT Identity Mapping 机制
-- [x86-64 多级页表设计详解](X86_PAGE_TABLE_DESIGN.md) - 页表建立过程、多级设计原理、MMU 硬件遍历、实战计算
+- [GDT 详解：从保护模式到长模式](X86_MEMORY_MANAGEMENT_THEORY.md) - GDT 的演化与作用、GDT Identity Mapping 机制
+- [x86-64 多级页表设计详解](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md) - 页表建立过程、多级设计原理、MMU 硬件遍历、实战计算
 - [伙伴系统与 Slab 分配器详解](BUDDY_ALLOCATOR_GUIDE.md) - 物理页框和小对象分配
 
 **相关子文档**（技术细节）：
@@ -98,7 +98,7 @@ flowchart TD
 
 ### 2. GDT 与 Paging：两阶段地址转换
 
-> **深入阅读**：GDT 的完整演化、长模式下的作用、与分页的协作关系，详见 [GDT 详解](LINUX_KERNEL_GDT_EVOLUTION.md)
+> **深入阅读**：GDT 的完整演化、长模式下的作用、与分页的协作关系，详见 [GDT 详解](X86_MEMORY_MANAGEMENT_THEORY.md)
 
 在 x86 架构中，**从逻辑地址到物理地址需要经过两个独立的转换阶段**，分别由 **GDT（段式管理）** 和 **页表（分页管理）** 完成：
 
@@ -461,7 +461,7 @@ startup_64:
 - **此阶段的 GDT**：`head_64.S` 中的临时 `gdt` 数组（3 个描述符：NULL、CODE、DATA）
 - **下一阶段**：main kernel 的 `early_gdt_descr` → `gdt_page`（per-CPU GDT）
 
-> **详细演化**：GDT 从 GRUB → compressed kernel → main kernel → per-CPU 的完整演化，详见 [GDT 详解](LINUX_KERNEL_GDT_EVOLUTION.md)
+> **详细演化**：GDT 从 GRUB → compressed kernel → main kernel → per-CPU 的完整演化，详见 [GDT 详解](X86_MEMORY_MANAGEMENT_THEORY.md)
 
 ---
 
@@ -1084,7 +1084,7 @@ flowchart TD
 | **Phase 2 早期** | `early_gdt_descr` | 若干个 | main kernel 早期 GDT |
 | **Phase 2 后期** | `gdt_page` (per-CPU) | 完整 GDT | 运行时 per-CPU GDT |
 
-> **详细演化**：GDT 从 GRUB → compressed kernel → main kernel → per-CPU 的完整演化，详见 [GDT 详解](LINUX_KERNEL_GDT_EVOLUTION.md)
+> **详细演化**：GDT 从 GRUB → compressed kernel → main kernel → per-CPU 的完整演化，详见 [GDT 详解](X86_MEMORY_MANAGEMENT_THEORY.md)
 
 **物理内存分配体系**：
 
@@ -1200,8 +1200,8 @@ Linux 内核
 ### 核心相关文档
 
 - [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) - Linux 内核完整启动流程（包含 startup_64 和 start_kernel）
-- [GDT 详解：从保护模式到长模式](LINUX_KERNEL_GDT_EVOLUTION.md) - GDT 的演化与作用、GDT Identity Mapping 平滑过渡机制
-- [x86-64 多级页表设计详解](X86_PAGE_TABLE_DESIGN.md) - 页表建立过程、多级设计原理、MMU 硬件遍历伪代码、实战计算示例
+- [GDT 详解：从保护模式到长模式](X86_MEMORY_MANAGEMENT_THEORY.md) - GDT 的演化与作用、GDT Identity Mapping 平滑过渡机制
+- [x86-64 多级页表设计详解](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md) - 页表建立过程、多级设计原理、MMU 硬件遍历伪代码、实战计算示例
 - [伙伴系统与 Slab 分配器详解](BUDDY_ALLOCATOR_GUIDE.md) - 物理页框和小对象分配
 
 ### 子文档（技术细节）

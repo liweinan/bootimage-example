@@ -16,7 +16,7 @@
 - 对操作系统底层实现感兴趣的学习者
 
 **相关文档**：
-- [Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md) - GDT 与 Paging 的协作关系
+- [Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md) - GDT 与 Paging 的协作关系
 - [Linux 内核启动流程](LINUX_KERNEL_INIT.md) - GDT 在启动流程中的具体使用
 - [X86 CPU 模式](X86_CPU_MODES.md) - 实模式、保护模式、长模式
 
@@ -148,8 +148,8 @@ Direct Mapping（阶段 4）：
    - 动态按需分配
 
 **深入阅读**：
-- 页表详细设计：[x86-64 多级页表设计详解](X86_PAGE_TABLE_DESIGN.md)
-- 分页机制完整指南：[Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md)
+- 页表详细设计：[x86-64 多级页表设计详解](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)
+- 分页机制完整指南：[Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)
 
 ---
 
@@ -1572,7 +1572,7 @@ level2_pgt (PD):    4×512 个条目 × 8 字节 = 16KB (映射 4GB)
 
 关于页表的详细内容（建立过程、多级设计原理、动态管理机制等）已提取到专门文档：
 
-**详见**：[x86-64 多级页表设计详解](X86_PAGE_TABLE_DESIGN.md)
+**详见**：[x86-64 多级页表设计详解](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)
 
 该文档包含：
 - 页表的建立过程和时间线
@@ -2092,7 +2092,7 @@ CPU 1: GDTR.base = 0xFFFF888000002000
 
 **证据来源**：
 - GDT 描述符的 Base 字段全部为 0（见 5.3.1、5.4.1、5.5.1 节的详细拆解）
-- 页表映射方式：详见 [Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md) 第二、三部分
+- 页表映射方式：详见 [Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md) 第二、三部分
 
 ---
 
@@ -2339,7 +2339,7 @@ void switch_mm_irqs_off(struct mm_struct *prev_mm,
 #### 📚 更多详细信息
 
 - 用户空间内存布局详解：[Linux 用户空间内存模型详解](LINUX_USERSPACE_MEMORY_GUIDE.md)
-- 页表结构和管理：[Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md)
+- 页表结构和管理：[Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)
 - 系统调用机制：[Linux 内核系统调用初始化流程](LINUX_KERNEL_SYSCALL_INIT.md)
 
 ---
@@ -2729,7 +2729,7 @@ void update_tss_descriptor(int cpu, unsigned long base, unsigned long limit) {
 
 ### 核心相关文档
 
-- **[Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md)** - 包含 GDT 与分页的协作关系
+- **[Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - 包含 GDT 与分页的协作关系
 - **[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)** - Linux 内核启动流程（GDT 在启动中的使用）
 - **[X86_CPU_MODES.md](X86_CPU_MODES.md)** - x86 CPU 模式详解
 

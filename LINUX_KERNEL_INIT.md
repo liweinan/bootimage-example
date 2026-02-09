@@ -135,7 +135,7 @@ start_kernel()（init/main.c:1005）
     ├─ 【早期初始化】
     │   ├─ local_irq_disable()
     │   ├─ boot_cpu_init()
-    │   ├─ setup_arch()（arch/x86/kernel/setup.c:880）【内核接管物理内存，详见 LINUX_PAGING_GUIDE.md】
+    │   ├─ setup_arch()（arch/x86/kernel/setup.c:880）【内核接管物理内存，详见 LINUX_MEMORY_MANAGEMENT_EVOLUTION.md】
     │   │   ├─ e820__memory_setup()（arch/x86/kernel/e820.c:1354）
     │   │   ├─ e820__memblock_setup()（arch/x86/kernel/e820.c:1242）
     │   │   ├─ init_mem_mapping()（arch/x86/mm/init.c:758）
@@ -248,7 +248,7 @@ startup_32
 | verify_cpu | 检查 CPU 是否支持长模式 | 不支持则跳到 .Lno_longmode，不继续解压 |
 | 算 %ebx | 非 RELOCATABLE：%ebx = LOAD_PHYSICAL_ADDR；RELOCATABLE：%ebx 按 BP_kernel_alignment 对齐；再 %ebx += BP_init_size − rva(_end) | **%ebx = 重定位目标地址**（通常在 16MB 以上，例如约 22MB），解压前要把压缩内核拷到这里；同时 pgtable 将建在 rva(pgtable)(%ebx)，以便拷到 %ebx 后 CR3 仍有效 |
 | CR4.PAE | orl $X86_CR4_PAE, %cr4 | 开启物理地址扩展，长模式分页前提 |
-| 构建页表 | 在 rva(pgtable)(%ebx) 处内联建 4 级页表（L4/L3/L2），身份映射前 4G；CONFIG_AMD_MEM_ENCRYPT 时 %edx 为加密位掩码 | 开启分页后需有效页表；身份映射保证当前指令与数据在开 PG 后仍可访问。MMU 与分页概念见 [Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md) |
+| 构建页表 | 在 rva(pgtable)(%ebx) 处内联建 4 级页表（L4/L3/L2），身份映射前 4G；CONFIG_AMD_MEM_ENCRYPT 时 %edx 为加密位掩码 | 开启分页后需有效页表；身份映射保证当前指令与数据在开 PG 后仍可访问。MMU 与分页概念见 [Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md) |
 | CR3 | movl rva(pgtable)(%ebx), %cr3 | 让 CPU 使用刚建好的页表 |
 | EFER.LME | rdmsr MSR_EFER；btsl LME；wrmsr | 允许长模式；与 CR0.PG 一起生效后进入长模式（先为 32 位兼容子模式） |
 | lldt / ltr | 清 LDTR；TR = __BOOT_TSS（GDT 中） | 进入长模式前 TSS 需有效，供后续 64 位栈等使用 |
@@ -703,7 +703,7 @@ SYM_CODE_END(startup_64)
 
 **加载的 GDT**：通过 **early_gdt_descr**（arch/x86/kernel/head_64.S）引用的 **gdt_page**（arch/x86/kernel/cpu/common.c），这是主内核的早期 GDT，包含内核代码段、数据段、TSS 等描述符。
 
-**GDT 演化过程**（详见 [GDT 详解：从保护模式到长模式](LINUX_KERNEL_GDT_EVOLUTION.md)）：
+**GDT 演化过程**（详见 [GDT 详解：从保护模式到长模式](X86_MEMORY_MANAGEMENT_THEORY.md)）：
 1. **GRUB GDT**（grub/grub-core/lib/i386/relocator.c）：GRUB 设置的临时 GDT，仅供进入内核前使用
 2. **压缩内核 GDT**（arch/x86/boot/compressed/head_64.S::gdt）：压缩内核 startup_32/startup_64 使用的临时 GDT
 3. **主内核早期 GDT**（arch/x86/kernel/head_64.S::early_gdt_descr → gdt_page）：← **这里加载的 GDT**
@@ -1027,9 +1027,10 @@ Linux 内核使用**两个独立的 IDT 表**，在启动过程中逐步完善�
 
 本章涉及的核心机制详解：
 
-- **[LINUX_KERNEL_GDT_EVOLUTION.md](LINUX_KERNEL_GDT_EVOLUTION.md)** - GDT 详解：从保护模式到长模式 - GDT 的完整演化过程（GRUB GDT → 压缩内核 GDT → 主内核 GDT → per-CPU GDT）、段描述符结构详解、长模式下的作用、GDT Identity Mapping 平滑过渡机制
+- **[X86_MEMORY_MANAGEMENT_THEORY.md](X86_MEMORY_MANAGEMENT_THEORY.md)** - 内存管理理论篇 - 分段机制（GDT）、分页机制、多级页表设计原理、GDT 与分页的协作
+- **[LINUX_MEMORY_MANAGEMENT_EVOLUTION.md](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - 内存管理演化篇 - 从 BIOS 到内核的完整过渡（BIOS → GRUB → 压缩内核 → 主内核）、GDT 和页表的四阶段演化
+- **[LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)** - 内存管理实现篇 - GDT 代码详解、页表代码详解、内存管理子系统、实战调试方法
 - **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解 - 两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
-- **[X86_PAGE_TABLE_DESIGN.md](X86_PAGE_TABLE_DESIGN.md)** - x86-64 多级页表设计详解 - 页表建立过程、x86-64 硬件要求、多级页表设计原理、MMU 硬件遍历机制
 - **[X86_POSITION_INDEPENDENT_CODE.md](X86_POSITION_INDEPENDENT_CODE.md)** - 位置无关代码完整分析 - `__pi_` 前缀的含义、位置无关代码编译机制（-fPIC、objcopy --prefix-symbols）、RIP 相对寻址、`rip_rel_ptr()` 宏、`SYM_PIC_ALIAS` 宏的实现原理
 
 ---
@@ -1093,7 +1094,7 @@ void start_kernel(void)
 
 ### 1. setup_arch() 与内核接管内存
 
-**关键步骤**：`setup_arch(&command_line)`。此前仅有身份映射与 early 页表；**完整物理内存接管**在 setup_arch() 中：解析 e820/EFI、memblock、`init_mem_mapping()`、`paging_init()`。详见 [Linux 内核分页机制完整指南](LINUX_PAGING_GUIDE.md)。
+**关键步骤**：`setup_arch(&command_line)`。此前仅有身份映射与 early 页表；**完整物理内存接管**在 setup_arch() 中：解析 e820/EFI、memblock、`init_mem_mapping()`、`paging_init()`。详见 [Linux 内核分页机制完整指南](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)。
 
 
 ### 2. trap_init() 与系统调用初始化
@@ -1495,9 +1496,9 @@ startup_64:
 
 ### 内存管理
 
-- **[LINUX_PAGING_GUIDE.md](LINUX_PAGING_GUIDE.md)** - Linux 内核分页机制完整指南 - 理论基础、Phase 1 早期页表、Phase 2 完整页表（E820/memblock/zone）
-- **[LINUX_KERNEL_GDT_EVOLUTION.md](LINUX_KERNEL_GDT_EVOLUTION.md)** - GDT 详解：从保护模式到长模式 - GDT 演化（4阶段）、段描述符详解、与分页的协作、GDT Identity Mapping 机制
-- **[X86_PAGE_TABLE_DESIGN.md](X86_PAGE_TABLE_DESIGN.md)** - x86-64 多级页表设计详解 - 页表建立过程、硬件要求、多级设计原理、MMU 遍历伪代码、实战计算示例
+- **[LINUX_MEMORY_MANAGEMENT_EVOLUTION.md](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - Linux 内核分页机制完整指南 - 理论基础、Phase 1 早期页表、Phase 2 完整页表（E820/memblock/zone）
+- **[X86_MEMORY_MANAGEMENT_THEORY.md](X86_MEMORY_MANAGEMENT_THEORY.md)** - GDT 详解：从保护模式到长模式 - GDT 演化（4阶段）、段描述符详解、与分页的协作、GDT Identity Mapping 机制
+- **[LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)** - x86-64 多级页表设计详解 - 页表建立过程、硬件要求、多级设计原理、MMU 遍历伪代码、实战计算示例
 - **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解 - 伙伴系统原理与实现、Slab/SLUB 分配器、从 memblock 到 buddy 的转换
 
 ### 架构细节
