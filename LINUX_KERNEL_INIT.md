@@ -824,13 +824,21 @@ head_64.S: call startup_64_setup_gdt_idt
                     └─ native_load_idt(&desc)          // lidt
 ```
 
-所做之事与代码对应如下。
+所做之事与代码对应如下（**按实际执行顺序说明**）。
 
 ```c
-// 静态表：早期 IDT，页对齐，NUM_EXCEPTION_VECTORS 个门（23 行附近）
-static gate_desc bringup_idt_table[NUM_EXCEPTION_VECTORS] __page_aligned_data;
+// 1. 主入口：加载 GDT、重载 DS/SS/ES、再调 startup_64_load_idt（49-70）
+void __head startup_64_setup_gdt_idt(void)
+{
+	struct gdt_page *gp = rip_rel_ptr((void *)&gdt_page);   // GDT 在 cpu/common.c
+	struct desc_ptr startup_gdt_descr = { .address = (unsigned long)gp->gdt, .size = GDT_SIZE - 1 };
+	native_load_gdt(&startup_gdt_descr);   // → lgdt
+	asm volatile("movl %%eax, %%ds\n" "movl %%eax, %%ss\n" "movl %%eax, %%es\n" : : "a"(__KERNEL_DS) : "memory");
+	handler = IS_ENABLED(CONFIG_AMD_MEM_ENCRYPT) ? rip_rel_ptr(vc_no_ghcb) : NULL;
+	startup_64_load_idt(handler);
+}
 
-// 加载 bringup IDT；若 vc_handler 非空（CONFIG_AMD_MEM_ENCRYPT）则填 #VC 门，否则表为零（26-43）
+// 2. 加载 bringup IDT；若 vc_handler 非空（CONFIG_AMD_MEM_ENCRYPT）则填 #VC 门，否则表为零（26-43）
 void __head startup_64_load_idt(void *vc_handler)
 {
 	struct desc_ptr desc = { .address = (unsigned long)rip_rel_ptr(bringup_idt_table),
@@ -843,47 +851,63 @@ void __head startup_64_load_idt(void *vc_handler)
 	native_load_idt(&desc);   // → lidt
 }
 
-// 主入口：加载 GDT、重载 DS/SS/ES、再调 startup_64_load_idt（49-70）
-void __head startup_64_setup_gdt_idt(void)
-{
-	struct gdt_page *gp = rip_rel_ptr((void *)&gdt_page);   // GDT 在 cpu/common.c
-	struct desc_ptr startup_gdt_descr = { .address = (unsigned long)gp->gdt, .size = GDT_SIZE - 1 };
-	native_load_gdt(&startup_gdt_descr);   // → lgdt
-	asm volatile("movl %%eax, %%ds\n" "movl %%eax, %%ss\n" "movl %%eax, %%es\n" : : "a"(__KERNEL_DS) : "memory");
-	handler = IS_ENABLED(CONFIG_AMD_MEM_ENCRYPT) ? rip_rel_ptr(vc_no_ghcb) : NULL;
-	startup_64_load_idt(handler);
-}
+// 3. 静态表：早期 IDT，页对齐，NUM_EXCEPTION_VECTORS 个门（23 行附近）
+static gate_desc bringup_idt_table[NUM_EXCEPTION_VECTORS] __page_aligned_data;
 ```
 
-- **startup_64_setup_gdt_idt()**：rip_rel_ptr 取 gdt_page→ **lgdt** → 段寄存器 **DS/SS/ES = __KERNEL_DS** → 若启用 SEV 则 handler = vc_no_ghcb → **startup_64_load_idt(handler)**。
-- **startup_64_load_idt()**：用 **bringup_idt_table** 做描述符，可选填 #VC 门 → **lidt**。lgdt/lidt/段寄存器内联汇编的展开形式见下「汇编侧说明」。
+**执行流程**（按顺序）：
+1. **startup_64_setup_gdt_idt()**：rip_rel_ptr 取 gdt_page→ **lgdt** → 段寄存器 **DS/SS/ES = __KERNEL_DS** → 若启用 SEV 则 handler = vc_no_ghcb → **startup_64_load_idt(handler)**。
+2. **startup_64_load_idt()**：用 **bringup_idt_table** 做描述符，可选填 #VC 门 → **lidt**。
+3. **bringup_idt_table**：静态分配的早期 IDT 表，大部分为空，仅在需要时填充 #VC 门（AMD SEV）。
 
-**汇编侧说明**：
+**汇编实现详解**（按执行顺序）：
 
-- **head_64.S 中的调用**（`arch/x86/kernel/head_64.S`）：在 **call** 之前，%r15 已存 boot_params，栈指针已设为 __top_init_kernel_stack，MSR_GS_BASE 已写。**call startup_64_setup_gdt_idt** 返回后，紧接着 **pushq $__KERNEL_CS** 与 **lretq**：将 __KERNEL_CS 压栈并远返回，使 CS 切换到 GDT 中的内核代码段，此后取指、IRET 等均使用新 GDT。
+**1. 调用前准备**（`arch/x86/kernel/head_64.S`）
 
-- **C 函数展开成的指令**：`native_load_gdt()` / `native_load_idt()` 在 `arch/x86/include/asm/desc.h` 中为内联函数，编译后即一条 **lgdt** / **lidt**；GDT/IDT 描述符（基址 + 界限）由 C 侧填入 `struct desc_ptr`，再以内存操作数形式传给指令。
+在 **call startup_64_setup_gdt_idt** 之前，head_64.S 已完成：
+- %r15 ← boot_params（保存启动参数）
+- %rsp ← __top_init_kernel_stack（设置内核栈）
+- MSR_GS_BASE ← 0（清零 GS 基址）
 
+**2. 函数内部执行**（`arch/x86/boot/startup/gdt_idt.c`）
+
+**步骤 1：加载 GDT**（gdt_idt.c:51）
 ```c
-// arch/x86/include/asm/desc.h
+// native_load_gdt() 是内联函数，编译后展开为一条 lgdt 指令
 static inline void native_load_gdt(const struct desc_ptr *dtr)
 {
 	asm volatile("lgdt %0"::"m" (*dtr));   // 加载 GDT，操作数为 6 字节描述符（界限 2B + 基址 4/8B）
 }
+```
+
+**步骤 2：重载段寄存器**（gdt_idt.c:61-64）
+
+GDT 加载后必须显式刷新数据段选择子，否则 DS/SS/ES 仍指向旧 GDT。代码用内联汇编将 **__KERNEL_DS** 写入 DS/SS/ES：
+```c
+asm volatile("movl %%eax, %%ds\n"
+	     "movl %%eax, %%ss\n"
+	     "movl %%eax, %%es\n" : : "a"(__KERNEL_DS) : "memory");
+```
+
+**步骤 3：加载 IDT**（通过 startup_64_load_idt）
+```c
+// native_load_idt() 同样是内联函数，展开为一条 lidt 指令
 static __always_inline void native_load_idt(const struct desc_ptr *dtr)
 {
-	asm volatile("lidt %0"::"m" (*dtr));   // 加载 IDT，格式同上
+	asm volatile("lidt %0"::"m" (*dtr));   // 加载 IDT，格式与 GDT 描述符相同
 }
 ```
 
-- **段寄存器重载**（gdt_idt.c:61-64）：GDT 加载后必须显式刷新数据段选择子，否则 DS/SS/ES 仍为旧值。代码用内联汇编把 **__KERNEL_DS**（内核数据段选择子）写入 **DS、SS、ES**：
+**3. 调用返回后**（`arch/x86/kernel/head_64.S`）
 
-```c
-// arch/x86/boot/startup/gdt_idt.c
-	asm volatile("movl %%eax, %%ds\n"
-		     "movl %%eax, %%ss\n"
-		     "movl %%eax, %%es\n" : : "a"(__KERNEL_DS) : "memory");
+**call startup_64_setup_gdt_idt** 返回后，紧接着执行：
+```asm
+pushq	$__KERNEL_CS       # 压入内核代码段选择子
+leaq	.Lon_kernel_cs(%rip), %rax
+pushq	%rax               # 压入返回地址
+lretq                      # 远返回，CS ← __KERNEL_CS，RIP ← .Lon_kernel_cs
 ```
+此后 CS 指向新 GDT 中的内核代码段，所有取指、IRET 等操作均使用新 GDT。
 
 **64 位长模式代码特征**：使用 64 位寄存器（%RSI、%R15、%RSP 等）、`movq`/`leaq`/`pushq`/`lretq`、`%rip` 相对寻址、`__KERNEL_CS`（CS.L=1）、wrmsr 写 GS_BASE。
 

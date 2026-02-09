@@ -18,9 +18,10 @@ __pycache__/
 # GRUB ISO 缓存目录
 .grub_iso_cache/
 
-# 下载的 initrd 文件
+# 下载的 initrd 文件和内核镜像
 initrd-alpine-*.img
 *.img
+vmlinuz
 
 # 编辑器索引文件
 .cursorindexingignore
