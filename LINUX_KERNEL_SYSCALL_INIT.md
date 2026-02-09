@@ -14,7 +14,7 @@
 - [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) - 主启动流程
 - [IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md) - 两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
 - [硬件中断、软件中断、异常的本质区别](LINUX_KERNEL_INIT.md#q-硬件中断软件中断异常有什么本质区别) - INT 0x80 为何在 CPU 层面是异常
-- [Linux 中断处理](LINUX_INTERRUPT_HANDLING.md) - 运行时中断处理
+- [Linux 中断处理](LINUX_INTERRUPT_GUIDE.md) - 运行时中断处理
 - [BIOS IVT vs Kernel IDT](BIOS_IVT_VS_KERNEL_IDT.md) - IVT 与 IDT 对比
 
 ---

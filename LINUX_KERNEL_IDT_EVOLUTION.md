@@ -15,7 +15,7 @@
 **相关文档**：
 - [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) - 主启动流程
 - [系统调用初始化](LINUX_KERNEL_SYSCALL_INIT.md) - syscall 初始化详解
-- [Linux 中断处理](LINUX_INTERRUPT_HANDLING.md) - 运行时中断处理
+- [Linux 中断处理](LINUX_INTERRUPT_GUIDE.md) - 运行时中断处理
 - [BIOS IVT vs Kernel IDT](BIOS_IVT_VS_KERNEL_IDT.md) - IVT 与 IDT 对比
 
 ---

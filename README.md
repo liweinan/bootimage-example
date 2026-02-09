@@ -187,7 +187,7 @@ DISPLAY=:1 make run-gui
 
 ### 中断相关文档
 
-- **[LINUX_INTERRUPT_HANDLING.md](LINUX_INTERRUPT_HANDLING.md)** - Linux 中断处理机制
+- **[LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)** - Linux 中断处理机制
 - **[UEFI_INTERRUPT_HANDLING.md](UEFI_INTERRUPT_HANDLING.md)** - UEFI 中断处理机制
 - **[APPENDIX_A_KEYBOARD_INTERRUPT.md](APPENDIX_A_KEYBOARD_INTERRUPT.md)** - 附录 A：键盘中断详解
 - **[APPENDIX_B_EVENT_MECHANISM.md](APPENDIX_B_EVENT_MECHANISM.md)** - 附录 B：事件机制详解
@@ -200,18 +200,18 @@ DISPLAY=:1 make run-gui
 ### 内存管理文档
 
 #### 核心指南
-- **[LINUX_PAGING_COMPLETE_GUIDE.md](LINUX_PAGING_COMPLETE_GUIDE.md)** - Linux 内核分页机制完整指南
+- **[LINUX_PAGING_GUIDE.md](LINUX_PAGING_GUIDE.md)** - Linux 内核分页机制完整指南
   - 第一部分：理论基础（Flat Model、GDT、MMU、页表抽象）
   - 第二部分：Phase 1 - 早期页表（compressed kernel 身份映射）
   - 第三部分：Phase 2 - 完整页表（E820、memblock、init_mem_mapping、zone）
 
 #### 深入专题
-- **[GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)** - GDT 详解：从保护模式到长模式
+- **[LINUX_KERNEL_GDT_EVOLUTION.md](LINUX_KERNEL_GDT_EVOLUTION.md)** - GDT 详解：从保护模式到长模式
   - GDT 演化（GRUB → Compressed Kernel → Main Kernel → per-CPU）
   - 段描述符结构详解（二进制拆解、字段含义）
   - 长模式下的作用与分页协作
   - GDT Identity Mapping：启动时平滑过渡机制（实模式→保护模式）
-- **[PAGE_TABLE_DESIGN.md](PAGE_TABLE_DESIGN.md)** - x86-64 多级页表设计详解
+- **[X86_PAGE_TABLE_DESIGN.md](X86_PAGE_TABLE_DESIGN.md)** - x86-64 多级页表设计详解
   - 页表建立过程与时间线（代码级实现）
   - 阶段 2-3 分页目的与 x86-64 硬件要求
   - 多级页表设计原理与内存开销对比（512GB vs 68KB）
@@ -234,7 +234,7 @@ DISPLAY=:1 make run-gui
 - **[BOOTLOADER_MEMORY_PASSING.md](BOOTLOADER_MEMORY_PASSING.md)** - Bootloader 内存信息传递
 
 #### 用户空间内存
-- **[LINUX_USERSPACE_MEMORY.md](LINUX_USERSPACE_MEMORY.md)** - Linux 用户空间内存管理
+- **[LINUX_USERSPACE_MEMORY_GUIDE.md](LINUX_USERSPACE_MEMORY_GUIDE.md)** - Linux 用户空间内存管理
 - **[FILL.md](FILL.md)** - 内存填充相关文档
 
 ### UEFI 相关文档

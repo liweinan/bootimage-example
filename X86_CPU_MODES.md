@@ -692,7 +692,7 @@ flowchart TB
 
 - [BIOS 内存布局与地址映射详解](BIOS_MEMORY_LAYOUT.md)
 - [BIOS 内存模式 Q&A](BIOS_MEMORY_QA.md)
-- [Linux 用户空间内存模型详解](LINUX_USERSPACE_MEMORY.md) - Linux 用户空间的内存模型和汇编内存访问
+- [Linux 用户空间内存模型详解](LINUX_USERSPACE_MEMORY_GUIDE.md) - Linux 用户空间的内存模型和汇编内存访问
 - [BIOS 中断处理完整指南](BIOS_INTERRUPT_COMPLETE.md)
 - [GRUB UEFI 长模式启动分析](GRUB_UEFI_LONG_MODE_ANALYSIS.md) - GRUB 和 Linux kernel 的 UEFI 长模式启动详细实现
 - [UEFI vs BIOS Boot](UEFI_VS_BIOS_BOOT.md) - UEFI 和 BIOS 启动方式对比

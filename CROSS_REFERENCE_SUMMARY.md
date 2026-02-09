@@ -124,15 +124,15 @@
 
 **被引用位置**：
 - `README.md` - "核心概念文档"部分（第一位置，强调重要性）
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - "前置阅读"部分
-- `PAGE_TABLE_DESIGN.md` - "前置阅读"部分
+- `LINUX_PAGING_GUIDE.md` - "前置阅读"部分
+- `X86_PAGE_TABLE_DESIGN.md` - "前置阅读"部分
 
 **引用其他文档**：
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - Linux 实现细节
-- `PAGE_TABLE_DESIGN.md` - 页表设计细节
-- `GDT_DETAILED_GUIDE.md` - x86 分段演化
+- `LINUX_PAGING_GUIDE.md` - Linux 实现细节
+- `X86_PAGE_TABLE_DESIGN.md` - 页表设计细节
+- `LINUX_KERNEL_GDT_EVOLUTION.md` - x86 分段演化
 - `BUDDY_ALLOCATOR_GUIDE.md` - 内存分配器
-- `LINUX_USERSPACE_MEMORY.md` - 用户空间内存
+- `LINUX_USERSPACE_MEMORY_GUIDE.md` - 用户空间内存
 
 **教学价值**：
 - 可独立阅读，作为理解虚拟内存的入门
@@ -144,15 +144,15 @@
 
 ### 新增专题文档与内容增强
 
-#### PAGE_TABLE_DESIGN.md（新建）
+#### X86_PAGE_TABLE_DESIGN.md（新建）
 - **新建专题文档**：x86-64 多级页表设计详解
 - **新增内容**：
   - 实战计算：映射 1MB 区域需要多少页表项（4KB 页 vs 4MB 页对比）
   - MMU 硬件页表遍历伪代码（walk_virtual_address 完整实现）
   - 包含五级页表变体和 TLB 优化说明
-- **引用位置**：README.md、LINUX_PAGING_COMPLETE_GUIDE.md、LINUX_KERNEL_INIT.md、GDT_DETAILED_GUIDE.md
+- **引用位置**：README.md、LINUX_PAGING_GUIDE.md、LINUX_KERNEL_INIT.md、LINUX_KERNEL_GDT_EVOLUTION.md
 
-#### GDT_DETAILED_GUIDE.md（内容增强）
+#### LINUX_KERNEL_GDT_EVOLUTION.md（内容增强）
 - **新增 4.4 节**：GDT Identity Mapping：启动时的平滑过渡机制
   - GDT Identity Mapping 核心概念（段基址 = 0）
   - 为什么需要（实模式→保护模式平滑过渡）
@@ -162,10 +162,10 @@
 - **相关提交**：commit 6749192
 
 #### 更新的文档引用
-- **README.md**：添加 PAGE_TABLE_DESIGN.md 到"深入专题"，更新 GDT_DETAILED_GUIDE.md 描述
-- **LINUX_KERNEL_INIT.md**：添加 PAGE_TABLE_DESIGN.md 引用，更新 GDT_DETAILED_GUIDE.md 描述
-- **LINUX_PAGING_COMPLETE_GUIDE.md**：添加 PAGE_TABLE_DESIGN.md 到相关专题，更新 GDT_DETAILED_GUIDE.md 描述
-- **CROSS_REFERENCE_SUMMARY.md**：更新文档引用关系图，添加 PAGE_TABLE_DESIGN.md 节点
+- **README.md**：添加 X86_PAGE_TABLE_DESIGN.md 到"深入专题"，更新 LINUX_KERNEL_GDT_EVOLUTION.md 描述
+- **LINUX_KERNEL_INIT.md**：添加 X86_PAGE_TABLE_DESIGN.md 引用，更新 LINUX_KERNEL_GDT_EVOLUTION.md 描述
+- **LINUX_PAGING_GUIDE.md**：添加 X86_PAGE_TABLE_DESIGN.md 到相关专题，更新 LINUX_KERNEL_GDT_EVOLUTION.md 描述
+- **CROSS_REFERENCE_SUMMARY.md**：更新文档引用关系图，添加 X86_PAGE_TABLE_DESIGN.md 节点
 
 ---
 
@@ -173,7 +173,7 @@
 
 ### 文档合并与专题提取
 
-#### 1. LINUX_PAGING_COMPLETE_GUIDE.md（合并创建）
+#### 1. LINUX_PAGING_GUIDE.md（合并创建）
 **主题**：Linux 内核分页机制完整指南：从理论到实践
 
 **来源文档**：
@@ -190,17 +190,17 @@
 - `LINUX_KERNEL_INIT.md` - 4 处引用（分页相关章节）
 - `E820_MEMORY_MAP.md` - 主文档引用
 - `SEABIOS_E820_CONSTRUCTION.md` - 相关文档
-- `LINUX_USERSPACE_MEMORY.md` - 内核内存管理引用
+- `LINUX_USERSPACE_MEMORY_GUIDE.md` - 内核内存管理引用
 - `BOOTLOADER_MEMORY_PASSING.md` - 内存传递流程
 
 **引用其他文档**：
-- `GDT_DETAILED_GUIDE.md` - GDT 深入阅读
+- `LINUX_KERNEL_GDT_EVOLUTION.md` - GDT 深入阅读
 - `BUDDY_ALLOCATOR_GUIDE.md` - 内存分配器深入阅读
 - `E820_MEMORY_MAP.md` - E820 表细节
 - `SEABIOS_E820_CONSTRUCTION.md` - BIOS 构建 E820
 - `LINUX_KERNEL_INIT.md` - 内核启动流程
 
-#### 2. GDT_DETAILED_GUIDE.md（专题提取）
+#### 2. LINUX_KERNEL_GDT_EVOLUTION.md（专题提取）
 **主题**：GDT 详解：从保护模式到长模式
 
 **提取来源**：从 LINUX_PAGING_COMPLETE_GUIDE 中提取 GDT 相关详细内容
@@ -215,20 +215,20 @@
 
 **被引用位置**：
 - `README.md` - "深入专题"部分
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - 第一部分理论基础（第 13 行、93 行）
+- `LINUX_PAGING_GUIDE.md` - 第一部分理论基础（第 13 行、93 行）
 - `LINUX_KERNEL_INIT.md` - "相关文档 > 内存管理"章节（第 708、1249 行）
-- `PAGE_TABLE_DESIGN.md` - 相关文档引用（第 20 行）
+- `X86_PAGE_TABLE_DESIGN.md` - 相关文档引用（第 20 行）
 
 **引用其他文档**：
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - 分页主文档
-- `PAGE_TABLE_DESIGN.md` - 页表详细设计
+- `LINUX_PAGING_GUIDE.md` - 分页主文档
+- `X86_PAGE_TABLE_DESIGN.md` - 页表详细设计
 - `LINUX_KERNEL_INIT.md` - 启动流程
 - `X86_NEAR_VS_LONG_JUMP.md` - 长模式跳转
 
-#### 3. PAGE_TABLE_DESIGN.md（专题提取，2026-02 新增）
+#### 3. X86_PAGE_TABLE_DESIGN.md（专题提取，2026-02 新增）
 **主题**：x86-64 多级页表设计详解
 
-**提取来源**：从 GDT_DETAILED_GUIDE.md 和相关讨论中提取页表设计细节
+**提取来源**：从 LINUX_KERNEL_GDT_EVOLUTION.md 和相关讨论中提取页表设计细节
 
 **核心内容**：
 - 页表的建立过程和时间线（代码级实现）
@@ -241,13 +241,13 @@
 
 **被引用位置**：
 - `README.md` - "深入专题"部分
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - 相关专题文档（第 14 行）
+- `LINUX_PAGING_GUIDE.md` - 相关专题文档（第 14 行）
 - `LINUX_KERNEL_INIT.md` - "相关文档 > 内存管理"章节（第 708、1249 行）
-- `GDT_DETAILED_GUIDE.md` - 相关文档引用（第 19、151 行）
+- `LINUX_KERNEL_GDT_EVOLUTION.md` - 相关文档引用（第 19、151 行）
 
 **引用其他文档**：
-- `GDT_DETAILED_GUIDE.md` - GDT 与页表的协作关系
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - 分页机制完整演化
+- `LINUX_KERNEL_GDT_EVOLUTION.md` - GDT 与页表的协作关系
+- `LINUX_PAGING_GUIDE.md` - 分页机制完整演化
 - `LINUX_KERNEL_INIT.md` - 内核启动流程
 
 #### 4. BUDDY_ALLOCATOR_GUIDE.md（专题提取）
@@ -264,11 +264,11 @@
 
 **被引用位置**：
 - `README.md` - "深入专题"部分
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - 第一部分理论基础（第 93 行）
+- `LINUX_PAGING_GUIDE.md` - 第一部分理论基础（第 93 行）
 - `LINUX_KERNEL_INIT.md` - "相关文档 > 内存管理"章节
 
 **引用其他文档**：
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - 分页主文档
+- `LINUX_PAGING_GUIDE.md` - 分页主文档
 
 ### 批量更新的文档（Phase1/Phase2 → Complete Guide）
 
@@ -276,19 +276,19 @@
 - `LINUX_KERNEL_INIT.md`（4 处更新）
 - `E820_MEMORY_MAP.md`（3 处更新）
 - `SEABIOS_E820_CONSTRUCTION.md`（批量替换）
-- `LINUX_USERSPACE_MEMORY.md`（批量替换）
+- `LINUX_USERSPACE_MEMORY_GUIDE.md`（批量替换）
 
 ### 文档引用关系图（内存管理）
 
 ```
-LINUX_PAGING_COMPLETE_GUIDE.md（核心指南）
-    ├─→ GDT_DETAILED_GUIDE.md（深入专题：GDT 演化与 Identity Mapping）
-    │   ├─→ PAGE_TABLE_DESIGN.md（深入专题：页表设计与 MMU）
+LINUX_PAGING_GUIDE.md（核心指南）
+    ├─→ LINUX_KERNEL_GDT_EVOLUTION.md（深入专题：GDT 演化与 Identity Mapping）
+    │   ├─→ X86_PAGE_TABLE_DESIGN.md（深入专题：页表设计与 MMU）
     │   ├─→ LINUX_KERNEL_INIT.md（启动流程）
     │   └─→ X86_NEAR_VS_LONG_JUMP.md（跳转指令）
-    ├─→ PAGE_TABLE_DESIGN.md（深入专题：多级页表设计）
-    │   ├─→ GDT_DETAILED_GUIDE.md（GDT 与页表协作）
-    │   └─→ LINUX_PAGING_COMPLETE_GUIDE.md（分页机制演化）
+    ├─→ X86_PAGE_TABLE_DESIGN.md（深入专题：多级页表设计）
+    │   ├─→ LINUX_KERNEL_GDT_EVOLUTION.md（GDT 与页表协作）
+    │   └─→ LINUX_PAGING_GUIDE.md（分页机制演化）
     ├─→ BUDDY_ALLOCATOR_GUIDE.md（深入专题：内存分配器）
     ├─→ E820_MEMORY_MAP.md（子文档：E820 表）
     ├─→ SEABIOS_E820_CONSTRUCTION.md（子文档：BIOS 构建）
@@ -304,7 +304,7 @@ LINUX_PAGING_COMPLETE_GUIDE.md（核心指南）
   - 归档旧文档
 
 - **c10de5c**: Add specialist documentation for GDT and memory allocators
-  - 创建 GDT_DETAILED_GUIDE.md
+  - 创建 LINUX_KERNEL_GDT_EVOLUTION.md
   - 创建 BUDDY_ALLOCATOR_GUIDE.md
   - 更新 README.md 添加"深入专题"章节
 
@@ -403,8 +403,8 @@ LINUX_KERNEL_INIT.md（主文档）
 - `GRUB_UEFI_LONG_MODE_ANALYSIS.md` - GRUB UEFI 长模式
 - `UEFI_VS_BIOS_BOOT.md` - UEFI vs BIOS
 - `LINUX_KERNEL_SETUP_FLOW.md` - Setup 流程
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - 阶段 1：分页理论与早期页表
-- `LINUX_PAGING_COMPLETE_GUIDE.md` - 阶段 2：setup_arch 完整页表
+- `LINUX_PAGING_GUIDE.md` - 阶段 1：分页理论与早期页表
+- `LINUX_PAGING_GUIDE.md` - 阶段 2：setup_arch 完整页表
 - `X86_NEAR_VS_LONG_JUMP.md` - 跳转指令
 
 ### 测试程序
