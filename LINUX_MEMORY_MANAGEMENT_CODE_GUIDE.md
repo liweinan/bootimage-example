@@ -91,45 +91,310 @@ EXPORT_PER_CPU_SYMBOL_GPL(gdt_page);
     }
 ```
 
-### 1.3 startup_64_setup_gdt_idt() 实现
+### 1.3 startup_64_setup_gdt_idt() 实现详解
 
 **位置**：`arch/x86/boot/startup/gdt_idt.c:49-70`
+
+**上下文**：此函数在 `head_64.S` 中的 `startup_64` 早期被调用，目的是从压缩内核的临时GDT切换到主内核的Per-CPU GDT。
+
+#### 代码与详细注释
 
 ```c
 void __head startup_64_setup_gdt_idt(void)
 {
-    // 1. 获取 gdt_page 地址（使用 RIP 相对寻址）
+    /*
+     * 步骤 1：获取 gdt_page 符号的物理地址
+     *
+     * 【问题】：为什么需要 rip_rel_ptr()？
+     * - 当前代码运行在 Identity Mapping（恒等映射）模式下
+     * - 直接使用 &gdt_page 会得到高地址虚拟地址（如 0xffffffff81234000）
+     * - 但页表还未完全建立，不能访问高地址
+     * - rip_rel_ptr() 将符号地址转换为当前可访问的物理地址
+     *
+     * 【rip_rel_ptr() 工作原理】：
+     * - 使用 RIP 相对寻址：计算符号相对于当前代码的偏移
+     * - 公式：物理地址 = 当前RIP的物理地址 + (&gdt_page - 当前RIP)
+     * - 结果：得到 gdt_page 的真实物理位置（如 0x01234000）
+     *
+     * 【gdt_page 是什么】：
+     * - 这是在 common.c 中通过 DEFINE_PER_CPU_PAGE_ALIGNED() 定义的Per-CPU变量
+     * - 包含 GDT_ENTRIES（32个）段描述符
+     * - 在编译时已初始化好 6 个关键段（见 1.2 节）
+     */
     struct gdt_page *gp = rip_rel_ptr((void *)&gdt_page);
 
-    // 2. 构建 GDT 描述符
+    /*
+     * 步骤 2：构建 GDT 描述符（desc_ptr）
+     *
+     * 【desc_ptr 结构】：
+     * struct desc_ptr {
+     *     unsigned short size;    // GDT表大小-1（字节）
+     *     unsigned long address;  // GDT表的线性地址
+     * } __attribute__((packed));
+     *
+     * 【为什么 size = GDT_SIZE - 1】：
+     * - GDT_SIZE = 32 * 8 = 256 字节（32个8字节描述符）
+     * - Intel 手册规定：GDTR.Limit = 表大小 - 1
+     * - 原因：Limit表示最后一个有效字节的偏移（从0开始）
+     * - 例：256字节表 → 有效偏移0-255 → Limit=255
+     *
+     * 【address 字段】：
+     * - gp->gdt 是 gdt_page.gdt 数组的起始地址
+     * - 指向第一个段描述符（GDT[0]，固定为NULL描述符）
+     *
+     * 【startup_gdt_descr 如何对应到 DEFINE_PER_CPU_PAGE_ALIGNED】：
+     *
+     * 编译时（common.c）：
+     *   DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = {
+     *       .gdt = {
+     *           [GDT_ENTRY_KERNEL_CS] = GDT_ENTRY_INIT(...),  // 内核代码段
+     *           [GDT_ENTRY_KERNEL_DS] = GDT_ENTRY_INIT(...),  // 内核数据段
+     *           // ... 共 6 个段
+     *       }
+     *   };
+     *   ↓ 编译器处理
+     *   生成一个全局符号 gdt_page，包含初始化的数据
+     *   在 vmlinux 中占据 4096 字节（PAGE_SIZE，页对齐）
+     *
+     * 链接时：
+     *   链接器将 gdt_page 放在内核镜像的 .data.percpu 段
+     *   分配虚拟地址（如 0xffffffff82345000）
+     *
+     * 运行时（本函数）：
+     *   1. rip_rel_ptr(&gdt_page) → 获取 gdt_page 的物理地址
+     *      - 输入：&gdt_page = 0xffffffff82345000（链接地址）
+     *      - 输出：0x02345000（当前可访问的物理地址）
+     *
+     *   2. gp->gdt → 指向 GDT 数组起始
+     *      - gp = 0x02345000（struct gdt_page *）
+     *      - gp->gdt = 0x02345000（数组起始，struct gdt_page第一个字段）
+     *
+     *   3. startup_gdt_descr.address = (unsigned long)gp->gdt
+     *      - address = 0x02345000（GDT 表的物理地址）
+     *
+     *   4. lgdt 指令加载
+     *      - CPU 将 GDTR 寄存器设为：{size=255, address=0x02345000}
+     *      - 从此所有段选择子（如 __KERNEL_CS）查表都使用此GDT
+     *
+     * 【连接关系总结】：
+     *   DEFINE_PER_CPU_PAGE_ALIGNED  →  编译器生成全局符号 gdt_page
+     *                                →  链接器分配虚拟地址
+     *                                ↓
+     *   rip_rel_ptr(&gdt_page)       →  运行时解析物理地址
+     *                                ↓
+     *   startup_gdt_descr.address    →  指向 GDT 表物理位置
+     *                                ↓
+     *   lgdt                         →  CPU 加载到 GDTR 寄存器
+     */
     struct desc_ptr startup_gdt_descr = {
-        .address = (unsigned long)gp->gdt,
-        .size = GDT_SIZE - 1
+        .address = (unsigned long)gp->gdt,  // GDT 表的物理地址
+        .size = GDT_SIZE - 1                // 256 - 1 = 255（最后有效字节偏移）
     };
 
-    // 3. 加载 GDT
+    /*
+     * 步骤 3：加载 GDT 到 GDTR 寄存器
+     *
+     * 【lgdt 指令】：
+     * - 操作码：0x0F 0x01 /2
+     * - 操作：GDTR ← 内存操作数（10字节或6字节）
+     * - 结果：GDTR.Limit = startup_gdt_descr.size (255)
+     *        GDTR.Base  = startup_gdt_descr.address (0x02345000)
+     *
+     * 【为什么需要重新加载GDT】：
+     * - 压缩内核阶段使用的是 boot_gdt（arch/x86/boot/compressed/head_64.S）
+     * - boot_gdt 只有最基本的几个段，仅够压缩代码运行
+     * - 主内核需要完整的 GDT，包括：
+     *   * 用户态代码段/数据段（SYSCALL/SYSRET需要）
+     *   * 32位兼容段（运行32位程序需要）
+     *   * TSS段（任务切换需要）
+     *
+     * 【GDTR 寄存器结构】：
+     * 79            16 15             0
+     * ┌───────────────┬───────────────┐
+     * │ 64-bit Base   │  16-bit Limit │
+     * └───────────────┴───────────────┘
+     *
+     * 【加载后的状态】：
+     * - CPU的所有段选择子（CS/DS/SS/ES等）仍指向旧GDT的段
+     * - 需要重新加载段寄存器让它们指向新GDT（见步骤4）
+     */
     native_load_gdt(&startup_gdt_descr);
 
-    // 4. 重载段寄存器
+    /*
+     * 步骤 4：重载段寄存器
+     *
+     * 【为什么需要重载】：
+     * - lgdt 只改变 GDTR，不改变段寄存器（CS/DS/SS/ES/FS/GS）
+     * - 段寄存器的"影子缓存"（Segment Cache/Descriptor Cache）仍然是旧值
+     * - 必须重新加载段选择子，让CPU从新GDT重新读取段描述符
+     *
+     * 【段寄存器影子缓存机制】：
+     * 当执行 `mov ds, ax` 时，CPU做两件事：
+     * 1. 将选择子（如 0x18）存入DS寄存器的可见部分（16位）
+     * 2. 从GDT读取对应描述符，缓存到DS的不可见部分（64位）
+     *
+     * 可见部分：           不可见部分（影子缓存）：
+     * ┌──────────┐         ┌────────────────────────┐
+     * │ 0x0018   │         │ Base: 0x00000000       │
+     * │(选择子)  │    ←    │ Limit: 0xFFFFF         │
+     * └──────────┘  lgdt后  │ Type: Data, DPL=0      │
+     *               需重载   │ ...                    │
+     *                       └────────────────────────┘
+     *
+     * 【__KERNEL_DS 的值】：
+     * - 定义：arch/x86/include/asm/segment.h
+     * - #define __KERNEL_DS  (GDT_ENTRY_KERNEL_DS * 8)
+     * - GDT_ENTRY_KERNEL_DS = 3（第3个GDT条目，0开始计数）
+     * - 计算：3 * 8 = 0x18
+     * - 二进制：0000 0000 0001 1000
+     *   ├─────┬──────────┬───┘
+     *   │ RPL │  Index   │ TI
+     *   │ =0  │  =3      │ =0 (GDT)
+     *   └─────┴──────────┴────
+     *   RPL=0: Ring 0（内核特权级）
+     *   Index=3: GDT第3项
+     *   TI=0: 使用GDT（不是LDT）
+     *
+     * 【为什么只重载 DS/SS/ES】：
+     * - CS（代码段）：不能用 mov 指令修改，必须用 far jmp/call/ret
+     *   （实际上 head_64.S 在调用本函数后会用 lretq 重载CS）
+     * - FS/GS：用于Per-CPU数据和Thread Local Storage，单独设置
+     * - DS/SS/ES：数据访问段，可以统一设为 __KERNEL_DS
+     *
+     * 【内联汇编语法】：
+     * asm volatile(
+     *     "movl %%eax, %%ds\n"  // 输出模板（汇编指令）
+     *     "movl %%eax, %%ss\n"  // %% 表示寄存器（GCC内联汇编约定）
+     *     "movl %%eax, %%es\n"
+     *     : /* 无输出操作数 */
+     *     : "a"(__KERNEL_DS)     // 输入：将 __KERNEL_DS 放入 EAX
+     *     : "memory"             // Clobber：告诉编译器内存可能被修改
+     * );
+     */
     asm volatile("movl %%eax, %%ds\n"
                  "movl %%eax, %%ss\n"
                  "movl %%eax, %%es\n"
                  : : "a"(__KERNEL_DS) : "memory");
 
-    // 5. 加载 IDT（如果需要 AMD SEV 支持）
+    /*
+     * 步骤 5：加载早期 IDT（中断描述符表）
+     *
+     * 【为什么需要早期IDT】：
+     * - 在完整的中断系统初始化前，可能发生异常（如 #PF 缺页异常）
+     * - 特别是 AMD SEV（Secure Encrypted Virtualization）环境：
+     *   * SEV-ES（Encrypted State）要求处理 #VC 异常（VM Communication）
+     *   * #VC异常用于虚拟机与Hypervisor通信（因为寄存器被加密）
+     * - 如果没有IDT，任何异常都会触发 Triple Fault → CPU重启
+     *
+     * 【CONFIG_AMD_MEM_ENCRYPT】：
+     * - 编译时配置选项（Kconfig）
+     * - 启用：handler = rip_rel_ptr(vc_no_ghcb)
+     *   * vc_no_ghcb：最小化的 #VC 异常处理器
+     *   * GHCB（Guest-Hypervisor Communication Block）尚未建立
+     *   * 只能处理最基本的 #VC 异常
+     * - 禁用：handler = NULL
+     *   * 不需要 #VC 处理器
+     *   * startup_64_load_idt 会设置一个空的或最小的IDT
+     *
+     * 【startup_64_load_idt() 做什么】：
+     * - 设置一个临时的 IDT，只处理关键异常
+     * - 如果 handler 非空，将 #VC 异常（向量29）指向 handler
+     * - 使用 lidt 指令加载 IDT 到 IDTR 寄存器
+     */
     void *handler = IS_ENABLED(CONFIG_AMD_MEM_ENCRYPT) ?
                     rip_rel_ptr(vc_no_ghcb) : NULL;
     startup_64_load_idt(handler);
 }
 ```
 
-**native_load_gdt() 实现**：`arch/x86/include/asm/desc.h`
+#### native_load_gdt() 底层实现
+
+**位置**：`arch/x86/include/asm/desc.h`
 
 ```c
 static inline void native_load_gdt(const struct desc_ptr *dtr)
 {
+    /*
+     * lgdt 指令：Load Global Descriptor Table Register
+     *
+     * 【指令格式】：lgdt m80（从内存加载80位/10字节）
+     *
+     * 【内存布局】（desc_ptr 结构）：
+     * Offset  0  1  2  3  4  5  6  7  8  9
+     *        ├──┴──┼──┴──┴──┴──┴──┴──┴──┴──┤
+     *        │Limit│       Base Address    │
+     *        └─────┴───────────────────────┘
+     *        2 bytes        8 bytes (64-bit mode)
+     *
+     * 【操作】：
+     * GDTR.Limit ← dtr->size
+     * GDTR.Base  ← dtr->address
+     *
+     * 【异常】：
+     * - #GP(0): 如果 Limit < 表的实际大小（会导致越界访问）
+     * - #UD: 如果在实模式下使用（实模式不使用GDT）
+     *
+     * 【内联汇编约束】：
+     * "m" (*dtr)  - 表示内存操作数，指向 desc_ptr 结构
+     *   * "m" 约束告诉编译器：将 dtr 指向的内存地址传给指令
+     *   * 编译器生成：lgdt (%rdi) 或 lgdt offset(%rip)
+     */
     asm volatile("lgdt %0"::"m" (*dtr));
 }
+```
+
+#### 关键概念总结
+
+**DEFINE_PER_CPU_PAGE_ALIGNED 到 startup_gdt_descr 的完整流程**：
+
+```
+【编译时】arch/x86/kernel/cpu/common.c
+    ↓
+DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = {
+    .gdt = {
+        [GDT_ENTRY_KERNEL_CS] = GDT_ENTRY_INIT(DESC_CODE64, 0, 0xfffff),
+        [GDT_ENTRY_KERNEL_DS] = GDT_ENTRY_INIT(DESC_DATA64, 0, 0xfffff),
+        ...
+    }
+};
+    ↓ 编译器展开
+.section ".data.percpu"
+.align 4096                           # PAGE_SIZE 对齐
+gdt_page:                             # 全局符号
+    .quad 0x0000000000000000          # GDT[0]: NULL 描述符
+    .quad 0x0020980000000000          # GDT[1]: KERNEL_CS
+    .quad 0x0000920000000000          # GDT[2]: KERNEL_DS
+    ...
+    .fill 26*8, 1, 0                  # GDT[6-31]: 预留
+    # 共 256 字节（32 * 8）
+
+【链接时】链接器 (ld)
+    ↓
+将 gdt_page 放入 vmlinux，分配虚拟地址：
+    gdt_page @ 0xffffffff82345000  （__per_cpu_start + offset）
+
+【运行时】startup_64_setup_gdt_idt()
+    ↓
+1. rip_rel_ptr(&gdt_page)
+   输入：0xffffffff82345000 （符号的链接地址）
+   计算：当前RIP物理地址 + (链接地址 - RIP链接地址)
+   输出：0x02345000 （当前可访问的物理地址）
+
+2. struct gdt_page *gp = 0x02345000
+   gp->gdt = 0x02345000 （结构体第一个字段）
+
+3. startup_gdt_descr = {
+       .address = 0x02345000,
+       .size = 255
+   }
+
+4. lgdt startup_gdt_descr
+   GDTR ← { Base: 0x02345000, Limit: 255 }
+
+5. CPU 后续使用段选择子（如 __KERNEL_CS = 0x10）时：
+   - 索引计算：0x10 / 8 = 2 → GDT[2]
+   - 读取地址：GDTR.Base + (2 * 8) = 0x02345000 + 16 = 0x02345010
+   - 加载描述符到段寄存器的影子缓存
 ```
 
 ### 1.4 Per-CPU GDT 加载
@@ -171,59 +436,293 @@ void cpu_init(void)
 
 ## 第二部分：页表代码详解
 
-### 2.1 压缩内核页表建立
+### 2.1 压缩内核页表建立详解
 
 **位置**：`arch/x86/boot/compressed/head_64.S`
 
-**startup_32 中建立 4 级页表**：
+**上下文**：startup_32 在保护模式（32位）下运行，负责建立初始的4级页表，然后切换到长模式（64位）。
+
+#### 页表内存布局规划
+
+在深入代码前，先了解页表在内存中的布局：
+
+```
+【pgtable 内存布局】（6 页 = 24KB）
+
+偏移 0x0000:  ┌─────────────────────────────┐
+              │ PML4（Page Map Level 4）    │  1 页（4KB）
+              │ - 512 个 8 字节条目          │  只使用 PML4[0]
+偏移 0x1000:  ├─────────────────────────────┤
+              │ PDPT（Page Directory        │  1 页（4KB）
+              │       Pointer Table）       │  使用 PDPT[0-3]（映射4GB）
+偏移 0x2000:  ├─────────────────────────────┤
+              │ PD0（Page Directory 0）     │  1 页（4KB）
+              │ - 映射 0-1GB                │  512 个 2MB 大页
+偏移 0x3000:  ├─────────────────────────────┤
+              │ PD1（Page Directory 1）     │  1 页（4KB）
+              │ - 映射 1-2GB                │  512 个 2MB 大页
+偏移 0x4000:  ├─────────────────────────────┤
+              │ PD2（Page Directory 2）     │  1 页（4KB）
+              │ - 映射 2-3GB                │  512 个 2MB 大页
+偏移 0x5000:  ├─────────────────────────────┤
+              │ PD3（Page Directory 3）     │  1 页（4KB）
+              │ - 映射 3-4GB                │  512 个 2MB 大页
+              └─────────────────────────────┘
+
+【为什么这样设计】：
+1. 使用 2MB 大页（不需要 PT 级别）：
+   - 简化页表结构（只需 3 级）
+   - 减少 TLB Miss（一个 TLB 条目覆盖 2MB）
+   - 足够映射压缩内核需要的内存（通常 < 100MB）
+
+2. 映射完整 4GB：
+   - Identity Mapping：虚拟地址 = 物理地址
+   - 允许访问低端内存（BIOS、设备、启动参数等）
+   - 为后续代码提供简单的地址转换
+
+3. 页表布局连续：
+   - 方便用一个 rva(pgtable) 符号定位
+   - 简化地址计算（基址 + 偏移）
+```
+
+#### 详细代码注释
 
 ```asm
 SYM_FUNC_START(startup_32)
-    # ... 前面的代码 ...
+    # ... 前面的代码（GDT 设置、进入保护模式等）...
 
-    # 1. 计算页表位置（使用 RIP 相对寻址）
+    /*
+     * 步骤 1：计算页表位置
+     *
+     * 【rva() 宏】：Relocatable Virtual Address（可重定位虚拟地址）
+     * - 定义：#define rva(X) ((X) - __START_KERNEL_map)
+     * - 作用：将链接地址转换为相对地址
+     *
+     * 【为什么需要 rva()】：
+     * - pgtable 符号的链接地址是高地址（如 0xffffffff81234000）
+     * - 但当前运行在低地址物理内存（如 0x01000000）
+     * - rva(pgtable) 计算出相对于内核起始的偏移
+     * - 加上 %ebx（内核加载的物理基址）得到真实物理地址
+     *
+     * 【寄存器状态】：
+     * %ebx = 内核镜像的物理加载基址（由 GRUB 传入，如 0x01000000）
+     * %edi = pgtable 的物理地址（如 0x01234000）
+     */
     leal    rva(pgtable)(%ebx), %edi
 
-    # 2. 清零页表区域（6 页）
-    xorl    %eax, %eax
-    movl    $(BOOT_PGT_SIZE >> 2), %ecx
-    rep     stosl
+    /*
+     * 步骤 2：清零页表区域
+     *
+     * 【为什么清零】：
+     * - 页表区域可能包含随机数据（内存未初始化）
+     * - 页表项的 P 位（bit 0）如果是 1，CPU 会认为页存在
+     * - 必须全部清零，然后只设置需要的条目
+     *
+     * 【BOOT_PGT_SIZE】：
+     * - 定义：6 * 4096 = 24576 字节
+     * - 包含：1 PML4 + 1 PDPT + 4 PD
+     *
+     * 【rep stosl 指令】：
+     * - 功能：重复执行 stosl（Store String Long）
+     * - stosl：将 EAX 存入 [EDI]，然后 EDI += 4
+     * - rep：重复 ECX 次
+     * - 结果：将 24576 字节（6144 个双字）全部写 0
+     *
+     * 【计算】：
+     * BOOT_PGT_SIZE >> 2 = 24576 / 4 = 6144（双字数）
+     */
+    xorl    %eax, %eax                    # EAX = 0（要写入的值）
+    movl    $(BOOT_PGT_SIZE >> 2), %ecx   # ECX = 6144（循环次数）
+    rep     stosl                         # 将 6144 个双字（0）写入 [EDI]
 
-    # 3. 设置 PML4 → PDPT
+    /*
+     * 步骤 3：设置 PML4[0] 指向 PDPT
+     *
+     * 【页表层次结构】：
+     * CR3 → PML4[0] → PDPT[0-3] → PD0-3[0-511] → 2MB 物理页
+     *
+     * 【PML4 表项格式】（只设置关键位）：
+     * Bit 63-12: 物理页框号（PDPT 的物理地址 / 4096）
+     * Bit 11-2:  保留/可用
+     * Bit 1:     R/W = 1（可读写）
+     * Bit 0:     P = 1（存在）
+     *
+     * 【地址计算】：
+     * PML4 基址 = pgtable 物理地址（如 0x01234000）
+     * PDPT 基址 = PML4 基址 + 0x1000 = 0x01235000
+     *
+     * 【0x03 标志位】：
+     * 0x03 = 0000 0011（二进制）
+     *      = P(1) | R/W(1)
+     * - Bit 0 (P=1):   页存在于内存
+     * - Bit 1 (R/W=1): 可读写
+     * - Bit 2 (U/S=0): 超级用户（内核）模式（隐含，未设置）
+     */
     leal    rva(pgtable)(%ebx), %edi     # EDI = PML4 基址
-    leal    0x1000(%edi), %eax            # EAX = PDPT 基址
-    orl     $0x03, %eax                   # Present + R/W
-    movl    %eax, 0(%edi)                 # PML4[0] = PDPT
+    leal    0x1000(%edi), %eax            # EAX = PDPT 基址（PML4 + 4KB）
+    orl     $0x03, %eax                   # EAX |= 0x03（Present + R/W）
+    movl    %eax, 0(%edi)                 # PML4[0] = PDPT 地址 | 0x03
 
-    # 4. 设置 PDPT → PD（4 个条目，映射 4GB）
-    leal    0x1000(%edi), %edi            # EDI = PDPT 基址
-    leal    0x1000(%edi), %eax            # EAX = 第一个 PD 基址
-    orl     $0x03, %eax                   # Present + R/W
-    movl    $4, %ecx                      # 4 个 PDPT 条目
-1:  movl    %eax, 0(%edi)                 # PDPT[i] = PD
-    addl    $0x1000, %eax                 # 下一个 PD
-    addl    $8, %edi                      # 下一个 PDPT 条目
-    decl    %ecx
-    jnz     1b
+    /*
+     * 步骤 4：设置 PDPT[0-3] 指向 4 个 PD 表
+     *
+     * 【为什么需要 4 个 PDPT 条目】：
+     * - 每个 PDPT 条目覆盖：512 × 512 × 2MB = 512GB（如果用小页）
+     * - 但这里用 2MB 大页，每个 PD 条目直接映射 2MB
+     * - 每个 PDPT 条目管理一个 PD（512 个 2MB 页 = 1GB）
+     * - 4 个 PDPT 条目 → 4 个 PD → 4GB 物理内存
+     *
+     * 【循环结构】：
+     * for (i = 0; i < 4; i++) {
+     *     PDPT[i] = (PD_base + i * 4096) | 0x03;
+     * }
+     *
+     * 【地址布局】：
+     * PDPT[0] → PD0（偏移 0x2000，映射 0-1GB）
+     * PDPT[1] → PD1（偏移 0x3000，映射 1-2GB）
+     * PDPT[2] → PD2（偏移 0x4000，映射 2-3GB）
+     * PDPT[3] → PD3（偏移 0x5000，映射 3-4GB）
+     */
+    leal    0x1000(%edi), %edi            # EDI = PDPT 基址（PML4 + 4KB）
+    leal    0x1000(%edi), %eax            # EAX = 第一个 PD 基址（PDPT + 4KB）
+    orl     $0x03, %eax                   # EAX |= 0x03（Present + R/W）
+    movl    $4, %ecx                      # ECX = 4（循环 4 次）
+1:  movl    %eax, 0(%edi)                 # PDPT[i] = PD 地址 | 0x03
+    addl    $0x1000, %eax                 # EAX += 4096（下一个 PD）
+    addl    $8, %edi                      # EDI += 8（下一个 PDPT 条目）
+    decl    %ecx                          # ECX--
+    jnz     1b                            # 如果 ECX != 0，跳转到标签 1
 
-    # 5. 设置 PD（使用 2MB 大页）
+    /*
+     * 步骤 5：设置 4 个 PD 表，每个包含 512 个条目（2MB 大页）
+     *
+     * 【2MB 大页模式】：
+     * - 不使用 PT（Page Table）级别
+     * - PD 条目直接指向 2MB 物理页框
+     * - 通过 PS 位（Page Size，Bit 7）启用
+     *
+     * 【PD 表项格式（2MB 大页）】：
+     * Bit 63:    NX（No Execute，需要 EFER.NXE=1）
+     * Bit 51-21: 物理页框号（2MB 对齐，21 位页内偏移）
+     * Bit 12-9:  AVL（可用）
+     * Bit 8:     G（Global，TLB 不刷新）
+     * Bit 7:     PS = 1（2MB 大页）
+     * Bit 6:     D（Dirty）
+     * Bit 5:     A（Accessed）
+     * Bit 4:     PCD（Cache Disable）
+     * Bit 3:     PWT（Write-Through）
+     * Bit 2:     U/S（User/Supervisor）
+     * Bit 1:     R/W = 1（可读写）
+     * Bit 0:     P = 1（存在）
+     *
+     * 【0x00000083 标志位】：
+     * 0x83 = 1000 0011（二进制）
+     *      = PS(1) | R/W(1) | P(1)
+     * - Bit 0 (P=1):   页存在
+     * - Bit 1 (R/W=1): 可读写
+     * - Bit 7 (PS=1):  2MB 大页
+     *
+     * 【循环计算】：
+     * - 2048 个 PD 条目（4 个 PD × 512 条目/PD）
+     * - 每个条目映射 2MB
+     * - 总计：2048 × 2MB = 4096MB = 4GB
+     *
+     * 【Identity Mapping】：
+     * 虚拟地址           PD 条目                物理地址
+     * 0x00000000  →  PD0[0] = 0x00000083  →  0x00000000
+     * 0x00200000  →  PD0[1] = 0x00200083  →  0x00200000
+     * 0x00400000  →  PD0[2] = 0x00400083  →  0x00400000
+     * ...
+     * 0x3FE00000  →  PD1[511]= 0x3FE00083  →  0x3FE00000
+     * 0x40000000  →  PD2[0] = 0x40000083  →  0x40000000
+     * ...
+     * 0xFFE00000  →  PD3[511]= 0xFFE00083  →  0xFFE00000
+     */
     leal    rva(pgtable)(%ebx), %edi
-    addl    $0x2000, %edi                 # EDI = 第一个 PD 基址
-    movl    $0x00000083, %eax             # 物理地址 0 + Present + R/W + PS
-    movl    $2048, %ecx                   # 2048 个 PD 条目（4GB / 2MB）
-1:  movl    %eax, 0(%edi)                 # PD[i] = 物理地址
-    addl    $0x200000, %eax               # 下一个 2MB 页
-    addl    $8, %edi                      # 下一个 PD 条目
-    decl    %ecx
-    jnz     1b
+    addl    $0x2000, %edi                 # EDI = 第一个 PD 基址（pgtable + 8KB）
+    movl    $0x00000083, %eax             # EAX = 物理地址 0 | PS | R/W | P
+    movl    $2048, %ecx                   # ECX = 2048（4 个 PD × 512 条目）
+1:  movl    %eax, 0(%edi)                 # PD[i] = 物理地址 | 0x83
+    addl    $0x200000, %eax               # EAX += 2MB（下一个 2MB 页）
+    addl    $8, %edi                      # EDI += 8（下一个 PD 条目）
+    decl    %ecx                          # ECX--
+    jnz     1b                            # 如果 ECX != 0，继续循环
 
-    # 6. 加载 CR3
-    leal    rva(pgtable)(%ebx), %eax
-    movl    %eax, %cr3
+    /*
+     * 步骤 6：加载 CR3 寄存器
+     *
+     * 【CR3 寄存器】（Control Register 3）：
+     * - 也称为 PDBR（Page Directory Base Register）
+     * - 存储 PML4 表的物理基址
+     * - 只有高 52 位有效（低 12 位必须为 0，因为页对齐）
+     *
+     * 【CR3 格式】（x86-64）：
+     * Bit 63-52: 保留（必须为 0）
+     * Bit 51-12: PML4 表的物理地址（4KB 对齐）
+     * Bit 11-5:  保留（忽略）
+     * Bit 4:     PCD（Page-level Cache Disable）
+     * Bit 3:     PWT（Page-level Write-Through）
+     * Bit 2-0:   保留（忽略）
+     *
+     * 【加载 CR3 的效果】：
+     * 1. CPU 的 MMU 从此使用新页表
+     * 2. TLB（Translation Lookaside Buffer）被刷新
+     * 3. 后续所有内存访问都会通过页表转换
+     *
+     * 【注意】：
+     * - 此时分页还未启用（CR0.PG = 0）
+     * - 需要在后续代码中设置 CR0.PG = 1 才真正启用分页
+     * - 但 CR3 必须在启用分页之前设置好
+     */
+    leal    rva(pgtable)(%ebx), %eax     # EAX = PML4 物理基址
+    movl    %eax, %cr3                    # CR3 = PML4 基址
 
-    # ... 后面的代码（启用分页）...
+    # ... 后面的代码（设置 EFER.LME、启用分页、跳转到 64 位代码）...
 SYM_FUNC_END(startup_32)
 ```
+
+#### 页表建立后的内存映射
+
+```
+【虚拟地址到物理地址的转换示例】
+
+虚拟地址：0x01234567（18MB + 偏移）
+
+拆分虚拟地址（4 级页表索引）：
+┌─────────┬─────────┬─────────┬─────────┬─────────────┐
+│ PML4    │ PDPT    │ PD      │ PT      │   Offset    │
+│ [47:39] │ [38:30] │ [29:21] │ [20:12] │   [11:0]    │
+│    0    │    0    │    9    │   26    │   0x567     │
+└─────────┴─────────┴─────────┴─────────┴─────────────┘
+（注：PT 索引在 2MB 大页模式下被合并到 Offset）
+
+实际转换（2MB 大页）：
+┌─────────┬─────────┬─────────┬───────────────────────┐
+│ PML4    │ PDPT    │ PD      │  Offset (21 bits)     │
+│ [47:39] │ [38:30] │ [29:21] │      [20:0]           │
+│    0    │    0    │    9    │     0x034567          │
+└─────────┴─────────┴─────────┴───────────────────────┘
+
+转换步骤：
+1. CR3 → PML4 基址：0x01234000
+2. PML4[0] → PDPT 基址：0x01235000（PML4[0] & ~0xFFF）
+3. PDPT[0] → PD0 基址：0x01236000（PDPT[0] & ~0xFFF）
+4. PD0[9] → 2MB 页基址：0x01200000（9 × 2MB = 18MB）
+   （PD0[9] = 0x01200083，物理页框号 = 0x01200000）
+5. 物理地址 = 0x01200000 + 0x034567 = 0x01234567
+
+结果：虚拟地址 0x01234567 → 物理地址 0x01234567（Identity Mapping）
+```
+
+#### 关键设计决策总结
+
+| 设计决策 | 原因 |
+|---------|------|
+| **使用 2MB 大页** | 简化页表（3级而非4级），减少 TLB Miss，足够覆盖压缩内核 |
+| **映射完整 4GB** | 简化地址计算，兼容性（访问低端设备和BIOS数据） |
+| **Identity Mapping** | 启用分页前后代码无缝运行（物理地址=虚拟地址） |
+| **静态页表布局** | 编译时确定大小（6页），避免动态分配的复杂性 |
+| **只使用 PML4[0]** | 4GB 内存只需一个 PML4 条目，其他 511 个条目保留 |
 
 ### 2.2 主内核early页表
 
