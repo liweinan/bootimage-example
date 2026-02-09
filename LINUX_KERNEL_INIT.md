@@ -696,11 +696,6 @@ SYM_CODE_END(startup_64)
 
 **startup_64_setup_gdt_idt 的实现**（`arch/x86/boot/startup/gdt_idt.c`）：主内核入口在切换到虚拟地址和 C 环境之前需要可用的 GDT 与一个最小 IDT。
 
-> **相关文档**：
-> - [GDT 详解：从保护模式到长模式](GDT_DETAILED_GUIDE.md)：GDT 的完整演化过程（GRUB GDT → 压缩内核 GDT → 主内核 GDT → per-CPU GDT）、段描述符结构详解、长模式下的作用、GDT Identity Mapping 平滑过渡机制
-> - [x86-64 多级页表设计详解](PAGE_TABLE_DESIGN.md)：页表建立过程、x86-64 硬件要求、多级页表设计原理、MMU 硬件遍历机制
-> - [IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md)：两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
-
 **为何说这里是"早期/初步"的 GDT/IDT**：
 - **时机**：这次 lgdt/lidt 发生在 head_64.S，尚在**切到虚拟地址之前**、**进入完整 C 内核**（setup_arch、trap_init、init_IRQ 等）之前，因而是启动顺序里**最早**的一次 GDT/IDT 设置。
 
@@ -983,6 +978,17 @@ Linux 内核使用**两个独立的 IDT 表**，在启动过程中逐步完善�
 - 需要通过相对寻址而非绝对地址访问全局数据
 
 > **详细内容**：位置无关代码的完整实现机制（`-fPIC` 编译选项、`objcopy` 符号前缀处理、RIP 相对寻址、`rip_rel_ptr()` 宏、`SYM_PIC_ALIAS` 宏、以及 `startup_64_setup_gdt_idt()` 如何访问全局符号等），请参见 **[POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)**。
+
+---
+
+### 相关文档
+
+本章涉及的核心机制详解：
+
+- **[GDT_DETAILED_GUIDE.md](GDT_DETAILED_GUIDE.md)** - GDT 详解：从保护模式到长模式 - GDT 的完整演化过程（GRUB GDT → 压缩内核 GDT → 主内核 GDT → per-CPU GDT）、段描述符结构详解、长模式下的作用、GDT Identity Mapping 平滑过渡机制
+- **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解 - 两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
+- **[PAGE_TABLE_DESIGN.md](PAGE_TABLE_DESIGN.md)** - x86-64 多级页表设计详解 - 页表建立过程、x86-64 硬件要求、多级页表设计原理、MMU 硬件遍历机制
+- **[POSITION_INDEPENDENT_CODE.md](POSITION_INDEPENDENT_CODE.md)** - 位置无关代码完整分析 - `__pi_` 前缀的含义、位置无关代码编译机制（-fPIC、objcopy --prefix-symbols）、RIP 相对寻址、`rip_rel_ptr()` 宏、`SYM_PIC_ALIAS` 宏的实现原理
 
 ---
 
