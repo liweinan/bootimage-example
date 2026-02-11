@@ -129,6 +129,8 @@ DISPLAY=:1 make run-gui
   - 历史案例（RTOS、DOS、x86 分段演化）
 - **[X86_CPU_MODES.md](X86_CPU_MODES.md)** - x86 CPU 运行模式详解（实模式、保护模式、长模式）
 - **[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md)** - x86 near jump 与 long jump（far jump）区别，long mode 下 CS 的作用（CPL、L/D 位）
+- **[X86_64BIT_SEGMENT_LIMIT.md](X86_64BIT_SEGMENT_LIMIT.md)** - 64位长模式下段限长处理详解（Intel手册官方说明、为何被忽略、真正的内存控制机制）
+- **[X86_IDENTITY_MAPPING.md](X86_IDENTITY_MAPPING.md)** - x86-64 Identity Mapping（恒等映射）实现详解（页表构建、CR3使用、与Direct Mapping区别、2MB大页设计）
 - **[A20_ADDRESS_LINE.md](A20_ADDRESS_LINE.md)** - A20 地址线详解
 
 ### BIOS 相关文档

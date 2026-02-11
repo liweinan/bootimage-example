@@ -38,3 +38,9 @@ tmp.txt
 output.txt
 output*.txt
 tree.txt
+
+# 草稿文件
+draft*.txt
+draft*.md
+mapping.txt
+notes.txt

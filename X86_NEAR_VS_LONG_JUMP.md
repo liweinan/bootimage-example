@@ -2,7 +2,7 @@
 
 本文档说明 near jump 与 long jump（far jump）的区别，以及 long mode 下段寄存器（尤其 CS）仍起什么作用。
 
-> **相关文档**：[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) 中压缩内核 startup_32 用 lret 进入 64 位 startup_64 的流程；[X86_CPU_MODES.md](X86_CPU_MODES.md) CPU 模式与长模式。
+> **相关文档**：[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) 中压缩内核 startup_32 用 lret 进入 64 位 startup_64 的流程；[X86_CPU_MODES.md](X86_CPU_MODES.md) CPU 模式与长模式；[X86_IDENTITY_MAPPING.md](X86_IDENTITY_MAPPING.md) Identity Mapping 实现（lret 跳转在 identity mapping 环境下执行）。
 
 ---
 
