@@ -397,6 +397,254 @@ gdt_page:                             # 全局符号
    - 加载描述符到段寄存器的影子缓存
 ```
 
+#### 1.3.5 关键对比：early_gdt_descr vs startup_64_setup_gdt_idt
+
+在主内核代码中，有**两种**方式来引用 `gdt_page`：
+
+1. **startup_64_setup_gdt_idt()** - 使用 RIP 相对寻址（本节讨论的）
+2. **early_gdt_descr** - 使用静态定义的 GDT 描述符
+
+它们都指向同一个 `gdt_page`，但**地址计算方式完全不同**。
+
+##### early_gdt_descr 的定义
+
+**位置**：`arch/x86/kernel/head_64.S`
+
+```assembly
+# 早期 GDT 描述符（静态定义）
+SYM_DATA_START_LOCAL(early_gdt_descr)
+    .word   GDT_ENTRIES*8-1          # Limit: 256-1 = 255
+SYM_DATA_END_LABEL(early_gdt_descr, SYM_L_LOCAL, early_gdt_descr_base)
+SYM_DATA_START_LOCAL(early_gdt_descr_base)
+    .quad   INIT_PER_CPU_VAR(gdt_page)  # Base: gdt_page 的编译时地址
+SYM_DATA_END(early_gdt_descr_base)
+```
+
+**关键特征**：
+- **静态数据**：在汇编时就定义好的 10 字节结构（2字节limit + 8字节base）
+- **地址计算**：使用 `INIT_PER_CPU_VAR(gdt_page)` 宏，在**编译/链接时**计算
+- **假设前提**：代码已运行在**最终虚拟地址**（如 0xFFFFFFFF81xxxxxx）
+
+##### 核心区别对比表
+
+| 特性 | startup_64_setup_gdt_idt() | early_gdt_descr |
+|------|---------------------------|-----------------|
+| **定义方式** | C 函数，运行时构建 | 汇编静态数据 |
+| **地址计算** | `rip_rel_ptr(&gdt_page)` | `INIT_PER_CPU_VAR(gdt_page)` |
+| **地址类型** | RIP 相对地址（运行时） | 链接时固定地址 |
+| **使用时机** | startup_64 早期 | 切换到高地址后 |
+| **适用环境** | 任何地址（低地址/高地址） | 只能在最终虚拟地址 |
+| **灵活性** | 高（位置无关） | 低（依赖链接地址） |
+
+##### 地址计算方式的关键差异
+
+**INIT_PER_CPU_VAR(gdt_page) 宏展开**：
+
+```c
+// arch/x86/include/asm/percpu.h
+#define INIT_PER_CPU_VAR(var) \
+    (init_per_cpu__##var - __per_cpu_load + __per_cpu_start)
+```
+
+这是一个**编译时常量计算**：
+- 在链接阶段，链接器就确定了 `gdt_page` 的虚拟地址
+- 假设值：`0xFFFFFFFF82345000`
+- 这个地址**直接写入** `early_gdt_descr` 的数据段
+
+**rip_rel_ptr(&gdt_page) 运行时计算**：
+
+```c
+// 内联汇编实现
+static inline void *rip_rel_ptr(void *p) {
+    asm("leaq %c1(%%rip), %0" : "=r"(ptr) : "i"(p));
+    // 计算：当前RIP + (符号地址 - RIP符号地址)
+}
+```
+
+这是**运行时动态计算**：
+- 基于当前 RIP 的位置
+- 计算 `gdt_page` 相对于 RIP 的偏移
+- 得到当前可访问的实际地址
+
+##### 使用场景示例
+
+假设：
+- 内核链接地址（最终虚拟地址）：`0xFFFFFFFF81000000`
+- 当前运行地址（early startup_64）：`0x0000000001000000`
+- `gdt_page` 在镜像中的偏移：`+0x1345000`
+
+**场景 1：startup_64 早期（还在低地址运行）**
+
+```
+当前状态：
+  - 代码运行在物理地址：0x0000000001100000
+  - 页表只映射了 Identity Mapping（VA = PA）
+  - gdt_page 实际位置：0x0000000001345000
+
+方案 A - 使用 INIT_PER_CPU_VAR(gdt_page)：
+  early_gdt_descr_base = 0xFFFFFFFF82345000  ← 链接时地址
+  lgdt early_gdt_descr
+  ❌ 错误！此地址还未映射 → #PF (Page Fault)
+
+方案 B - 使用 rip_rel_ptr(&gdt_page)：
+  当前 RIP ≈ 0x0000000001100000
+  offset = &gdt_page - &current_code = 0x1345000 - 0x1100000 = 0x245000
+  实际地址 = RIP + offset = 0x0000000001100000 + 0x245000 = 0x0000000001345000
+  ✅ 正确！能访问到 gdt_page
+```
+
+**场景 2：切换到高地址映射后**
+
+```
+当前状态：
+  - 代码运行在虚拟地址：0xFFFFFFFF81100000
+  - 页表已建立 Direct Mapping
+  - gdt_page 虚拟地址：0xFFFFFFFF82345000
+
+方案 A - 使用 INIT_PER_CPU_VAR(gdt_page)：
+  early_gdt_descr_base = 0xFFFFFFFF82345000
+  lgdt early_gdt_descr
+  ✅ 正确！链接地址有效
+
+方案 B - 使用 rip_rel_ptr(&gdt_page)：
+  当前 RIP ≈ 0xFFFFFFFF81100000
+  offset = 0x1345000 - 0x1100000 = 0x245000
+  实际地址 = RIP + offset = 0xFFFFFFFF81100000 + 0x245000
+            = 0xFFFFFFFF81345000
+  ⚠️  错误计算！应该是 0xFFFFFFFF82345000
+
+  (实际上 rip_rel_ptr 在这种情况下也能正确工作，
+   因为它考虑了符号的实际链接地址)
+```
+
+##### 时间线上的使用
+
+```
+T1: startup_64 开始
+    ├─ 状态：运行在低地址 (0x01xxxxxx)
+    ├─ 使用：压缩内核的 boot_gdt
+    └─ 页表：只有 Identity Mapping
+
+T2: 调用 startup_64_setup_gdt_idt()  ← 使用 rip_rel_ptr()
+    ├─ 目的：切换到主内核的 gdt_page
+    ├─ 问题：代码还在低地址，链接地址无效
+    ├─ 解决：rip_rel_ptr() 计算当前可访问地址
+    └─ 结果：lgdt 加载成功 ✅
+
+T3: 建立高地址映射
+    └─ 创建 Direct Mapping（VA = PA + PAGE_OFFSET）
+
+T4: 跳转到高地址内核代码
+    ├─ 从 0x01xxxxxx 跳转到 0xFFFFFFFF81xxxxxx
+    └─ 此后代码运行在最终虚拟地址
+
+T5: 之后的代码可以使用 early_gdt_descr
+    ├─ 前提：已在高地址运行
+    ├─ 优势：简单，不需要运行时计算
+    └─ 示例：某些汇编代码直接 lgdt early_gdt_descr
+```
+
+##### 为什么需要两种方式？
+
+**startup_64_setup_gdt_idt() 的必要性**：
+
+```
+问题场景：
+  - startup_64 刚进入时，代码在物理地址 0x01000000 执行
+  - gdt_page 在物理地址 0x01345000
+  - 但链接器认为 gdt_page 在 0xFFFFFFFF82345000
+  - 如果直接用链接地址 → #PF（页面不存在）
+
+解决方案：
+  - 使用 RIP 相对寻址
+  - 无论代码在低地址还是高地址，都能正确找到 gdt_page
+  - 这是早期启动代码的关键技术
+```
+
+**early_gdt_descr 的便利性**：
+
+```
+适用场景：
+  - 内核已经运行在最终虚拟地址
+  - 链接地址已经有效
+  - 不需要运行时计算
+
+优势：
+  - 静态定义，编译时确定
+  - 汇编代码可以直接使用：lgdt early_gdt_descr
+  - 代码简单，不需要函数调用
+```
+
+##### 它们指向同一个 GDT 表吗？
+
+**是的！** 两者最终都指向 `gdt_page` 这块内存，但：
+
+```
+物理内存中的 gdt_page：
+  ┌─────────────────────────────┐
+  │ 物理地址：0x01345000        │  ← 实际内存位置
+  │ 内容：GDT_ENTRIES 个段描述符 │
+  └─────────────────────────────┘
+           ↑              ↑
+           │              │
+  低地址映射│              │高地址映射
+  (Identity)│              │(Direct)
+           │              │
+  VA: 0x01345000    VA: 0xFFFFFFFF82345000
+      ↑                    ↑
+      │                    │
+  rip_rel_ptr()      INIT_PER_CPU_VAR()
+  计算结果            链接时地址
+```
+
+**关键理解**：
+- `gdt_page` 只有**一块物理内存**
+- 在不同时刻，可以通过**不同的虚拟地址**访问
+- `rip_rel_ptr()` 适应当前地址空间
+- `INIT_PER_CPU_VAR()` 使用最终地址空间
+
+##### 实际代码验证
+
+**使用 startup_64_setup_gdt_idt()**：
+
+```c
+// arch/x86/kernel/head_64.S
+startup_64:
+    // ... 早期初始化 ...
+    call startup_64_setup_gdt_idt  // ← 使用 rip_rel_ptr()
+    // GDT 已切换到 gdt_page
+```
+
+**使用 early_gdt_descr**：
+
+```assembly
+// 某些晚期汇编代码
+some_function:
+    lgdt early_gdt_descr      // ← 直接使用静态定义
+    // 前提：已在高地址运行
+```
+
+##### 总结
+
+| 方面 | startup_64_setup_gdt_idt | early_gdt_descr |
+|------|-------------------------|-----------------|
+| **核心技术** | RIP 相对寻址 | 链接时地址 |
+| **关键优势** | 位置无关 | 简单直接 |
+| **使用前提** | 无要求 | 必须在最终地址 |
+| **典型用途** | 早期启动（切换GDT） | 晚期代码（重载GDT） |
+| **实现方式** | C 函数 + 内联汇编 | 纯汇编数据 |
+
+**关键要点**：
+1. 两者都指向 `gdt_page`，但计算地址的方式不同
+2. `startup_64_setup_gdt_idt()` 是早期启动的关键，使用 RIP 相对寻址
+3. `early_gdt_descr` 是便利工具，适用于已在最终地址的代码
+4. 这体现了内核启动过程中地址空间切换的复杂性
+
+> **相关章节**：
+> - **1.3** - startup_64_setup_gdt_idt() 详细实现
+> - **演化篇 4.1** - 主内核 GDT 演化过程
+> - **理论篇 1.2** - GDT 描述符结构
+
 ### 1.4 Per-CPU GDT 加载
 
 **位置**：`arch/x86/kernel/cpu/common.c`
