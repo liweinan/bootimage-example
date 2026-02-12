@@ -1,6 +1,27 @@
 # Linux 用户空间内存模型详解
 
-本文档详细解释 Linux 用户空间的内存模型、内存管理机制，以及用户空间程序如何使用汇编指令访问内存数据。
+**文档定位**：
+本文档详细讲解 Linux 用户空间的内存模型、地址空间布局、VMA 管理和汇编层面的内存访问机制。
+
+**相关文档**：
+- **[LINUX_KERNEL_INIT.md - 内存管理子系统完整生命周期](LINUX_KERNEL_INIT.md#内存管理子系统的完整生命周期从启动到运行时)** - 四大子系统的整体关系（⭐ 推荐先读）
+- **[LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)** - Page Fault 与按需分配（本文的内核视角）
+- **[WHY_VIRTUAL_MEMORY.md](WHY_VIRTUAL_MEMORY.md)** - 为什么需要虚拟内存（理论基础）
+- **[LINUX_MEMORY_MANAGEMENT_EVOLUTION.md](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - 内核启动过程的内存管理演化
+- **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统（物理页分配）
+- **[SLAB_ALLOCATOR_EXPLAINED.md](SLAB_ALLOCATOR_EXPLAINED.md)** - Slab 分配器（小对象分配）
+
+**内核源码参考**（基于 Linux v6.x）：
+- `arch/x86/include/asm/page_64_types.h` - TASK_SIZE、用户空间地址范围定义
+- `arch/x86/mm/mmap.c` - mmap 布局管理、mmap_base() 计算
+- `mm/mmap.c` - brk/mmap 系统调用实现、do_mmap() 核心函数
+- `include/linux/mm_types.h` - vm_area_struct 结构定义
+- `arch/x86/kernel/process_64.c` - arch_prctl() 系统调用（FS/GS 设置）
+- `arch/x86/include/asm/fsgsbase.h` - FS/GS 寄存器操作
+
+**学习路径建议**：查看 [内存管理文档完整导读](LINUX_KERNEL_INIT.md#交叉引用与深入阅读) 了解推荐阅读顺序
+
+---
 
 ## 目录
 
@@ -21,24 +42,30 @@
 
 在 64 位 Linux 系统上，每个用户进程的虚拟地址空间布局如下：
 
+**注意**：以下地址基于 **4-level 页表**（48 位虚拟地址）。对于 **5-level 页表**（57 位虚拟地址），内核空间起始地址不同。
+
 ```
-高地址（0x7FFFFFFFFFFF）
+高地址（0x00007FFFFFFFFFFF，用户空间上限）
 ┌─────────────────────────────────────┐
 │ 内核空间（Kernel Space）              │
-│ 0xFFFF800000000000 - 0xFFFFFFFFFFFFFFFF │
+│ 4-level: 0xFFFF800000000000 - 0xFFFFFFFFFFFFFFFF │
+│ 5-level: 0xFF11000000000000 - 0xFFFFFFFFFFFFFFFF │
 │ （用户空间无法访问）                   │
 ├─────────────────────────────────────┤
 │ 栈（Stack）                          │
-│ 向下增长                             │
-│ 0x7FFF00000000 - 0x7FFFFFFFFFFF     │
+│ 向下增长（VM_GROWSDOWN）              │
+│ 位置：接近用户空间顶部                 │
 ├─────────────────────────────────────┤
 │ 内存映射区域（Memory Mapping）        │
 │ 共享库、mmap 文件等                   │
-│ 动态分配                             │
+│ 向下增长（mmap_base ~ 栈底）          │
+│ mmap_base ≈ (TASK_SIZE * 5/6) - 随机化 │
+│ （保留 ≥128MB 栈保护区）               │
 ├─────────────────────────────────────┤
 │ 堆（Heap）                           │
-│ 向上增长                             │
-│ 0x000010000000 - 0x00007FFF00000000 │
+│ 向上增长（brk）                       │
+│ start_brk ~ brk                      │
+│ （旧式 mmap 从 TASK_SIZE/3 开始）     │
 ├─────────────────────────────────────┤
 │ BSS 段（未初始化数据）                │
 │ 0x000010000000 - ...                │
@@ -157,11 +184,22 @@ Linux 用户空间程序的内存分为以下几个段：
 用户程序访问虚拟地址 0x400000
          ↓
 CPU MMU（内存管理单元）查找页表
+         ↓ 硬件自动执行
+1. TLB 查找（Translation Lookaside Buffer）
+   命中 → 直接得到物理地址
+   未命中 → 继续硬件页表遍历
          ↓
-页表将虚拟地址映射到物理地址（如 0x12345000）
+2. 硬件页表遍历（x86-64，4-level）
+   CR3 → PML4 → PDPT → PD → PT → PTE
          ↓
-访问物理内存
+3. 检查 PTE（页表项）
+   P=1（存在）→ 提取 PFN，拼接偏移 → 物理地址
+   P=0（不存在）→ 触发 #PF（Page Fault）
+         ↓
+访问物理内存（或触发 Page Fault）
 ```
+
+**详细流程**：完整的 TLB、硬件页表遍历和 Page Fault 处理流程，请参见 [LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)。
 
 **页表（Page Table）的作用：**
 
@@ -225,13 +263,18 @@ Linux 内核使用以下机制管理物理内存：
 └─────────────────────────────────────┘
 ```
 
-#### 3. Slab 分配器
+#### 3. Slab 分配器（SLUB）
 
-- **用途**：管理小对象的内存分配（如内核数据结构）
+- **用途**：管理小对象的内存分配（如内核数据结构：task_struct、inode、dentry 等）
 - **特点**：
-  - 减少内存碎片
-  - 提高分配效率
-  - 缓存常用对象
+  - 减少内部碎片（小对象共享页框）
+  - 极速分配（Per-CPU 缓存，~5 纳秒）
+  - 对象复用（释放的对象放回缓存，避免频繁调用伙伴系统）
+  - 缓存友好（同类对象物理相邻，提高 CPU 缓存命中率）
+
+**现代实现**：Linux 6.x 使用 **SLUB**（Unified Buffering）作为默认实现。
+
+**详细原理**：三层架构、Per-CPU 缓存、性能对比等，请参见 [SLAB_ALLOCATOR_EXPLAINED.md](SLAB_ALLOCATOR_EXPLAINED.md)。
 
 ### 2.2 虚拟内存管理
 
@@ -265,34 +308,81 @@ PML4表    PDPT表    PD表      PT表
 **页错误的类型：**
 
 1. **缺页错误（Page Not Present）**
-   - 虚拟页未映射到物理页
-   - 内核分配物理页并建立映射
+   - **Minor Fault**：页已在内存，仅需建立 PTE 映射（如首次访问 mmap 区域）
+   - **Major Fault**：需要从磁盘读取（如文件映射页换出）或分配新物理页（如匿名页）
+   - 内核处理：do_anonymous_page()（匿名页）或 do_fault()（文件页）
 
 2. **权限错误（Permission Fault）**
-   - 访问权限不足（如写入只读页）
-   - 触发段错误（Segmentation Fault）
+   - 访问权限不足（如写入只读页，PTE.W=0）
+   - 触发段错误（Segmentation Fault，SIGSEGV）
+   - 特例：COW 页的写保护会触发此类错误，但由内核处理（do_wp_page）
 
 3. **写时复制（Copy-on-Write, COW）**
-   - 多个进程共享同一物理页
-   - 写入时，内核复制页面并更新映射
+   - fork() 后父子进程共享物理页，PTE 标记为只读
+   - 任一进程写入时触发 Page Fault（错误码：WRITE + PROTECTION）
+   - 内核检查：page_count() == 1？直接改写：复制页面（wp_page_copy）
+
+**Page Fault 错误码**（存储在 CR2 寄存器，由 CPU 设置）：
+```c
+// arch/x86/include/asm/trap_pf.h
+enum x86_pf_error_code {
+    X86_PF_PROT   = 1 << 0,  // 保护违规（P=1）vs 页不存在（P=0）
+    X86_PF_WRITE  = 1 << 1,  // 写访问 vs 读访问
+    X86_PF_USER   = 1 << 2,  // 用户模式 vs 内核模式
+    X86_PF_RSVD   = 1 << 3,  // 保留位设置
+    X86_PF_INSTR  = 1 << 4,  // 指令获取
+};
+```
+
+**完整流程**：TLB、MMU、#PF 异常、do_page_fault() 详细分析，请参见 [LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)。
 
 #### 3. 内存分配系统调用
 
 **用户空间内存分配的系统调用：**
 
 1. **`brk()` / `sbrk()`**
-   - 调整程序的数据段（BSS）结束位置
-   - `malloc()` 底层使用 `brk()` 分配小块内存
-   - 只能扩展或收缩堆的末尾
+   - 功能：调整堆的结束位置（mm->brk）
+   - 实现：`SYSCALL_DEFINE1(brk)` → `do_brk_flags()` (mm/mmap.c)
+   - 限制：
+     - 新 brk 必须 ≥ mm->start_brk（堆起始）
+     - 新 brk 必须 ≤ mm->start_stack（避免与栈冲突）
+   - 用途：`malloc()` 对于小块内存（< 128KB）使用 `brk()`
+   - 特点：只能扩展或收缩堆的末尾，无法创建"洞"
 
 2. **`mmap()`**
-   - 映射文件或匿名内存到虚拟地址空间
-   - `malloc()` 对于大块内存使用 `mmap()`
-   - 可以映射到任意虚拟地址
+   - 功能：映射文件或匿名内存到虚拟地址空间
+   - 实现：`SYSCALL_DEFINE6(mmap)` → `ksys_mmap_pgoff()` → `do_mmap()` (mm/mmap.c)
+   - 地址选择：
+     - `addr == 0`：内核自动选择地址（调用 arch_get_unmapped_area*）
+     - `addr != 0` + `MAP_FIXED`：强制使用指定地址
+     - `MAP_32BIT`：强制映射到 32 位地址空间（0x40000000 - 0x80000000）
+   - 用途：
+     - `malloc()` 对于大块内存（≥ 128KB）使用 `mmap(MAP_ANONYMOUS)`
+     - 共享库加载（如 libc.so）
+     - 文件映射（如数据库文件）
+   - 特点：可以映射到任意虚拟地址，支持 ASLR 随机化
 
 3. **`munmap()`**
-   - 取消内存映射
-   - 释放 `mmap()` 分配的内存
+   - 功能：取消内存映射
+   - 实现：`SYSCALL_DEFINE2(munmap)` → `__vm_munmap()` (mm/mmap.c)
+   - 释放：释放 `mmap()` 分配的内存（不能用于 `brk()` 分配的内存）
+
+**架构特定的地址选择**：
+```c
+// arch/x86/kernel/sys_x86_64.c
+static void find_start_end(unsigned long addr, unsigned long flags,
+                           unsigned long *begin, unsigned long *end)
+{
+    if (flags & MAP_32BIT) {
+        *begin = 0x40000000;  // 1GB
+        *end = 0x80000000;    // 2GB
+        // 支持 ASLR 随机化
+    } else {
+        *begin = mmap_base();  // ~(TASK_SIZE * 5/6)
+        *end = TASK_SIZE;      // 用户空间上限
+    }
+}
+```
 
 **示例：`malloc()` 的实现策略**
 
