@@ -59,34 +59,7 @@ enter_kernel
 
 ---
 
-## 中断与系统调用机制概览
-
-**重要概念澄清**：为避免混淆，先明确 IDT 与系统调用的关系。
-
-### IDT（中断描述符表）包含的内容
-
-IDT 是 x86 架构的硬件机制，CPU 通过中断向量号（0-255）查询 IDT 表，跳转到对应的处理程序。
-
-| 中断类型 | 向量范围 | 说明 | 设置阶段 |
-|---------|---------|------|---------|
-| **CPU 异常** | 0-31 | #DE(除零), #PF(缺页), #GP(通用保护) 等 | idt_setup_early_handler() → idt_setup_traps() |
-| **硬件中断 (IRQ)** | 32-255 | 时钟、键盘、网卡等设备中断 | idt_setup_apic_and_irq_gates() |
-| **软件中断** | 特定向量 | INT 0x80（32位系统调用兼容） | idt_setup_ia32_syscall_gate() |
-
-### 系统调用的两种机制
-
-Linux 内核支持**两种系统调用机制**（INT 0x80 和 SYSCALL/SYSENTER），**它们的实现方式完全不同**：
-
-| 机制 | 指令 | 是否使用 IDT | 设置时机 | 性能 | 适用范围 |
-|------|------|-------------|---------|------|---------|
-| **传统机制** | `INT 0x80` | ✅ 是（查询 IDT[0x80]） | trap_init() → idt_setup_traps() | 慢 | 32位兼容 |
-| **现代机制** | `SYSCALL`/`SYSENTER` | ❌ 否（通过 MSR 寄存器） | trap_init() → cpu_init() → syscall_init() | 快 | 64位主流 |
-
-**关键区别**：
-- **INT 0x80**：是 IDT 表的一个条目（向量 0x80），通过软件中断机制实现
-- **SYSCALL**：是专用 CPU 指令，通过 MSR 寄存器（MSR_LSTAR 等）配置入口地址，**完全绕过 IDT**
-
-> 详细对比见本文档第 2 节「trap_init() 与 syscall」和第 3 节「init_IRQ() 与接管 INT 服务的过程」。
+> **注**：关于 IDT 包含的内容（CPU 异常、硬件中断、软件中断）和系统调用的两种机制（INT 0x80 vs SYSCALL/SYSENTER），详见 [Linux 中断处理指南 - IDT 与中断类型概览](LINUX_INTERRUPT_GUIDE.md#idt-与中断类型概览)。
 
 ---
 
