@@ -1961,6 +1961,13 @@ static const struct idt_data ia32_idt[] __initconst = {
 - **[LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)** - 缺页异常与按需分配 - Page Fault 完整流程、TLB/MMU 工作机制、错误码分析、内核处理路径
 - **[LINUX_USERSPACE_MEMORY_GUIDE.md](LINUX_USERSPACE_MEMORY_GUIDE.md)** - 用户空间内存模型 - 虚拟地址空间布局、VMA 管理、brk/mmap 系统调用、FS/GS 寄存器、地址转换完整流程
 
+**补充技术细节**（可选深入阅读）：
+- **[SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md)** - SeaBIOS E820 构建流程 - POST 阶段、CPU 模式切换、E820 表构建机制、内存探测策略、QEMU fw_cfg 接口
+- **[BOOTLOADER_MEMORY_PASSING.md](BOOTLOADER_MEMORY_PASSING.md)** - Bootloader 内存信息传递 - GRUB 读取 E820 表、UEFI GetMemoryMap()、EFI 内存类型映射、boot_params 统一接口
+- **[BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md)** - BIOS 内存布局与地址映射 - BIOS ROM 映射机制、实模式地址空间、保护模式访问、特殊内存区域
+- **[BIOS_MEMORY_MAPPING.md](BIOS_MEMORY_MAPPING.md)** - BIOS 文件映射到物理内存的证据分析 - SeaBIOS 源码验证、qemu.log 分析、内存映射关系
+- **[BIOS_MEMORY_QA.md](BIOS_MEMORY_QA.md)** - BIOS 内存相关问答 - Bootloader 运行模式、加载位置、模式切换时机
+
 ### 架构细节
 
 - **[X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md)** - near/long jump 与 long mode 下 CS 的作用
