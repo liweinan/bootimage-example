@@ -2,6 +2,11 @@
 
 在 Linux 内核中，为了高效、安全地处理硬件中断，内核将中断处理分为两个部分：**Top Half（上半部）** 和 **Bottom Half（下半部）**。这种设计的核心目的是**尽量缩短中断禁用时间**，保证系统的实时性和响应能力。
 
+> **代码示例说明**：
+> - 本文档中的代码示例基于 Linux 内核源码（主线版本）
+> - 部分复杂函数已简化以突出核心概念，实际内核实现包含额外的检查、优化和调试代码
+> - 所有代码示例已与最新内核源码校对，详见 [VERIFICATION_SUMMARY.md](VERIFICATION_SUMMARY.md)
+
 > **相关文档**：
 > - 本文档描述内核**运行时**的中断处理模型（上下半部、softirq/tasklet/workqueue）
 > - 若需了解**中断/异常/陷阱的基础概念**（Intel SDM 规范、三者本质区别、Exception 分类），见 [x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现](X86_INTERRUPT_EXCEPTION_TRAP.md)
@@ -265,15 +270,15 @@ irqreturn_t network_interrupt_handler(int irq, void *dev_id)
 void raise_softirq(unsigned int nr)
 {
     unsigned long flags;
-    
+
     local_irq_save(flags);
-    __raise_softirq_irqoff(nr);  // 设置当前 CPU 的软中断位图
+    raise_softirq_irqoff(nr);  // 设置软中断位图并可能唤醒 ksoftirqd
     local_irq_restore(flags);
 }
 
 void __raise_softirq_irqoff(unsigned int nr)
 {
-    // 设置 per-CPU 位图：__softirq_pending[nr/32] |= (1 << (nr % 32))
+    lockdep_assert_irqs_disabled();  // 调试断言：确保中断已禁用
     trace_softirq_raise(nr);
     or_softirq_pending(1UL << nr);
 }
@@ -336,13 +341,23 @@ static inline void tasklet_schedule(struct tasklet_struct *t)
 // linux/kernel/softirq.c
 void __tasklet_schedule(struct tasklet_struct *t)
 {
+    __tasklet_schedule_common(t, &tasklet_vec, TASKLET_SOFTIRQ);
+}
+
+// 实际实现在 __tasklet_schedule_common() 中：
+static void __tasklet_schedule_common(struct tasklet_struct *t,
+                                      struct tasklet_head __percpu *headp,
+                                      unsigned int softirq_nr)
+{
+    struct tasklet_head *head;
     unsigned long flags;
-    
+
     local_irq_save(flags);
+    head = this_cpu_ptr(headp);  // 获取当前 CPU 的 tasklet 队列
     t->next = NULL;
-    *__this_cpu_read(tasklet_vec.tail) = t;  // 加入 per-CPU 链表
-    __this_cpu_write(tasklet_vec.tail, &(t->next));
-    raise_softirq_irqoff(TASKLET_SOFTIRQ);  // 触发 TASKLET_SOFTIRQ
+    *head->tail = t;             // 将 tasklet 加入队列尾部
+    head->tail = &(t->next);
+    raise_softirq_irqoff(softirq_nr);  // 触发对应的软中断
     local_irq_restore(flags);
 }
 ```
@@ -395,31 +410,38 @@ irqreturn_t my_interrupt_handler(int irq, void *dev_id)
 **内部实现：**
 
 ```c
-// linux/kernel/workqueue.c
-bool schedule_work(struct work_struct *work)
+// linux/include/linux/workqueue.h
+static inline bool schedule_work(struct work_struct *work)
 {
     return queue_work(system_wq, work);  // 加入系统默认工作队列
 }
 
-bool queue_work(struct workqueue_struct *wq, struct work_struct *work)
+// linux/kernel/workqueue.c
+// 注意：以下为简化的逻辑示意，实际内核实现非常复杂（涉及 CPU 选择、pool 管理等）
+bool queue_work_on(int cpu, struct workqueue_struct *wq,
+                   struct work_struct *work)
 {
     bool ret = false;
-    unsigned long flags;
-    
-    // 将 work 加入工作队列的链表
-    raw_spin_lock_irqsave(&wq->pool->lock, flags);
-    if (!list_empty(&work->entry))  // work 已经在队列中
-        goto out;
-    
-    // 将 work 加入队列链表
-    insert_work(pwq, work, &pwq->pool->worklist, work_flags);
-    
-    // 唤醒工作线程处理
-    wake_up_worker(pwq->pool);
-out:
-    raw_spin_unlock_irqrestore(&wq->pool->lock, flags);
+    unsigned long irq_flags;
+
+    local_irq_save(irq_flags);
+
+    // 检查 work 是否已经在队列中（通过 PENDING 位）
+    if (!test_and_set_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work)) &&
+        !clear_pending_if_disabled(work)) {
+        // 实际工作由 __queue_work() 完成（涉及复杂的 pool 选择和队列管理）
+        __queue_work(cpu, wq, work);
+        ret = true;
+    }
+
+    local_irq_restore(irq_flags);
     return ret;
 }
+
+// __queue_work() 的核心逻辑（简化）：
+// 1. 选择合适的 worker_pool（根据 CPU 和 workqueue 类型）
+// 2. 将 work 插入 pool->worklist
+// 3. 唤醒 worker 线程处理
 ```
 
 **特点：**
@@ -450,8 +472,10 @@ out:
 
 ## 完整示例：网络数据包接收
 
+> **说明**：以下为概念性示例，展示 Top Half 如何触发 softirq。实际的 e1000 驱动使用更复杂的 NAPI 机制。
+
 ```c
-// 网卡驱动 Top Half
+// 网卡驱动 Top Half（简化示例）
 irqreturn_t e1000_interrupt(int irq, void *dev_id)
 {
     struct net_device *netdev = dev_id;
@@ -523,6 +547,8 @@ static void net_rx_action(struct softirq_action *h)
 这种分层设计是 Linux 内核中断子系统高效、稳定的核心原因之一。
 
 ## 键盘驱动示例：Top Half 和 Bottom Half 设计
+
+> **说明**：以下为完整的教学示例，展示 Top Half 和 Bottom Half 的设计模式。这不是实际的键盘驱动代码，而是用于说明概念的示范实现。
 
 下面以键盘驱动为例，展示如何设计 Top Half 和 Bottom Half 代码。键盘使用 IRQ1，当用户按下按键时，键盘控制器会产生硬件中断。
 

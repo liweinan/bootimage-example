@@ -44,3 +44,6 @@ draft*.txt
 draft*.md
 mapping.txt
 notes.txt
+
+# 文档校对报告
+VERIFICATION_SUMMARY.md
