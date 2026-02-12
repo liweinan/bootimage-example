@@ -75,12 +75,12 @@ IDT 是 x86 架构的硬件机制，CPU 通过中断向量号（0-255）查询 I
 
 ### 系统调用的两种机制
 
-Linux 内核支持两种系统调用机制，**它们的实现方式完全不同**：
+Linux 内核支持**两种系统调用机制**（INT 0x80 和 SYSCALL/SYSENTER），**它们的实现方式完全不同**：
 
 | 机制 | 指令 | 是否使用 IDT | 设置时机 | 性能 | 适用范围 |
 |------|------|-------------|---------|------|---------|
-| **传统机制** | `INT 0x80` | ✅ 是（查询 IDT[0x80]） | init_IRQ() → idt_setup_ia32_syscall_gate() | 慢 | 32位兼容 |
-| **现代机制** | `SYSCALL`/`SYSENTER` | ❌ 否（通过 MSR 寄存器） | trap_init() → syscall_init() | 快 | 64位主流 |
+| **传统机制** | `INT 0x80` | ✅ 是（查询 IDT[0x80]） | trap_init() → idt_setup_traps() | 慢 | 32位兼容 |
+| **现代机制** | `SYSCALL`/`SYSENTER` | ❌ 否（通过 MSR 寄存器） | trap_init() → cpu_init() → syscall_init() | 快 | 64位主流 |
 
 **关键区别**：
 - **INT 0x80**：是 IDT 表的一个条目（向量 0x80），通过软件中断机制实现
