@@ -1472,6 +1472,7 @@ static const struct idt_data ia32_idt[] __initconst = {
 ### 内存管理
 
 - **[LINUX_MEMORY_MANAGEMENT_EVOLUTION.md](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - Linux 内核分页机制完整指南 - 理论基础、Phase 1 早期页表、Phase 2 完整页表（E820/memblock/zone）
+- **[E820_MEMORY_MAP.md](E820_MEMORY_MAP.md)** - E820 内存映射表详解 - E820 数据结构、内核接收流程、与分页机制的分阶段依赖关系（为何早期不需要 E820、后期必须依赖 E820）、驱动页表初始化的详细代码分析
 - **[X86_MEMORY_MANAGEMENT_THEORY.md](X86_MEMORY_MANAGEMENT_THEORY.md)** - GDT 详解：从保护模式到长模式 - GDT 演化（4阶段）、段描述符详解、与分页的协作、GDT Identity Mapping 机制
 - **[LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)** - x86-64 多级页表设计详解 - 页表建立过程、硬件要求、多级设计原理、MMU 遍历伪代码、实战计算示例
 - **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解 - 伙伴系统原理与实现、Slab/SLUB 分配器、从 memblock 到 buddy 的转换
