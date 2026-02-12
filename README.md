@@ -120,6 +120,13 @@ DISPLAY=:1 make run-gui
 
 ### 核心概念文档
 
+#### 底层编程基础
+- **[ASM_ORG_INSTRUCTION.md](ASM_ORG_INSTRUCTION.md)** - ORG 汇编指令详解
+- **[ASSEMBLER_VS_COMPILER.md](ASSEMBLER_VS_COMPILER.md)** - 汇编器 vs 编译器的区别
+- **[RELATIVE_JUMP_EXECUTION.md](RELATIVE_JUMP_EXECUTION.md)** - 相对跳转执行详解
+- **[X86_POSITION_INDEPENDENT_CODE.md](X86_POSITION_INDEPENDENT_CODE.md)** - x86 位置无关代码（PIC）详解
+
+#### 系统机制
 - **[GUIDE.md](GUIDE.md)** - 计算机中断机制完全指南：从汇编到硬件实现
 - **[WHY_VIRTUAL_MEMORY.md](WHY_VIRTUAL_MEMORY.md)** - 为什么需要虚拟内存：从物理地址到分页的必然性
   - 物理地址 vs 虚拟地址的权衡分析
@@ -137,7 +144,9 @@ DISPLAY=:1 make run-gui
 
 - **[BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md)** - BIOS 内存布局与地址映射详解
 - **[BIOS_MEMORY_QA.md](BIOS_MEMORY_QA.md)** - BIOS 内存相关问答
+- **[BIOS_MEMORY_MAPPING.md](BIOS_MEMORY_MAPPING.md)** - BIOS 文件映射到物理内存的证据分析
 - **[BIOS_CODE_LAYOUT_ANALYSIS.md](BIOS_CODE_LAYOUT_ANALYSIS.md)** - BIOS 代码布局分析
+- **[BIOS_FIRST_BLOCK_ANALYSIS.md](BIOS_FIRST_BLOCK_ANALYSIS.md)** - BIOS 第一个块（First Block）分析
 - **[BIOS_INTERRUPT_COMPLETE.md](BIOS_INTERRUPT_COMPLETE.md)** - BIOS 中断完整文档
 - **[BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)** - BIOS IVT 与 Linux 内核 IDT 对比
 - **[BIOS_SIZE.md](BIOS_SIZE.md)** - BIOS 大小与映射关系详解
@@ -145,10 +154,13 @@ DISPLAY=:1 make run-gui
 
 ### SeaBIOS 相关文档
 
+- **[SEABIOS_FIXED_ADDRESS_LAYOUT.md](SEABIOS_FIXED_ADDRESS_LAYOUT.md)** - SeaBIOS 固定地址布局：IBM PC BIOS 兼容性规范
 - **[FILL_SEABIOS_ANALYSIS.md](FILL_SEABIOS_ANALYSIS.md)** - SeaBIOS 与 Linux 内核地址转换机制对比分析
 - **[SEABIOS_PROTECTION_MODE_CODE.md](SEABIOS_PROTECTION_MODE_CODE.md)** - SeaBIOS 保护模式代码的真正用途
 - **[SEABIOS_ENTRY_13_ANALYSIS.md](SEABIOS_ENTRY_13_ANALYSIS.md)** - SeaBIOS INT 13h 入口分析
 - **[SEABIOS_HANDLE_POST_ENTRY.md](SEABIOS_HANDLE_POST_ENTRY.md)** - SeaBIOS handle_post 入口分析
+- **[SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md)** - SeaBIOS E820 内存映射表构建流程
+- **[SEABIOS_LOAD_BOOT_SECTOR.md](SEABIOS_LOAD_BOOT_SECTOR.md)** - SeaBIOS 如何加载引导扇区到 0x7C00
 
 ### 启动流程文档
 
@@ -157,19 +169,23 @@ DISPLAY=:1 make run-gui
 - **[BOOT_FLOW_QA.md](BOOT_FLOW_QA.md)** - 启动流程问答
 - **[BOOT_FLOW_TIMELINE.md](BOOT_FLOW_TIMELINE.md)** - 启动流程完整时间线（从 QEMU 启动到 Linux 内核接管的详细时间序列）
 - **[BOOT_FLOW_SOURCE_INDEX.md](BOOT_FLOW_SOURCE_INDEX.md)** - 启动流程关键源代码文件索引
+- **[ORG_0x7C00_EXPLANATION.md](ORG_0x7C00_EXPLANATION.md)** - 为什么引导扇区加载到 0x7C00
 - **[BOOTSECTOR_EXAMPLE.md](BOOTSECTOR_EXAMPLE.md)** - 最小引导扇区程序示例
 - **[BOOTSECTOR_COMPARISON.md](BOOTSECTOR_COMPARISON.md)** - 引导扇区对比分析
-- **[SEABIOS_LOAD_BOOT_SECTOR.md](SEABIOS_LOAD_BOOT_SECTOR.md)** - SeaBIOS 如何加载引导扇区到 0x7C00
 - **[DISK_TO_MEMORY_TRANSFER.md](DISK_TO_MEMORY_TRANSFER.md)** - 磁盘数据拷贝到内存的详细过程（PIO/DMA）
 - **[BOOT_SECTOR_ANALYSIS.md](BOOT_SECTOR_ANALYSIS.md)** - 引导扇区代码手工分析指南
 - **[CALL_BOOT_ENTRY_EXPLANATION.md](CALL_BOOT_ENTRY_EXPLANATION.md)** - call_boot_entry 函数详细解释
 
 ### GRUB 引导加载程序文档
 
+- **[GRUB_ARCHITECTURE_AND_INIT.md](GRUB_ARCHITECTURE_AND_INIT.md)** - GRUB 架构与初始化流程
 - **[GRUB_CORE_IMG_STRUCTURE.md](GRUB_CORE_IMG_STRUCTURE.md)** - GRUB core.img 结构与构建详解（grub-mkimage、块列表机制、内存布局）
 - **[GRUB_ISO_ANALYSIS.md](GRUB_ISO_ANALYSIS.md)** - GRUB ISO 镜像引导分析（boot.S、core.img 位置、内存布局等）
 - **[GRUB_ISO_BOOT_FILES.md](GRUB_ISO_BOOT_FILES.md)** - GRUB ISO 镜像中哪些文件在 boot 阶段被加载
 - **[GRUB_KERNEL_ADDR_ANALYSIS.md](GRUB_KERNEL_ADDR_ANALYSIS.md)** - GRUB_BOOT_MACHINE_KERNEL_ADDR = 0x8000 的计算和设计原因分析
+- **[GRUB_RELOCATOR.md](GRUB_RELOCATOR.md)** - GRUB Relocator 模块详解
+- **[GRUB_RELOCATOR_BUILD_AND_RUNTIME.md](GRUB_RELOCATOR_BUILD_AND_RUNTIME.md)** - GRUB Relocator 构建与运行时机制
+- **[GRUB_MODULE_LOADING_ANALYSIS.md](GRUB_MODULE_LOADING_ANALYSIS.md)** - GRUB 模块加载机制分析
 - **[GRUB_BIOS_INTERRUPT_USAGE.md](GRUB_BIOS_INTERRUPT_USAGE.md)** - GRUB 在保护模式下调用 BIOS 服务的使用场景
 - **[GRUB_MODE_SWITCHING.md](GRUB_MODE_SWITCHING.md)** - GRUB 模式切换函数详解（real_to_prot、prot_to_real 实现细节）
 - **[GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md)** - GRUB 加载 Linux 内核详细流程（grub_cmd_linux、grub_linux_boot、grub_relocator32_boot 源代码分析）
@@ -179,7 +195,13 @@ DISPLAY=:1 make run-gui
 
 ### Linux 内核相关文档
 
+#### 内核启动与初始化
 - **[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)** - Linux 内核启动与初始化（64 位，不走 Setup）（GRUB/压缩内核、模式切换、startup_32/startup_64、x86_64_start_kernel、start_kernel、中断接管、系统调用、PID 0/1/2、核心进程）
+- **[LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md)** - Linux 内核 Setup 流程详解
+- **[COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md)** - Linux 压缩内核重定位机制
+- **[WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md)** - 为什么需要重定位压缩内核
+
+#### 内核镜像与 Initramfs
 - **[VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md)** - vmlinuz（bzImage）文件详细结构分析（boot_params、setup code、压缩内核等）
 - **[VMLINUZ_INITRD_RELATIONSHIP.md](VMLINUZ_INITRD_RELATIONSHIP.md)** - vmlinuz 和 initrd 的关系详解（定义、作用机制、使用场景、必要性分析）
 - **[INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md)** - Initramfs 内容分析与 BusyBox 启动设置（initramfs 分析工具、BusyBox 工作原理、/init 和 /sbin/init 的关系）
@@ -189,9 +211,20 @@ DISPLAY=:1 make run-gui
 
 ### 中断相关文档
 
+#### 中断基础理论
 - **[X86_INTERRUPT_EXCEPTION_TRAP.md](X86_INTERRUPT_EXCEPTION_TRAP.md)** - x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现（Interrupt/Exception/Trap 定义、三者本质区别、Exception 分类（Fault/Trap/Abort）、优先级、IDT 门类型、Linux 实现）
+- **[X86_EXCEPTION_HARDWARE_TRIGGER.md](X86_EXCEPTION_HARDWARE_TRIGGER.md)** - x86 异常的硬件触发机制：Page Fault 与 Breakpoint 深入剖析
+
+#### Linux 中断实现
 - **[LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)** - Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue）
+- **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - Linux 内核 IDT 表的演进流程详解
+- **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - Linux 系统调用初始化详解（INT 0x80 vs SYSCALL/SYSENTER）
+
+#### 中断控制器
 - **[X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)** - x86 中断控制器演进：从 8259 PIC 到 APIC（架构对比、性能分析、MSI/MSI-X、x2APIC）
+- **[PIC_APIC_COEXISTENCE.md](PIC_APIC_COEXISTENCE.md)** - PIC 与 APIC 共存机制
+
+#### 其他中断机制
 - **[UEFI_INTERRUPT_HANDLING.md](UEFI_INTERRUPT_HANDLING.md)** - UEFI 中断处理机制
 - **[APPENDIX_A_KEYBOARD_INTERRUPT.md](APPENDIX_A_KEYBOARD_INTERRUPT.md)** - 附录 A：键盘中断详解
 - **[APPENDIX_B_EVENT_MECHANISM.md](APPENDIX_B_EVENT_MECHANISM.md)** - 附录 B：事件机制详解
@@ -204,18 +237,18 @@ DISPLAY=:1 make run-gui
 ### 内存管理文档
 
 #### 核心指南
-- **[Linux 内存管理演化篇](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)(LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - Linux 内核分页机制完整指南
+- **[LINUX_MEMORY_MANAGEMENT_EVOLUTION.md](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - Linux 内核分页机制完整指南（演化篇）
   - 第一部分：理论基础（Flat Model、GDT、MMU、页表抽象）
   - 第二部分：Phase 1 - 早期页表（compressed kernel 身份映射）
   - 第三部分：Phase 2 - 完整页表（E820、memblock、init_mem_mapping、zone）
 
 #### 深入专题
-- **[Linux 内存管理理论篇](X86_MEMORY_MANAGEMENT_THEORY.md)(X86_MEMORY_MANAGEMENT_THEORY.md)** - GDT 详解：从保护模式到长模式
+- **[X86_MEMORY_MANAGEMENT_THEORY.md](X86_MEMORY_MANAGEMENT_THEORY.md)** - GDT 详解：从保护模式到长模式（理论篇）
   - GDT 演化（GRUB → Compressed Kernel → Main Kernel → per-CPU）
   - 段描述符结构详解（二进制拆解、字段含义）
   - 长模式下的作用与分页协作
   - GDT Identity Mapping：启动时平滑过渡机制（实模式→保护模式）
-- **[Linux 内存管理实现篇](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)(LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)** - x86-64 多级页表设计详解
+- **[LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)** - x86-64 多级页表设计详解（实现篇）
   - 页表建立过程与时间线（代码级实现）
   - 阶段 2-3 分页目的与 x86-64 硬件要求
   - 多级页表设计原理与内存开销对比（512GB vs 68KB）
@@ -245,6 +278,7 @@ DISPLAY=:1 make run-gui
 ### UEFI 相关文档
 
 - **[UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md)** - UEFI vs BIOS 启动对比
+- **[UEFI_BOOT_FLOW_SUMMARY.md](UEFI_BOOT_FLOW_SUMMARY.md)** - UEFI 启动流程总结
 - **[GRUB_UEFI_LONG_MODE_ANALYSIS.md](GRUB_UEFI_LONG_MODE_ANALYSIS.md)** - GRUB UEFI 长模式启动与 Linux Kernel 配合支持分析
 
 ### 工具与配置文档
@@ -263,6 +297,31 @@ DISPLAY=:1 make run-gui
 
 - **[DOS_BOOTLOADER.md](DOS_BOOTLOADER.md)** - DOS 的引导加载程序（Bootloader）概念
 - **[DOS_BIOS_INT_USAGE.md](DOS_BIOS_INT_USAGE.md)** - DOS 如何使用 BIOS 的 INT 服务
+
+### 问题调查与解决方案
+
+- **[INVESTIGATION_SUMMARY.md](INVESTIGATION_SUMMARY.md)** - 问题调查总结
+- **[SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md)** - 指令缓存问题的解决方案
+- **[README_ICACHE_TEST.md](README_ICACHE_TEST.md)** - 指令缓存测试说明
+
+### 文档审查与交叉引用
+
+- **[REVIEW_BIOS_IVT_VS_KERNEL_IDT.md](REVIEW_BIOS_IVT_VS_KERNEL_IDT.md)** - BIOS_IVT_VS_KERNEL_IDT.md 文档审查
+- **[REVIEW_LINUX_INTERRUPT_GUIDE.md](REVIEW_LINUX_INTERRUPT_GUIDE.md)** - LINUX_INTERRUPT_GUIDE.md 文档审查
+- **[REVIEW_LINUX_KERNEL_INIT.md](REVIEW_LINUX_KERNEL_INIT.md)** - LINUX_KERNEL_INIT.md 文档审查
+- **[REVIEW_LINUX_KERNEL_SYSCALL_INIT.md](REVIEW_LINUX_KERNEL_SYSCALL_INIT.md)** - LINUX_KERNEL_SYSCALL_INIT.md 文档审查
+- **[LINUX_KERNEL_IDT_EVOLUTION_REVIEW.md](LINUX_KERNEL_IDT_EVOLUTION_REVIEW.md)** - LINUX_KERNEL_IDT_EVOLUTION.md 文档审查
+- **[CROSS_REFERENCE_SUMMARY.md](CROSS_REFERENCE_SUMMARY.md)** - 文档交叉引用总结
+
+### 已归档文档
+
+以下文档已被更完整、更准确的版本替代，保留仅供历史参考：
+
+- **[_ARCHIVED_LINUX_KERNEL_GDT_EVOLUTION.md](_ARCHIVED_LINUX_KERNEL_GDT_EVOLUTION.md)** - 已归档：Linux 内核 GDT 演进（已被 X86_MEMORY_MANAGEMENT_THEORY.md 替代）
+- **[_ARCHIVED_LINUX_PAGING_GUIDE.md](_ARCHIVED_LINUX_PAGING_GUIDE.md)** - 已归档：Linux 分页指南（已被 LINUX_MEMORY_MANAGEMENT_EVOLUTION.md 替代）
+- **[_ARCHIVED_PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md](_ARCHIVED_PAGING_PHASE1_THEORY_AND_EARLY_TABLES.md)** - 已归档：分页阶段 1 理论与早期页表（已被 LINUX_MEMORY_MANAGEMENT_EVOLUTION.md 替代）
+- **[_ARCHIVED_PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md](_ARCHIVED_PAGING_PHASE2_FULL_SETUP_IN_SETUP_ARCH.md)** - 已归档：分页阶段 2 完整设置（已被 LINUX_MEMORY_MANAGEMENT_EVOLUTION.md 替代）
+- **[_ARCHIVED_X86_PAGE_TABLE_DESIGN.md](_ARCHIVED_X86_PAGE_TABLE_DESIGN.md)** - 已归档：x86 页表设计（已被 LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md 替代）
 
 ### 分析与验证工具
 
