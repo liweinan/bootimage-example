@@ -1200,7 +1200,7 @@ start_kernel() 阶段 2（main.c）
 - **APIC/IRQ 门**：`linux/arch/x86/kernel/idt.c` 中 idt_setup_apic_and_irq_gates()。  
 - **INT 0x80**：entry_INT80_32 → do_int80_syscall_32 → ia32_sys_call（系统调用号在 %eax）。
 
-> 运行时中断模型见 [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)；BIOS IVT 与 Kernel IDT 见 [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)。
+> 运行时中断模型见 [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)；BIOS IVT 与 Kernel IDT 见 [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)；8259 PIC 与 APIC 架构对比见 [X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)。
 
 ### 4. rest_init() 与 kernel_init()
 

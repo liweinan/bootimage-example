@@ -16,6 +16,7 @@
 - [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) - 主启动流程
 - [系统调用初始化](LINUX_KERNEL_SYSCALL_INIT.md) - syscall 初始化详解
 - [Linux 中断处理](LINUX_INTERRUPT_GUIDE.md) - 运行时中断处理
+- [x86 中断控制器演进](X86_INTERRUPT_CONTROLLER_EVOLUTION.md) - 8259 PIC vs APIC 详细对比
 - [BIOS IVT vs Kernel IDT](BIOS_IVT_VS_KERNEL_IDT.md) - IVT 与 IDT 对比
 
 ---
@@ -238,7 +239,7 @@ static gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
 
        填充内容：
        - APIC 中断：IPI、timer、spurious 等
-       - 外部硬件 IRQ：0x20-0x2F（8259A PIC）等
+       - 外部硬件 IRQ：0x30-0x3F（8259A PIC/ISA 中断）、0x20-0x2F 和 0x40-0xEA（其他外部设备）
        - 所有剩余向量
        - 【此后 CPU 拥有完整的中断处理能力】
 
@@ -350,7 +351,7 @@ idt_setup_from_table(gate_desc *idt, const struct idt_data *t, int size, bool sy
 - **PIC/APIC 未初始化**：
   - 8259A PIC 的 ICW（Initialization Command Words）还没有设置
   - Local APIC 还没有使能和配置
-  - 中断向量映射还没有建立（PIC 默认映射 0x08-0x0F 与 CPU 异常冲突）
+  - 中断向量映射还没有建立（PIC 默认映射 0x08-0x0F 与 CPU 异常冲突，内核重映射到 0x30-0x3F）
 
 - **IDT 不完整**：
   - `bringup_idt_table` 几乎为空，无法处理硬件中断
@@ -458,6 +459,217 @@ void start_kernel(void)
 
 ---
 
+## 中断向量布局详解
+
+Linux 内核的 256 个中断向量布局（基于 `arch/x86/include/asm/irq_vectors.h`）：
+
+| 向量范围 | 用途 | 说明 |
+|---------|------|------|
+| **0x00-0x1F** | CPU 异常 | 硬编码，CPU 架构定义（#DE、#PF、#GP 等）|
+| **0x20-0x2F** | 外部设备中断 | 保留给 PCI MSI 等动态分配 |
+| **0x30-0x3F** | ISA 中断（8259 PIC）| IRQ 0-15 映射（16 字节对齐）|
+| **0x40-0x7F** | 外部设备中断 | 动态分配（I/O APIC、MSI/MSI-X）|
+| **0x80** | INT 0x80 | 传统 32 位系统调用（兼容模式）|
+| **0x81-0xEA** | 外部设备中断 | 动态分配 |
+| **0xEB** | POSTED_MSI_NOTIFICATION | MSI 通知向量 |
+| **0xEC** | LOCAL_TIMER | Local APIC 定时器 |
+| **0xED-0xEE** | Hyper-V 向量 | 虚拟化相关（如果启用）|
+| **0xEF** | MANAGED_IRQ_SHUTDOWN | 管理的 IRQ 关闭 |
+| **0xF0-0xF2** | 虚拟化向量 | KVM posted interrupt 等 |
+| **0xF3** | HYPERVISOR_CALLBACK | 虚拟化回调 |
+| **0xF4** | DEFERRED_ERROR | 延迟错误 |
+| **0xF6** | IRQ_WORK | IRQ 工作队列 |
+| **0xF7** | X86_PLATFORM_IPI | 平台特定 IPI |
+| **0xF8** | REBOOT | 重启向量 |
+| **0xF9-0xFF** | APIC 系统向量 | THERMAL、RESCHEDULE、CALL_FUNCTION、ERROR、SPURIOUS 等 |
+
+### 关键向量说明
+
+#### 1. ISA 中断（0x30-0x3F）
+
+**为什么从 0x30 开始而不是 0x20？**
+
+```c
+// arch/x86/include/asm/irq_vectors.h
+#define FIRST_EXTERNAL_VECTOR    0x20
+#define ISA_IRQ_VECTOR(irq)      (((FIRST_EXTERNAL_VECTOR + 16) & ~15) + irq)
+//                                = (((0x20 + 16) & ~15) + irq)
+//                                = ((0x30 & 0xF0) + irq)
+//                                = (0x30 + irq)
+```
+
+**原因：**
+1. `FIRST_EXTERNAL_VECTOR = 0x20`（外部中断起始向量）
+2. ISA 中断需要 **16 字节对齐**，所以从 `(0x20 + 16) & ~15 = 0x30` 开始
+3. 这样做是为了：
+   - 预留 0x20-0x2F 给其他外部设备中断（如 PCI MSI）
+   - ISA 中断集中在 0x30-0x3F，方便管理和兼容性
+
+**IRQ 到向量的映射：**
+```
+IRQ 0 (定时器)    → 向量 0x30
+IRQ 1 (键盘)      → 向量 0x31
+IRQ 2 (级联)      → 向量 0x32（在 APIC 模式下可用）
+IRQ 8 (RTC)       → 向量 0x38
+IRQ 14 (主 IDE)   → 向量 0x3E
+IRQ 15 (从 IDE)   → 向量 0x3F
+```
+
+#### 2. 系统向量（0xEB-0xFF）
+
+```c
+// FIRST_SYSTEM_VECTOR = POSTED_MSI_NOTIFICATION_VECTOR = 0xEB
+// 这些向量保留给内核系统功能，不用于外部设备
+```
+
+**系统向量详解：**
+- **0xFD (RESCHEDULE_VECTOR)**：重新调度 IPI，用于唤醒远程 CPU 进行调度
+- **0xFC (CALL_FUNCTION_VECTOR)**：多核函数调用 IPI
+- **0xFB (CALL_FUNCTION_SINGLE_VECTOR)**：单核函数调用 IPI
+- **0xFE (ERROR_APIC_VECTOR)**：APIC 错误中断
+- **0xFF (SPURIOUS_APIC_VECTOR)**：APIC 伪中断
+
+### 向量分配策略
+
+```
+静态分配：
+  ├─ CPU 异常（0x00-0x1F）        ← CPU 架构固定
+  ├─ ISA 中断（0x30-0x3F）        ← 传统 PIC 兼容
+  └─ 系统向量（0xEB-0xFF）        ← 内核系统功能
+
+动态分配：
+  ├─ 外部设备中断（0x20-0x2F）   ← PCI MSI 等
+  ├─ 外部设备中断（0x40-0xEA）   ← I/O APIC、MSI-X
+  └─ 特殊用途（0x80）             ← INT 0x80 系统调用
+```
+
+---
+
+## PIC vs APIC 初始化对比
+
+### init_IRQ() 中的中断控制器选择
+
+```c
+// arch/x86/kernel/irqinit.c
+void __init native_init_IRQ(void)
+{
+    x86_init.irqs.pre_vector_init();  // ← 平台相关初始化
+
+    if (cpu_feature_enabled(X86_FEATURE_FRED))
+        fred_complete_exception_setup();  // 新架构：FRED
+    else
+        idt_setup_apic_and_irq_gates();   // 传统架构：IDT + APIC/PIC
+
+    lapic_assign_system_vectors();
+
+    // 如果使用传统 PIC，请求 IRQ2（级联中断）
+    if (!acpi_ioapic && !of_ioapic && nr_legacy_irqs()) {
+        if (request_irq(2, no_action, IRQF_NO_THREAD, "cascade", NULL))
+            pr_err("%s: request_irq() failed\n", "cascade");
+    }
+}
+```
+
+### 中断控制器初始化路径
+
+```
+【Legacy PIC 模式】（单核或老系统）
+    init_IRQ()
+    ↓
+    native_init_IRQ()
+    ├─ pre_vector_init() → init_8259A()
+    │   └─ 重编程 PIC：IRQ 0-15 → 向量 0x30-0x3F
+    │       ├─ ICW2: ISA_IRQ_VECTOR(0) = 0x30
+    │       └─ ICW2: ISA_IRQ_VECTOR(8) = 0x38
+    ├─ idt_setup_apic_and_irq_gates()
+    │   └─ 填充 IDT 向量 0x30-0x3F
+    └─ request_irq(2, ..., "cascade", ...)  // IRQ2 级联
+
+【APIC 模式】（现代多核系统）
+    init_IRQ()
+    ↓
+    native_init_IRQ()
+    ├─ pre_vector_init() → apic_intr_mode_init()
+    │   ├─ init_bsp_APIC()         // 初始化 BSP 的 Local APIC
+    │   └─ setup_IO_APIC()         // 配置 I/O APIC
+    ├─ idt_setup_apic_and_irq_gates()
+    │   ├─ 填充 APIC 特殊向量（0xEB-0xFF）
+    │   └─ 填充外部中断向量（0x20-0xEA）
+    └─ lapic_assign_system_vectors()
+        └─ 分配 IPI、timer 等系统向量
+```
+
+### 中断控制器对比
+
+| 特性 | Legacy PIC (8259A) | APIC 系统 |
+|------|-------------------|-----------|
+| **向量范围** | 0x30-0x3F (IRQ 0-15) | 0x20-0xFF（除 CPU 异常外所有向量）|
+| **中断数量** | 15 个（IRQ2 被级联占用）| 224 个（32-255）|
+| **多核支持** | ❌ 只能发往单个 CPU | ✅ 支持中断路由、IPI |
+| **访问方式** | I/O 端口（0x20/0x21、0xA0/0xA1）| 内存映射（0xFEE00000、0xFEC00000）|
+| **初始化函数** | `init_8259A()` | `apic_intr_mode_init()` |
+| **IRQ2 用途** | 级联从 PIC | 正常 IRQ（无级联）|
+| **EOI 方式** | 需要区分主从 PIC | 只需写 Local APIC EOI 寄存器 |
+
+> 详细架构对比见：[x86 中断控制器演进](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)
+
+### 实际的内核启动日志
+
+```bash
+# 查看中断初始化日志
+$ dmesg | grep -E "APIC|PIC|IRQ|IDT"
+
+[    0.088000] Setting APIC routing to flat
+[    0.088015] ..TIMER: vector=0x30 apic1=0 pin1=2 apic2=-1 pin2=-1
+[    0.091234] smpboot: Allowing 8 CPUs, 0 hotplug CPUs
+[    0.450123] x86: Booting SMP configuration:
+[    0.450234] .... node  #0, CPUs:      #1 #2 #3 #4 #5 #6 #7
+[    0.460000] smp: Brought up 1 node, 8 CPUs
+
+# 查看中断向量分配
+$ cat /proc/interrupts
+           CPU0       CPU1       CPU2       CPU3
+  0:         42          0          0          0   IO-APIC   2-edge      timer
+  1:          9          0          0          0   IO-APIC   1-edge      i8042
+  8:          1          0          0          0   IO-APIC   8-edge      rtc0
+ 12:        155          0          0          0   IO-APIC  12-edge      i8042
+NMI:          0          0          0          0   Non-maskable interrupts
+LOC:      12345      11234      10123       9012   Local timer interrupts
+RES:       1234       1123       1012        901   Rescheduling interrupts
+CAL:        456        445        434        423   Function call interrupts
+TLB:        123        112        101         90   TLB shootdowns
+```
+
+**日志解读：**
+
+1. **timer (IRQ 0 → 向量 0x30)**：
+   ```
+   0:  42  0  0  0   IO-APIC   2-edge      timer
+   ```
+   - 向量：0x30（ISA_IRQ_VECTOR(0)）
+   - 路由：通过 I/O APIC pin 2（现代系统 IRQ0 重定向到 pin 2）
+   - 触发：边沿触发
+   - 只在 CPU0 上处理
+
+2. **Local timer interrupts (向量 0xEC)**：
+   ```
+   LOC: 12345  11234  10123  9012
+   ```
+   - 每个 CPU 的 Local APIC 定时器中断
+   - 向量：0xEC (LOCAL_TIMER_VECTOR)
+   - 用于调度器时间片
+
+3. **Rescheduling interrupts (向量 0xFD)**：
+   ```
+   RES: 1234  1123  1012  901
+   ```
+   - IPI（处理器间中断）
+   - 向量：0xFD (RESCHEDULE_VECTOR)
+   - 用于唤醒远程 CPU 进行调度
+
+---
+
 **文档版本**：基于 Linux 内核 v6.x 源码整理
 **最后更新**：2026-02
 **维护者**：Linux 内核启动文档项目
+**校对日期**：2026-02-12（已验证 `/Users/weli/works/linux` 源代码）

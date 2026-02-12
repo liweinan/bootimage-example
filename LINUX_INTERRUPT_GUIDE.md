@@ -5,6 +5,7 @@
 > **相关文档**：
 > - 本文档描述内核**运行时**的中断处理模型（上下半部、softirq/tasklet/workqueue）
 > - 若需了解内核**从 BIOS 接管中断系统**的启动阶段流程（早期 IDT、PIC 重编程、APIC、INT 0x80 路径），见 [Linux 内核初始化详解](LINUX_KERNEL_INIT.md#中断系统接管详细流程)
+> - 若需了解**硬件层面的中断控制器**（8259 PIC vs APIC 的架构、性能、多核支持等），见 [x86 中断控制器演进](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)
 > - **术语说明**：本文讨论的是**硬件中断处理**。关于硬件中断、软件中断（INT n 指令）、异常的区别，见 [LINUX_KERNEL_INIT.md - 硬件中断、软件中断、异常的本质区别](LINUX_KERNEL_INIT.md#q-硬件中断软件中断异常有什么本质区别)（注意：本文提到的"软中断 softirq"是内核的延迟处理机制，与 INT n 指令是不同的概念）
 
 ## 为什么需要 Top Half 和 Bottom Half？
