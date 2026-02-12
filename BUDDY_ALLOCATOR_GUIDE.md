@@ -1,5 +1,9 @@
 # Linux 内核伙伴系统与 Slab 分配器详解
 
+> **基于内核版本**：Linux v6.x (验证于 v6.12)
+> **源码路径**：`~/works/linux`
+> **最后更新**：2026-02-13
+
 ## 文档定位
 
 本文档详细介绍 Linux 内核的**物理页框分配体系**，以**伙伴系统（Buddy Allocator）**为核心，兼顾 Slab 分配器在整体架构中的位置。
@@ -74,7 +78,7 @@
 
 **伙伴系统**是一种经典的动态内存分配算法，用于管理**物理页框**。其核心思想是：
 
-1. **2 的幂次分配**：将可用内存按 2^n 页大小组织（n = 0 到 MAX_ORDER-1）
+1. **2 的幂次分配**：将可用内存按 2^n 页大小组织（n = 0 到 MAX_PAGE_ORDER，即 0-10）
 2. **伙伴关系**：两个大小相同、地址连续且对齐的块互为"伙伴"（buddy）
 3. **分裂与合并**：
    - **分配**：找不到合适大小的块时，将更大的块分裂成两个伙伴
@@ -104,11 +108,11 @@ Order 0 (4KB):
 #### 2.2.1 zone 结构
 
 ```c
-// Linux Kernel - include/linux/mmzone.h:100
+// Linux Kernel - include/linux/mmzone.h (v6.x: 约 860 行附近)
 
 struct zone {
     /* 伙伴系统核心 */
-    struct free_area free_area[MAX_ORDER];  // MAX_ORDER = 11
+    struct free_area free_area[NR_PAGE_ORDERS];  // NR_PAGE_ORDERS = 11 (order 0-10)
 
     /* zone 统计信息 */
     unsigned long managed_pages;   // 可管理的页面数
@@ -131,7 +135,7 @@ struct zone {
 #### 2.2.2 free_area 结构
 
 ```c
-// Linux Kernel - include/linux/mmzone.h:95
+// Linux Kernel - include/linux/mmzone.h (v6.x)
 
 struct free_area {
     /* 空闲链表（按迁移类型分组） */
@@ -141,8 +145,10 @@ struct free_area {
     unsigned long nr_free;
 };
 
-/* MAX_ORDER = 11，表示 2^0 到 2^10 页 */
-#define MAX_ORDER 11
+/* Linux 6.x 定义 */
+#define MAX_PAGE_ORDER 10                         // 最大 order 值
+#define NR_PAGE_ORDERS (MAX_PAGE_ORDER + 1)      // 11 个元素：order 0-10
+// 注：旧版本内核使用 MAX_ORDER = 11，现代内核改为 MAX_PAGE_ORDER = 10
 
 /* 迁移类型 */
 enum migratetype {
@@ -162,7 +168,7 @@ enum migratetype {
 #### 2.2.3 page 结构（部分字段）
 
 ```c
-// Linux Kernel - include/linux/mm_types.h:65
+// Linux Kernel - include/linux/mm_types.h (v6.x)
 
 struct page {
     unsigned long flags;          // 页面标志（PG_locked, PG_buddy 等）
@@ -235,7 +241,7 @@ static inline struct page *__rmqueue_smallest(struct zone *zone,
     struct page *page;
 
     /* 从 order 开始向上查找 */
-    for (current_order = order; current_order < MAX_ORDER; ++current_order) {
+    for (current_order = order; current_order < NR_PAGE_ORDERS; ++current_order) {
         area = &(zone->free_area[current_order]);
 
         /* 检查该 order 是否有空闲块 */
@@ -309,7 +315,7 @@ static inline void __free_one_page(struct page *page,
     unsigned long combined_pfn;
     unsigned long uninitialized_var(buddy_pfn);
     struct page *buddy;
-    unsigned int max_order = MAX_ORDER;
+    unsigned int max_order = MAX_PAGE_ORDER;
 
     /* 持续合并，直到达到最大 order 或伙伴不空闲 */
     while (order < max_order - 1) {
