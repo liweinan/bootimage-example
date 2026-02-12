@@ -1230,7 +1230,480 @@ start_kernel() 阶段 2（main.c）
 
 > 运行时中断模型见 [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)；BIOS IVT 与 Kernel IDT 见 [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)；8259 PIC 与 APIC 架构对比见 [X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)。
 
-### 4. rest_init() 与 kernel_init()
+### 4. VFS 与文件系统初始化
+
+文件系统的初始化贯穿内核启动的多个阶段，从 VFS 基础设施的初始化到 initramfs 的解压，再到真正根文件系统的挂载，是一个复杂的多步骤过程。
+
+#### 文件系统初始化时间线总览
+
+```
+start_kernel()
+    │
+    ├─ 阶段 1-2: 内存、调度器、中断初始化
+    │
+    ├─ 阶段 3: vfs_caches_init()         ⭐ VFS 基础设施初始化
+    │       └─ mnt_init()
+    │           ├─ init_rootfs()         ⭐ 注册 rootfs 文件系统类型
+    │           └─ init_mount_tree()     ⭐ 挂载第一个 rootfs (空的 tmpfs)
+    │
+    └─ rest_init()
+        └─ kernel_init() (PID 1)
+            └─ kernel_init_freeable()
+                ├─ do_basic_setup()
+                │   └─ do_initcalls()
+                │       └─ populate_rootfs()  ⭐ 解压 initramfs 到 rootfs
+                │
+                ├─ wait_for_initramfs()       ⭐ 等待解压完成
+                │
+                ├─ prepare_namespace()        ⭐ (可选) 挂载真正的根设备
+                │
+                └─ run_init_process("/init")  ⭐ 执行用户空间 init
+```
+
+#### 阶段 1: VFS 缓存初始化与 rootfs 挂载
+
+**时机**：`start_kernel()` 阶段 3 → `vfs_caches_init()`
+**文件**：`fs/dcache.c:3261`
+
+```c
+// init/main.c - start_kernel() 阶段 3
+void start_kernel(void)
+{
+    // ...
+    console_init();         // 控制台初始化
+    vfs_caches_init();      // ⭐ VFS 初始化和 rootfs 挂载
+    fork_init();            // 进程创建初始化
+    // ...
+    rest_init();
+}
+```
+
+**vfs_caches_init() 完整流程**：
+
+```c
+// fs/dcache.c:3261
+void __init vfs_caches_init(void)
+{
+    // 1. 创建路径名缓存（用于存储文件路径）
+    names_cachep = kmem_cache_create_usercopy("names_cache", PATH_MAX, 0,
+                                              SLAB_HWCACHE_ALIGN|SLAB_PANIC, 0, PATH_MAX, NULL);
+
+    // 2. 初始化 dentry 缓存（目录项缓存）
+    dcache_init();
+
+    // 3. 初始化 inode 缓存（索引节点缓存）
+    inode_init();
+
+    // 4. 初始化文件表
+    files_init();
+    files_maxfiles_init();
+
+    // 5. ⭐ 关键：挂载文件系统
+    mnt_init();
+
+    // 6. 初始化块设备和字符设备缓存
+    bdev_cache_init();
+    chrdev_init();
+}
+```
+
+**mnt_init() - 挂载子系统初始化**：
+
+```c
+// fs/namespace.c:6114
+void __init mnt_init(void)
+{
+    int err;
+
+    // 1. 创建挂载缓存（用于存储 mount 结构）
+    mnt_cache = kmem_cache_create("mnt_cache", sizeof(struct mount),
+                                  0, SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT, NULL);
+
+    // 2. 分配挂载哈希表（用于快速查找挂载点）
+    mount_hashtable = alloc_large_system_hash("Mount-cache",
+                                sizeof(struct hlist_head),
+                                mhash_entries, 19, HASH_ZERO,
+                                &m_hash_shift, &m_hash_mask, 0, 0);
+
+    // 3. 分配挂载点哈希表
+    mountpoint_hashtable = alloc_large_system_hash("Mountpoint-cache",
+                                sizeof(struct hlist_head),
+                                mphash_entries, 19, HASH_ZERO,
+                                &mp_hash_shift, &mp_hash_mask, 0, 0);
+
+    if (!mount_hashtable || !mountpoint_hashtable)
+        panic("Failed to allocate mount hash table\n");
+
+    // 4. 初始化内核文件系统（用于 sysfs）
+    kernfs_init();
+
+    // 5. 初始化 sysfs 文件系统
+    err = sysfs_init();
+    if (err)
+        printk(KERN_WARNING "%s: sysfs_init error: %d\n", __func__, err);
+
+    // 6. 创建 /sys 的 kobject
+    fs_kobj = kobject_create_and_add("fs", NULL);
+    if (!fs_kobj)
+        printk(KERN_WARNING "%s: kobj create error\n", __func__);
+
+    // 7. 初始化 tmpfs/shmem 文件系统
+    shmem_init();
+
+    // 8. ⭐ 注册 rootfs 文件系统类型
+    init_rootfs();
+
+    // 9. ⭐ 挂载第一个 rootfs 到根目录 /
+    init_mount_tree();
+}
+```
+
+**init_mount_tree() - 创建初始挂载树**：
+
+```c
+// fs/namespace.c:6082
+static void __init init_mount_tree(void)
+{
+    struct vfsmount *mnt;
+    struct mount *m;
+    struct mnt_namespace *ns;
+    struct path root;
+
+    // ⭐ 挂载 rootfs 文件系统（类型为 tmpfs/ramfs）
+    // rootfs_fs_type 由 init_rootfs() 注册
+    mnt = vfs_kern_mount(&rootfs_fs_type, 0, "rootfs", NULL);
+    if (IS_ERR(mnt))
+        panic("Can't create rootfs");
+
+    // 创建初始挂载命名空间
+    ns = alloc_mnt_ns(&init_user_ns, true);
+    if (IS_ERR(ns))
+        panic("Can't allocate initial namespace");
+
+    ns->seq = atomic64_inc_return(&mnt_ns_seq);
+    ns->ns.inum = PROC_MNT_INIT_INO;
+    m = real_mount(mnt);
+    ns->root = m;
+    ns->nr_mounts = 1;
+    mnt_add_to_ns(ns, m);
+
+    // ⭐ 设置 init_task (PID 0) 的挂载命名空间
+    init_task.nsproxy->mnt_ns = ns;
+    get_mnt_ns(ns);
+
+    // ⭐ 设置 init_task 的根目录和当前目录
+    root.mnt = mnt;
+    root.dentry = mnt->mnt_root;
+    mnt->mnt_flags |= MNT_LOCKED;
+
+    set_fs_pwd(current->fs, &root);   // 当前目录 = /
+    set_fs_root(current->fs, &root);  // 根目录 = /
+}
+```
+
+**此阶段完成后的状态**：
+- ✅ VFS 子系统完全初始化（dentry cache、inode cache 等）
+- ✅ 第一个 rootfs (tmpfs/ramfs) 已挂载到 `/`
+- ✅ init_task (PID 0) 的根目录和当前目录都指向这个 rootfs
+- ❌ 但此时 rootfs 是**空的**，没有任何文件或目录
+
+#### 阶段 2: initramfs 解压到 rootfs
+
+**时机**：`do_initcalls()` → `populate_rootfs()` (rootfs_initcall)
+**文件**：`init/initramfs.c:781`
+
+在 `kernel_init()` 执行 `kernel_init_freeable()` 时，会调用 `do_basic_setup()` → `do_initcalls()`，这会触发所有注册的 initcall 函数，其中就包括 `populate_rootfs()`。
+
+**populate_rootfs() - 调度解压任务**：
+
+```c
+// init/initramfs.c:781
+static int __init populate_rootfs(void)
+{
+    // ⭐ 异步调度解压任务到 initramfs_domain
+    initramfs_cookie = async_schedule_domain(do_populate_rootfs, NULL,
+                                             &initramfs_domain);
+
+    // 启用用户模式助手（usermodehelper）
+    usermodehelper_enable();
+
+    // 如果不是异步模式，立即等待解压完成
+    if (!initramfs_async)
+        wait_for_initramfs();
+
+    return 0;
+}
+rootfs_initcall(populate_rootfs);  // 通过 initcall 机制注册
+```
+
+**do_populate_rootfs() - 实际解压 initramfs**：
+
+```c
+// init/initramfs.c:717
+static void __init do_populate_rootfs(void *unused, async_cookie_t cookie)
+{
+    // 1. ⭐ 解压内核内置的 initramfs
+    //    __initramfs_start 和 __initramfs_size 是链接器定义的符号
+    //    指向编译时打包进内核的 cpio 归档
+    char *err = unpack_to_rootfs(__initramfs_start, __initramfs_size);
+    if (err)
+        panic_show_mem("%s", err); // 内置 initramfs 解压失败是致命错误
+
+    // 2. 如果 bootloader 提供了外部 initrd，也解压到 rootfs
+    if (!initrd_start || IS_ENABLED(CONFIG_INITRAMFS_FORCE))
+        goto done;
+
+    if (IS_ENABLED(CONFIG_BLK_DEV_RAM))
+        printk(KERN_INFO "Trying to unpack rootfs image as initramfs...\n");
+    else
+        printk(KERN_INFO "Unpacking initramfs...\n");
+
+    // ⭐ 解压外部 initrd（bootloader 传递的）
+    err = unpack_to_rootfs((char *)initrd_start, initrd_end - initrd_start);
+    if (err) {
+#ifdef CONFIG_BLK_DEV_RAM
+        // 如果不是 cpio 格式，尝试作为 ramdisk 镜像处理
+        populate_initrd_image(err);
+#else
+        printk(KERN_EMERG "Initramfs unpacking failed: %s\n", err);
+#endif
+    }
+
+done:
+    // 3. 通知安全子系统 initramfs 已填充
+    security_initramfs_populated();
+
+    // 4. ⭐ 释放 initrd 占用的内存（如果不需要保留）
+    if (!do_retain_initrd && initrd_start && !kexec_free_initrd()) {
+        free_initrd_mem(initrd_start, initrd_end);
+    } else if (do_retain_initrd && initrd_start) {
+        // 如果需要保留，在 sysfs 中创建 /sys/firmware/initrd
+        bin_attr_initrd.size = initrd_end - initrd_start;
+        bin_attr_initrd.private = (void *)initrd_start;
+        if (sysfs_create_bin_file(firmware_kobj, &bin_attr_initrd))
+            pr_err("Failed to create initrd sysfs file");
+    }
+
+    initrd_start = 0;
+    initrd_end = 0;
+
+    init_flush_fput();
+}
+```
+
+**unpack_to_rootfs() 的工作原理**：
+- 解析 cpio 归档格式
+- 对每个文件/目录：
+  - 创建对应的 inode
+  - 写入文件内容
+  - 设置权限、所有者等属性
+- 支持压缩格式（gzip、bzip2、lzma、xz 等）
+
+**此阶段完成后的状态**：
+- ✅ rootfs 中已有文件和目录（来自 initramfs）
+- ✅ 通常包含：
+  - `/init` - 用户空间初始化程序
+  - `/bin`, `/sbin` - 基本命令工具
+  - `/lib`, `/lib64` - 必要的共享库
+  - `/dev` - 设备节点
+  - 驱动模块（`.ko` 文件）
+
+#### 阶段 3: 等待 initramfs 完成
+
+**时机**：`kernel_init_freeable()` → `wait_for_initramfs()`
+**文件**：`init/main.c:1588`
+
+```c
+// init/main.c:1555
+static noinline void __init kernel_init_freeable(void)
+{
+    // 调度器完全设置好，可以进行阻塞分配
+    gfp_allowed_mask = __GFP_BITS_MASK;
+    set_mems_allowed(node_states[N_MEMORY]);
+
+    cad_pid = get_pid(task_pid(current));
+
+    // SMP 初始化
+    smp_prepare_cpus(setup_max_cpus);
+    workqueue_init();
+    init_mm_internals();
+
+    do_pre_smp_initcalls();
+    lockup_detector_init();
+
+    smp_init();
+    sched_init_smp();
+
+    workqueue_init_topology();
+    async_init();
+    padata_init();
+    page_alloc_init_late();
+
+    // 执行各种 initcall（包括 populate_rootfs）
+    do_basic_setup();
+
+    kunit_run_all_tests();
+
+    // ⭐ 等待 initramfs 解压完成
+    wait_for_initramfs();
+
+    // 在 rootfs 上重新打开控制台
+    console_on_rootfs();
+
+    // ⭐ 检查是否有 /init（来自 initramfs）
+    if (init_eaccess(ramdisk_execute_command) != 0) {
+        // 如果 /init 不存在，说明需要挂载真正的根文件系统
+        ramdisk_execute_command = NULL;
+        prepare_namespace();  // 挂载 root= 指定的设备
+    }
+
+    // ...
+}
+```
+
+**wait_for_initramfs() 实现**：
+
+```c
+// init/initramfs.c:765
+void wait_for_initramfs(void)
+{
+    if (!initramfs_cookie) {
+        // 如果在 rootfs_initcall 之前调用，发出警告
+        pr_warn_once("wait_for_initramfs() called before rootfs_initcalls\n");
+        return;
+    }
+
+    // ⭐ 同步等待异步任务完成
+    async_synchronize_cookie_domain(initramfs_cookie + 1, &initramfs_domain);
+}
+```
+
+#### 阶段 4: 挂载真正的根文件系统（可选）
+
+**时机**：`kernel_init_freeable()` → `prepare_namespace()`
+**条件**：如果 rootfs 中没有 `/init`
+
+这一步是**可选的**，取决于系统的配置：
+
+**场景 1：使用 initramfs 的 /init**（现代系统常见）
+```
+rootfs (tmpfs)
+    ├─ /init              ← 执行这个
+    ├─ /bin
+    ├─ /lib
+    └─ ...
+
+不需要 prepare_namespace()，直接执行 /init
+```
+
+**场景 2：挂载真正的根设备**（传统方式）
+```
+rootfs (tmpfs) → 被替换为真正的文件系统
+
+prepare_namespace() 执行：
+    1. 等待根设备准备好（root_wait()）
+    2. 挂载 root= 指定的设备（如 /dev/sda1）
+    3. pivot_root 或 mount --move 切换根
+    4. 执行 /sbin/init
+```
+
+**prepare_namespace() 主要工作**：
+1. `wait_for_device_probe()` - 等待设备探测完成
+2. `md_run_setup()` - 如果是 RAID，启动 RAID 阵列
+3. `mount_root()` - 挂载根设备
+4. `devtmpfs_mount()` - 挂载 /dev
+5. `init_mount()` - 将新根移动到 /
+6. `init_chroot()` - chroot 到新根
+
+#### 文件系统初始化流程图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ start_kernel() 阶段 3                                       │
+│                                                             │
+│  vfs_caches_init()                                          │
+│    ├─ dcache_init()         // dentry 缓存                 │
+│    ├─ inode_init()          // inode 缓存                  │
+│    └─ mnt_init()                                            │
+│        ├─ shmem_init()      // tmpfs 文件系统              │
+│        ├─ init_rootfs()     // 注册 rootfs 类型            │
+│        └─ init_mount_tree() // ⭐ 挂载空的 rootfs 到 /    │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│ rest_init() → kernel_init() → kernel_init_freeable()       │
+│                                                             │
+│  do_basic_setup()                                           │
+│    └─ do_initcalls()                                        │
+│        └─ populate_rootfs()                                 │
+│            └─ async_schedule_domain(do_populate_rootfs)     │
+│                └─ unpack_to_rootfs()  // ⭐ 解压 initramfs│
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│  wait_for_initramfs()       // ⭐ 等待解压完成            │
+│  console_on_rootfs()        // 在 rootfs 上打开控制台     │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+                    ┌──────┴──────┐
+                    │             │
+            有 /init?          无 /init?
+                    │             │
+                    ↓             ↓
+        ┌───────────────┐  ┌─────────────────┐
+        │ 直接执行      │  │ prepare_namespace()│
+        │ /init         │  │   挂载真正的根   │
+        └───────────────┘  └─────────────────┘
+```
+
+#### 关键数据结构
+
+**struct mount** - 挂载点信息：
+```c
+struct mount {
+    struct hlist_node mnt_hash;       // 挂载哈希链表节点
+    struct mount *mnt_parent;         // 父挂载点
+    struct dentry *mnt_mountpoint;    // 挂载点 dentry
+    struct vfsmount mnt;              // VFS 挂载信息
+    struct mnt_namespace *mnt_ns;     // 所属挂载命名空间
+    // ...
+};
+```
+
+**struct file_system_type** - 文件系统类型：
+```c
+struct file_system_type {
+    const char *name;                 // 文件系统名称（如 "rootfs", "ext4"）
+    int fs_flags;                     // 文件系统标志
+    struct dentry *(*mount)(...);     // 挂载方法
+    void (*kill_sb)(...);             // 卸载方法
+    struct module *owner;             // 所属模块
+    struct file_system_type *next;    // 链表指针
+    // ...
+};
+```
+
+#### 总结：文件系统加载的关键步骤
+
+| 阶段 | 时机 | 函数 | 作用 | 文件 |
+|------|------|------|------|------|
+| **1** | start_kernel() 阶段 3 | `vfs_caches_init()` | VFS 初始化 | fs/dcache.c:3261 |
+| **1.1** | vfs_caches_init() | `mnt_init()` | 挂载子系统初始化 | fs/namespace.c:6114 |
+| **1.2** | mnt_init() | `init_rootfs()` | 注册 rootfs 类型 | init/do_mounts.c |
+| **1.3** | mnt_init() | `init_mount_tree()` | 挂载空 rootfs 到 / | fs/namespace.c:6082 |
+| **2** | do_initcalls() | `populate_rootfs()` | 调度解压任务 | init/initramfs.c:781 |
+| **2.1** | populate_rootfs() | `do_populate_rootfs()` | 解压 initramfs 到 rootfs | init/initramfs.c:717 |
+| **3** | kernel_init_freeable() | `wait_for_initramfs()` | 等待解压完成 | init/initramfs.c:765 |
+| **4** | kernel_init_freeable() | `prepare_namespace()` | (可选) 挂载真正的根 | init/do_mounts.c |
+
+**关键点**：
+1. ⭐ **VFS 初始化**发生在 `start_kernel()` 阶段 3 的 `vfs_caches_init()` 中
+2. ⭐ **第一个 rootfs** 在 `mnt_init()` → `init_mount_tree()` 中挂载（空的 tmpfs）
+3. ⭐ **initramfs 解压**通过 initcall 机制异步执行，在 `kernel_init()` 中完成
+4. ⭐ **等待完成**在 `wait_for_initramfs()` 中同步
+5. ⭐ **真正的根文件系统**（如果需要）在 `prepare_namespace()` 中挂载
+
+### 5. rest_init() 与 kernel_init()
 
 **从 start_kernel 到 rest_init / kernel_init 的调用链**：
 
@@ -1287,7 +1760,7 @@ static int __ref kernel_init(void *unused)
 
 ## 五、核心进程详解
 
-调用链见第四节「rest_init() 与 kernel_init()」开头的树形图。
+调用链见第五节「rest_init() 与 kernel_init()」开头的树形图。
 
 **进程关系图（按 PID）**：
 
