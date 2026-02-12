@@ -189,6 +189,7 @@ DISPLAY=:1 make run-gui
 
 ### 中断相关文档
 
+- **[X86_INTERRUPT_EXCEPTION_TRAP.md](X86_INTERRUPT_EXCEPTION_TRAP.md)** - x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现（Interrupt/Exception/Trap 定义、三者本质区别、Exception 分类（Fault/Trap/Abort）、优先级、IDT 门类型、Linux 实现）
 - **[LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)** - Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue）
 - **[X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)** - x86 中断控制器演进：从 8259 PIC 到 APIC（架构对比、性能分析、MSI/MSI-X、x2APIC）
 - **[UEFI_INTERRUPT_HANDLING.md](UEFI_INTERRUPT_HANDLING.md)** - UEFI 中断处理机制

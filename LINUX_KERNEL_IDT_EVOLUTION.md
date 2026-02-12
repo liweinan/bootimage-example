@@ -13,6 +13,7 @@
 6. 早期 INT vs 完整 INT 对比
 
 **相关文档**：
+- [x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现](X86_INTERRUPT_EXCEPTION_TRAP.md) - 基础概念（Interrupt/Exception/Trap 区别、Exception 分类、优先级、IDT 门类型）
 - [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) - 主启动流程
 - [系统调用初始化](LINUX_KERNEL_SYSCALL_INIT.md) - syscall 初始化详解
 - [Linux 中断处理](LINUX_INTERRUPT_GUIDE.md) - 运行时中断处理

@@ -10,6 +10,29 @@
 
 ---
 
+## 前置知识：地址空间概念
+
+本文档中大量涉及**低地址**和**高地址**概念，理解这些术语对阅读源代码至关重要。
+
+### 快速参考
+
+**低地址（Low Addresses）**：`0x0000000000000000 - 0x00007FFFFFFFFFFF`
+- 用户空间
+- 启动早期的 Identity Mapping（VA = PA）
+- 地址以 `0x0000` 或 `0x00` 开头
+
+**高地址（High Addresses）**：`0xFFFF800000000000 - 0xFFFFFFFFFFFFFFFF`
+- 内核空间
+- 内核代码链接地址（如 `0xFFFFFFFF81000000`）
+- 物理内存直接映射（`0xFFFF888000000000 + PA`）
+- 地址以 `0xFFFF` 开头
+
+**关键时刻**：内核启动过程中会从**低地址**（Identity Mapping）切换到**高地址**（Direct Mapping）。
+
+> **详细说明**：请参考 [演化篇：关键概念：x86-64 地址空间布局](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md#关键概念x86-64-地址空间布局)
+
+---
+
 ## 第一部分：GDT 代码详解
 
 ### 1.1 gdt_page 结构定义
@@ -24,7 +47,7 @@ struct gdt_page {
 DECLARE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page);
 ```
 
-**段描述符结构**：`arch/x86/include/asm/desc_defs.h:15-22`
+**段描述符结构**：`arch/x86/include/asm/desc_defs.h:66-71`
 
 ```c
 struct desc_struct {
@@ -201,8 +224,10 @@ void __head startup_64_setup_gdt_idt(void)
      *        GDTR.Base  = startup_gdt_descr.address (0x02345000)
      *
      * 【为什么需要重新加载GDT】：
-     * - 压缩内核阶段使用的是 boot_gdt（arch/x86/boot/compressed/head_64.S）
-     * - boot_gdt 只有最基本的几个段，仅够压缩代码运行
+     * - 压缩内核阶段使用的是 gdt/gdt64（arch/x86/boot/compressed/head_64.S:491-505）
+     *   * gdt64: 用于64位模式加载（使用相对偏移，便于重定位）
+     *   * gdt: 既可用于32位加载，也包含实际的GDT段描述符（仅5个段）
+     * - 压缩内核的 gdt 只有最基本的几个段（__KERNEL32_CS、__KERNEL_CS、__KERNEL_DS等），仅够压缩代码运行
      * - 主内核需要完整的 GDT，包括：
      *   * 用户态代码段/数据段（SYSCALL/SYSRET需要）
      *   * 32位兼容段（运行32位程序需要）
@@ -397,248 +422,142 @@ gdt_page:                             # 全局符号
    - 加载描述符到段寄存器的影子缓存
 ```
 
-#### 1.3.5 关键对比：early_gdt_descr vs startup_64_setup_gdt_idt
+#### 1.3.5 关键对比：64位 vs 32位 GDT 设置的差异
 
-在主内核代码中，有**两种**方式来引用 `gdt_page`：
+**重要说明**：64位和32位Linux内核在早期GDT设置上有根本性差异。
 
-1. **startup_64_setup_gdt_idt()** - 使用 RIP 相对寻址（本节讨论的）
-2. **early_gdt_descr** - 使用静态定义的 GDT 描述符
+##### 64位内核（x86-64）
 
-它们都指向同一个 `gdt_page`，但**地址计算方式完全不同**。
+**方法**：`startup_64_setup_gdt_idt()` 函数 - 动态构建GDT描述符
 
-##### early_gdt_descr 的定义
+**位置**：`arch/x86/boot/startup/gdt_idt.c:49-71`
 
-**位置**：`arch/x86/kernel/head_64.S`
+**特点**：
+- **动态构建**：在C函数中运行时构建 `desc_ptr` 结构
+- **地址计算**：使用 `rip_rel_ptr(&gdt_page)` 获取当前可访问的物理地址
+- **适用时机**：启动早期（Identity Mapping阶段）
+- **灵活性**：位置无关，无论代码运行在低地址还是高地址都能工作
 
-```assembly
-# 早期 GDT 描述符（静态定义）
-SYM_DATA_START_LOCAL(early_gdt_descr)
-    .word   GDT_ENTRIES*8-1          # Limit: 256-1 = 255
-SYM_DATA_END_LABEL(early_gdt_descr, SYM_L_LOCAL, early_gdt_descr_base)
-SYM_DATA_START_LOCAL(early_gdt_descr_base)
-    .quad   INIT_PER_CPU_VAR(gdt_page)  # Base: gdt_page 的编译时地址
-SYM_DATA_END(early_gdt_descr_base)
-```
-
-**关键特征**：
-- **静态数据**：在汇编时就定义好的 10 字节结构（2字节limit + 8字节base）
-- **地址计算**：使用 `INIT_PER_CPU_VAR(gdt_page)` 宏，在**编译/链接时**计算
-- **假设前提**：代码已运行在**最终虚拟地址**（如 0xFFFFFFFF81xxxxxx）
-
-##### 核心区别对比表
-
-| 特性 | startup_64_setup_gdt_idt() | early_gdt_descr |
-|------|---------------------------|-----------------|
-| **定义方式** | C 函数，运行时构建 | 汇编静态数据 |
-| **地址计算** | `rip_rel_ptr(&gdt_page)` | `INIT_PER_CPU_VAR(gdt_page)` |
-| **地址类型** | RIP 相对地址（运行时） | 链接时固定地址 |
-| **使用时机** | startup_64 早期 | 切换到高地址后 |
-| **适用环境** | 任何地址（低地址/高地址） | 只能在最终虚拟地址 |
-| **灵活性** | 高（位置无关） | 低（依赖链接地址） |
-
-##### 地址计算方式的关键差异
-
-**INIT_PER_CPU_VAR(gdt_page) 宏展开**：
-
+**代码示例**：
 ```c
-// arch/x86/include/asm/percpu.h
-#define INIT_PER_CPU_VAR(var) \
-    (init_per_cpu__##var - __per_cpu_load + __per_cpu_start)
-```
-
-这是一个**编译时常量计算**：
-- 在链接阶段，链接器就确定了 `gdt_page` 的虚拟地址
-- 假设值：`0xFFFFFFFF82345000`
-- 这个地址**直接写入** `early_gdt_descr` 的数据段
-
-**rip_rel_ptr(&gdt_page) 运行时计算**：
-
-```c
-// 内联汇编实现
-static inline void *rip_rel_ptr(void *p) {
-    asm("leaq %c1(%%rip), %0" : "=r"(ptr) : "i"(p));
-    // 计算：当前RIP + (符号地址 - RIP符号地址)
+void __head startup_64_setup_gdt_idt(void)
+{
+    struct gdt_page *gp = rip_rel_ptr((void *)&gdt_page);
+    struct desc_ptr startup_gdt_descr = {
+        .address = (unsigned long)gp->gdt,
+        .size    = GDT_SIZE - 1,
+    };
+    native_load_gdt(&startup_gdt_descr);
+    // ...
 }
 ```
 
-这是**运行时动态计算**：
-- 基于当前 RIP 的位置
-- 计算 `gdt_page` 相对于 RIP 的偏移
-- 得到当前可访问的实际地址
+**为什么64位不使用静态 early_gdt_descr**：
+- 64位内核链接地址在高地址（0xFFFFFFFF8xxxxxxx）
+- 启动早期运行在低地址物理内存（Identity Mapping）
+- 静态链接地址此时无效，必须用RIP相对寻址动态计算
 
-##### 使用场景示例
+##### 32位内核（i386）
 
-假设：
-- 内核链接地址（最终虚拟地址）：`0xFFFFFFFF81000000`
-- 当前运行地址（early startup_64）：`0x0000000001000000`
-- `gdt_page` 在镜像中的偏移：`+0x1345000`
+**方法**：`early_gdt_descr` 静态数据结构
 
-**场景 1：startup_64 早期（还在低地址运行）**
+**位置**：`arch/x86/kernel/head_32.S:512-515`
 
-```
-当前状态：
-  - 代码运行在物理地址：0x0000000001100000
-  - 页表只映射了 Identity Mapping（VA = PA）
-  - gdt_page 实际位置：0x0000000001345000
-
-方案 A - 使用 INIT_PER_CPU_VAR(gdt_page)：
-  early_gdt_descr_base = 0xFFFFFFFF82345000  ← 链接时地址
-  lgdt early_gdt_descr
-  ❌ 错误！此地址还未映射 → #PF (Page Fault)
-
-方案 B - 使用 rip_rel_ptr(&gdt_page)：
-  当前 RIP ≈ 0x0000000001100000
-  offset = &gdt_page - &current_code = 0x1345000 - 0x1100000 = 0x245000
-  实际地址 = RIP + offset = 0x0000000001100000 + 0x245000 = 0x0000000001345000
-  ✅ 正确！能访问到 gdt_page
+**定义**：
+```assembly
+# 早期 GDT 描述符（静态定义，仅32位）
+SYM_DATA_START(early_gdt_descr)
+    .word GDT_ENTRIES*8-1
+    .long gdt_page              /* Overwritten for secondary CPUs */
+SYM_DATA_END(early_gdt_descr)
 ```
 
-**场景 2：切换到高地址映射后**
-
-```
-当前状态：
-  - 代码运行在虚拟地址：0xFFFFFFFF81100000
-  - 页表已建立 Direct Mapping
-  - gdt_page 虚拟地址：0xFFFFFFFF82345000
-
-方案 A - 使用 INIT_PER_CPU_VAR(gdt_page)：
-  early_gdt_descr_base = 0xFFFFFFFF82345000
-  lgdt early_gdt_descr
-  ✅ 正确！链接地址有效
-
-方案 B - 使用 rip_rel_ptr(&gdt_page)：
-  当前 RIP ≈ 0xFFFFFFFF81100000
-  offset = 0x1345000 - 0x1100000 = 0x245000
-  实际地址 = RIP + offset = 0xFFFFFFFF81100000 + 0x245000
-            = 0xFFFFFFFF81345000
-  ⚠️  错误计算！应该是 0xFFFFFFFF82345000
-
-  (实际上 rip_rel_ptr 在这种情况下也能正确工作，
-   因为它考虑了符号的实际链接地址)
+**使用示例**（head_32.S:271）：
+```assembly
+    lgdt early_gdt_descr
 ```
 
-##### 时间线上的使用
+**特点**：
+- **静态数据**：汇编时定义的10字节结构（2字节limit + 4字节base，32位模式）
+- **地址计算**：链接时确定，直接使用 `gdt_page` 符号地址
+- **适用范围**：仅32位内核
+- **简单直接**：无需运行时计算，汇编代码可直接 `lgdt early_gdt_descr`
 
+##### 核心区别对比表
+
+| 特性 | startup_64_setup_gdt_idt()<br>（64位） | early_gdt_descr<br>（32位） |
+|------|---------------------------|-----------------|
+| **架构** | x86-64 | i386 |
+| **定义方式** | C 函数，运行时构建 | 汇编静态数据 |
+| **地址计算** | `rip_rel_ptr(&gdt_page)` | 链接时固定地址 |
+| **地址类型** | RIP 相对地址（运行时） | 链接时固定地址 |
+| **使用时机** | startup_64 早期 | 保护模式启动 |
+| **适用环境** | Identity Mapping阶段 | 32位地址空间 |
+| **灵活性** | 高（位置无关） | 低（依赖链接地址） |
+
+##### 为什么64位和32位方法不同？
+
+**64位内核的挑战**：
 ```
-T1: startup_64 开始
-    ├─ 状态：运行在低地址 (0x01xxxxxx)
-    ├─ 使用：压缩内核的 boot_gdt
-    └─ 页表：只有 Identity Mapping
-
-T2: 调用 startup_64_setup_gdt_idt()  ← 使用 rip_rel_ptr()
-    ├─ 目的：切换到主内核的 gdt_page
-    ├─ 问题：代码还在低地址，链接地址无效
-    ├─ 解决：rip_rel_ptr() 计算当前可访问地址
-    └─ 结果：lgdt 加载成功 ✅
-
-T3: 建立高地址映射
-    └─ 创建 Direct Mapping（VA = PA + PAGE_OFFSET）
-
-T4: 跳转到高地址内核代码
-    ├─ 从 0x01xxxxxx 跳转到 0xFFFFFFFF81xxxxxx
-    └─ 此后代码运行在最终虚拟地址
-
-T5: 之后的代码可以使用 early_gdt_descr
-    ├─ 前提：已在高地址运行
-    ├─ 优势：简单，不需要运行时计算
-    └─ 示例：某些汇编代码直接 lgdt early_gdt_descr
-```
-
-##### 为什么需要两种方式？
-
-**startup_64_setup_gdt_idt() 的必要性**：
-
-```
-问题场景：
-  - startup_64 刚进入时，代码在物理地址 0x01000000 执行
-  - gdt_page 在物理地址 0x01345000
-  - 但链接器认为 gdt_page 在 0xFFFFFFFF82345000
-  - 如果直接用链接地址 → #PF（页面不存在）
+问题：
+  - 64位内核链接在高地址：0xFFFFFFFF81000000
+  - 启动早期运行在低地址：0x0000000001000000 (Identity Mapping)
+  - 如果使用静态链接地址 → #PF（页面不存在）
 
 解决方案：
-  - 使用 RIP 相对寻址
-  - 无论代码在低地址还是高地址，都能正确找到 gdt_page
-  - 这是早期启动代码的关键技术
+  - 使用RIP相对寻址（rip_rel_ptr）
+  - 基于当前RIP位置动态计算符号地址
+  - 无论代码在哪里运行都能正确访问gdt_page
 ```
 
-**early_gdt_descr 的便利性**：
-
+**32位内核的简单性**：
 ```
-适用场景：
-  - 内核已经运行在最终虚拟地址
-  - 链接地址已经有效
-  - 不需要运行时计算
-
 优势：
-  - 静态定义，编译时确定
-  - 汇编代码可以直接使用：lgdt early_gdt_descr
-  - 代码简单，不需要函数调用
+  - 32位内核链接在低地址：0x08048000 或类似
+  - 启动时已在物理内存的正确位置
+  - 静态链接地址直接可用
+
+方法：
+  - 直接使用链接器分配的地址
+  - early_gdt_descr可以在编译时确定
+  - lgdt可以直接引用静态数据
 ```
 
-##### 它们指向同一个 GDT 表吗？
+##### 实际启动流程对比
 
-**是的！** 两者最终都指向 `gdt_page` 这块内存，但：
-
-```
-物理内存中的 gdt_page：
-  ┌─────────────────────────────┐
-  │ 物理地址：0x01345000        │  ← 实际内存位置
-  │ 内容：GDT_ENTRIES 个段描述符 │
-  └─────────────────────────────┘
-           ↑              ↑
-           │              │
-  低地址映射│              │高地址映射
-  (Identity)│              │(Direct)
-           │              │
-  VA: 0x01345000    VA: 0xFFFFFFFF82345000
-      ↑                    ↑
-      │                    │
-  rip_rel_ptr()      INIT_PER_CPU_VAR()
-  计算结果            链接时地址
-```
-
-**关键理解**：
-- `gdt_page` 只有**一块物理内存**
-- 在不同时刻，可以通过**不同的虚拟地址**访问
-- `rip_rel_ptr()` 适应当前地址空间
-- `INIT_PER_CPU_VAR()` 使用最终地址空间
-
-##### 实际代码验证
-
-**使用 startup_64_setup_gdt_idt()**：
-
-```c
-// arch/x86/kernel/head_64.S
-startup_64:
-    // ... 早期初始化 ...
-    call startup_64_setup_gdt_idt  // ← 使用 rip_rel_ptr()
-    // GDT 已切换到 gdt_page
-```
-
-**使用 early_gdt_descr**：
-
+**64位内核启动**（arch/x86/kernel/head_64.S）：
 ```assembly
-// 某些晚期汇编代码
-some_function:
-    lgdt early_gdt_descr      // ← 直接使用静态定义
-    // 前提：已在高地址运行
+startup_64:
+    # 步骤1: 运行在Identity Mapping (低地址)
+    # 步骤2: 调用C函数动态设置GDT
+    call startup_64_setup_gdt_idt  # ← 使用rip_rel_ptr()
+    # 步骤3: GDT已切换到gdt_page
+```
+
+**32位内核启动**（arch/x86/kernel/head_32.S）：
+```assembly
+startup_32:
+    # 步骤1: 设置保护模式
+    # 步骤2: 直接加载静态GDT描述符
+    lgdt early_gdt_descr          # ← 直接使用静态数据
+    # 步骤3: GDT已加载
 ```
 
 ##### 总结
 
-| 方面 | startup_64_setup_gdt_idt | early_gdt_descr |
+| 方面 | startup_64_setup_gdt_idt<br>（64位） | early_gdt_descr<br>（32位） |
 |------|-------------------------|-----------------|
-| **核心技术** | RIP 相对寻址 | 链接时地址 |
-| **关键优势** | 位置无关 | 简单直接 |
-| **使用前提** | 无要求 | 必须在最终地址 |
-| **典型用途** | 早期启动（切换GDT） | 晚期代码（重载GDT） |
+| **核心技术** | RIP 相对寻址 | 链接时静态地址 |
+| **关键优势** | 位置无关，适应地址空间切换 | 简单直接 |
+| **使用架构** | x86-64 | i386 |
+| **典型用途** | 64位早期启动（切换GDT） | 32位保护模式启动 |
 | **实现方式** | C 函数 + 内联汇编 | 纯汇编数据 |
 
 **关键要点**：
-1. 两者都指向 `gdt_page`，但计算地址的方式不同
-2. `startup_64_setup_gdt_idt()` 是早期启动的关键，使用 RIP 相对寻址
-3. `early_gdt_descr` 是便利工具，适用于已在最终地址的代码
-4. 这体现了内核启动过程中地址空间切换的复杂性
+1. **early_gdt_descr仅存在于32位内核**（head_32.S），不存在于64位内核（head_64.S）
+2. 64位内核使用`startup_64_setup_gdt_idt()`动态构建GDT描述符
+3. 32位内核使用静态定义的`early_gdt_descr`
+4. 这种差异源于64位和32位地址空间的根本不同
 
 > **相关章节**：
 > - **1.3** - startup_64_setup_gdt_idt() 详细实现
@@ -647,7 +566,7 @@ some_function:
 
 ### 1.4 Per-CPU GDT 加载
 
-**位置**：`arch/x86/kernel/cpu/common.c`
+**load_direct_gdt() 位置**：`arch/x86/kernel/cpu/common.c:716-723`
 
 ```c
 void load_direct_gdt(int cpu)
@@ -658,27 +577,50 @@ void load_direct_gdt(int cpu)
     gdt_descr.size = GDT_SIZE - 1;
     load_gdt(&gdt_descr);
 }
+EXPORT_SYMBOL_GPL(load_direct_gdt);
+```
 
-// 在 cpu_init() 中调用
+**cpu_init() 位置**：`arch/x86/kernel/cpu/common.c:2384`
+
+```c
 void cpu_init(void)
 {
-    int cpu = smp_processor_id();
     struct task_struct *cur = current;
-    struct tss_struct *tss = &per_cpu(cpu_tss_rw, cpu);
+    int cpu = raw_smp_processor_id();
 
-    // 加载 Per-CPU GDT
-    load_direct_gdt(cpu);
+    // 清除CR4中的某些位
+    if (IS_ENABLED(CONFIG_X86_64) || cpu_feature_enabled(X86_FEATURE_VME) ||
+        boot_cpu_has(X86_FEATURE_TSC) || boot_cpu_has(X86_FEATURE_DE))
+        cr4_clear_bits(X86_CR4_VME|X86_CR4_PVI|X86_CR4_TSD|X86_CR4_DE);
 
-    // 设置 TSS
-    set_tss_desc(cpu, &get_cpu_entry_area(cpu)->tss);
-    load_TR_desc();
+    // x86-64 特定初始化
+    if (IS_ENABLED(CONFIG_X86_64)) {
+        loadsegment(fs, 0);
+        memset(cur->thread.tls_array, 0, GDT_ENTRY_TLS_ENTRIES * 8);
+        syscall_init();
+
+        wrmsrq(MSR_FS_BASE, 0);
+        wrmsrq(MSR_KERNEL_GS_BASE, 0);
+        barrier();
+
+        x2apic_setup();
+    }
 
     // 设置内核栈
     load_sp0((unsigned long)(cpu_entry_stack(cpu) + 1));
 
+    // 加载LDT
+    load_mm_ldt(&init_mm);
+
+    // 初始化调试寄存器
+    initialize_debug_regs();
+    dbg_restore_debug_regs();
+
     // 其他初始化...
 }
 ```
+
+**说明**：在现代内核中，GDT加载通过`switch_gdt_and_percpu_base()`在更早的阶段完成，而不是在`cpu_init()`中。
 
 ---
 
@@ -686,7 +628,9 @@ void cpu_init(void)
 
 ### 2.1 压缩内核页表建立详解
 
-**位置**：`arch/x86/boot/compressed/head_64.S`
+**位置**：`arch/x86/boot/compressed/head_64.S:82`（startup_32函数）
+
+**页表初始化代码位置**：`arch/x86/boot/compressed/head_64.S:199-235`
 
 **上下文**：startup_32 在保护模式（32位）下运行，负责建立初始的4级页表，然后切换到长模式（64位）。
 
@@ -863,12 +807,13 @@ SYM_FUNC_START(startup_32)
      * Bit 1:     R/W = 1（可读写）
      * Bit 0:     P = 1（存在）
      *
-     * 【0x00000083 标志位】：
-     * 0x83 = 1000 0011（二进制）
-     *      = PS(1) | R/W(1) | P(1)
+     * 【0x00000183 标志位】：
+     * 0x183 = 1 1000 0011（二进制）
+     *       = G(1) | PS(1) | R/W(1) | P(1)
      * - Bit 0 (P=1):   页存在
      * - Bit 1 (R/W=1): 可读写
      * - Bit 7 (PS=1):  2MB 大页
+     * - Bit 8 (G=1):   全局页（不被TLB刷新清除）
      *
      * 【循环计算】：
      * - 2048 个 PD 条目（4 个 PD × 512 条目/PD）
@@ -877,20 +822,20 @@ SYM_FUNC_START(startup_32)
      *
      * 【Identity Mapping】：
      * 虚拟地址           PD 条目                物理地址
-     * 0x00000000  →  PD0[0] = 0x00000083  →  0x00000000
-     * 0x00200000  →  PD0[1] = 0x00200083  →  0x00200000
-     * 0x00400000  →  PD0[2] = 0x00400083  →  0x00400000
+     * 0x00000000  →  PD0[0] = 0x00000183  →  0x00000000
+     * 0x00200000  →  PD0[1] = 0x00200183  →  0x00200000
+     * 0x00400000  →  PD0[2] = 0x00400183  →  0x00400000
      * ...
-     * 0x3FE00000  →  PD1[511]= 0x3FE00083  →  0x3FE00000
-     * 0x40000000  →  PD2[0] = 0x40000083  →  0x40000000
+     * 0x3FE00000  →  PD1[511]= 0x3FE00183  →  0x3FE00000
+     * 0x40000000  →  PD2[0] = 0x40000183  →  0x40000000
      * ...
-     * 0xFFE00000  →  PD3[511]= 0xFFE00083  →  0xFFE00000
+     * 0xFFE00000  →  PD3[511]= 0xFFE00183  →  0xFFE00000
      */
     leal    rva(pgtable)(%ebx), %edi
     addl    $0x2000, %edi                 # EDI = 第一个 PD 基址（pgtable + 8KB）
-    movl    $0x00000083, %eax             # EAX = 物理地址 0 | PS | R/W | P
+    movl    $0x00000183, %eax             # EAX = 物理地址 0 | G | PS | R/W | P
     movl    $2048, %ecx                   # ECX = 2048（4 个 PD × 512 条目）
-1:  movl    %eax, 0(%edi)                 # PD[i] = 物理地址 | 0x83
+1:  movl    %eax, 0(%edi)                 # PD[i] = 物理地址 | 0x183
     addl    $0x200000, %eax               # EAX += 2MB（下一个 2MB 页）
     addl    $8, %edi                      # EDI += 8（下一个 PD 条目）
     decl    %ecx                          # ECX--
@@ -974,59 +919,72 @@ SYM_FUNC_END(startup_32)
 
 ### 2.2 主内核early页表
 
-**位置**：`arch/x86/kernel/head_64.S`
+**位置**：`arch/x86/kernel/head_64.S:603-612`
 
 ```asm
 # 早期页表定义
-.section ".init.data", "aw"
-.balign 4096
-SYM_DATA(early_top_pgt, .fill 512, 8, 0)
+SYM_DATA_START_PTI_ALIGNED(early_top_pgt)
+    .fill   511,8,0
+    .quad   level3_kernel_pgt - __START_KERNEL_map + _PAGE_TABLE_NOENC
+    .fill   PTI_USER_PGD_FILL,8,0
+SYM_DATA_END(early_top_pgt)
 
 # 动态页表（启动时分配）
-SYM_DATA(early_dynamic_pgts, .fill 512*EARLY_DYNAMIC_PAGE_TABLES, 8, 0)
+SYM_DATA_START_PAGE_ALIGNED(early_dynamic_pgts)
+    .fill   512*EARLY_DYNAMIC_PAGE_TABLES,8,0
+SYM_DATA_END(early_dynamic_pgts)
 ```
 
-**x86_64_start_kernel() 中重置页表**：`arch/x86/kernel/head64.c`
+**x86_64_start_kernel() 中重置页表**：`arch/x86/kernel/head64.c:219`
 
 ```c
-asmlinkage __visible void __init x86_64_start_kernel(char *real_mode_data)
+asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_data)
 {
-    // 1. 重置早期页表
+    // 1. 初始化CR4 shadow
+    cr4_init_shadow();
+
+    // 2. 重置早期页表（清除identity mapping）
     reset_early_page_tables();
 
-    // 2. 清零 BSS
+    // 3. 如果启用5级页表，设置相应基址
+    if (pgtable_l5_enabled()) {
+        page_offset_base = __PAGE_OFFSET_BASE_L5;
+        vmalloc_base = __VMALLOC_BASE_L5;
+        vmemmap_base = __VMEMMAP_BASE_L5;
+    }
+
+    // 4. 清零 BSS
     clear_bss();
 
-    // 3. 清零页表（防止未初始化内存）
+    // 5. 清零页表（防止未初始化内存）
     clear_page(init_top_pgt);
 
-    // 4. 设置早期 IDT
+    // 6. SME支持初始化
+    sme_early_init();
+
+    // 7. KASAN早期初始化
+    kasan_early_init();
+
+    // 8. 设置早期 IDT
     idt_setup_early_handler();
 
-    // 5. 拷贝 boot_params
+    // 9. 拷贝 boot_params
     copy_bootdata(__va(real_mode_data));
 
-    // 6. 加载微码
-    load_ucode_bsp();
-
-    // 7. 建立内核高地址映射
-    init_top_pgt[511] = early_top_pgt[511];
-
-    // 8. 继续启动
+    // 10. 继续启动
     x86_64_start_reservations(real_mode_data);
 }
 ```
 
-**reset_early_page_tables() 实现**：`arch/x86/kernel/head64.c`
+**reset_early_page_tables() 实现**：`arch/x86/kernel/head64.c:68-73`
 
 ```c
-void __head reset_early_page_tables(void)
+static void __init reset_early_page_tables(void)
 {
-    // 清零 PML4
-    memset(early_top_pgt, 0, sizeof(early_top_pgt));
-    memset(early_dynamic_pgts, 0, sizeof(early_dynamic_pgts));
+    // 清零 PML4（除了最后一项内核映射）
+    memset(early_top_pgt, 0, sizeof(pgd_t)*(PTRS_PER_PGD-1));
 
-    // 重新设置 Identity Mapping 和 Direct Mapping
+    // 重置动态页表索引
     next_early_pgt = 0;
 
     // 写入 CR3（加载新页表）
@@ -1186,48 +1144,74 @@ kernel_physical_mapping_init(unsigned long paddr_start,
 
 ### 3.1 E820 处理
 
-**位置**：`arch/x86/kernel/e820.c`
+**e820__memory_setup() 位置**：`arch/x86/kernel/e820.c:1224-1238`
 
 ```c
 // 解析 E820 内存映射
 void __init e820__memory_setup(void)
 {
-    char *who = "BIOS-e820";
+    char *who;
 
-    // 从 boot_params 读取 E820 表
-    e820__memory_setup_default();
+    /* This is a firmware interface ABI - make sure we don't break it: */
+    BUILD_BUG_ON(sizeof(struct boot_e820_entry) != 20);
+
+    // 调用平台特定的内存设置函数
+    who = x86_init.resources.memory_setup();
+
+    // 备份E820表供kexec和firmware使用
+    memcpy(e820_table_kexec, e820_table, sizeof(*e820_table_kexec));
+    memcpy(e820_table_firmware, e820_table, sizeof(*e820_table_firmware));
 
     // 打印 E820 信息
+    pr_info("BIOS-provided physical RAM map:\n");
     e820__print_table(who);
 }
+```
 
+**e820__memblock_setup() 位置**：`arch/x86/kernel/e820.c:1240`
+
+```c
 // 将 E820 转换为 memblock
 void __init e820__memblock_setup(void)
 {
     int i;
-    struct e820_entry *entry = e820_table->entries;
+    u64 end;
 
-    // 遍历 E820 表
-    for (i = 0; i < e820_table->nr_entries; i++, entry++) {
-        u64 start = entry->addr;
-        u64 end = start + entry->size;
+    // 如果启用了内存热插拔，使用bottom-up分配策略
+    if (movable_node_is_enabled())
+        memblock_set_bottom_up(true);
 
-        // 如果是可用内存，添加到 memblock
-        if (entry->type != E820_TYPE_RAM &&
-            entry->type != E820_TYPE_RESERVED_KERN)
+    // 限制memblock只能使用第一个1MB（ISA_END_ADDRESS）
+    memblock_set_current_limit(ISA_END_ADDRESS);
+
+    // 允许memblock动态调整大小（EFI可能传递很多E820条目）
+    memblock_allow_resize();
+
+    // 遍历E820表，添加内存区域到memblock
+    for (i = 0; i < e820_table->nr_entries; i++) {
+        struct e820_entry *entry = &e820_table->entries[i];
+
+        end = entry->addr + entry->size;
+        if (end != (resource_size_t)end)
             continue;
 
-        memblock_add(start, entry->size);
+        if (entry->type == E820_TYPE_SOFT_RESERVED)
+            memblock_reserve(entry->addr, entry->size);
+
+        if (entry->type != E820_TYPE_RAM && entry->type != E820_TYPE_RESERVED_KERN)
+            continue;
+
+        memblock_add(entry->addr, entry->size);
     }
 
-    // 标记保留区域
-    e820__reserve_setup_data();
+    // 移除memblock大小限制
+    memblock_set_current_limit(get_max_mapped());
 }
 ```
 
 ### 3.2 memblock 实现
 
-**位置**：`mm/memblock.c`
+**memblock 核心数据结构**：`mm/memblock.c`
 
 ```c
 // memblock 结构
@@ -1237,7 +1221,11 @@ struct memblock {
     struct memblock_type memory;    // 可用内存
     struct memblock_type reserved;  // 已保留内存
 };
+```
 
+**memblock_add() 位置**：`mm/memblock.c:749`
+
+```c
 // 添加内存区域
 int __init_memblock memblock_add(phys_addr_t base, phys_addr_t size)
 {
@@ -1248,31 +1236,61 @@ int __init_memblock memblock_add(phys_addr_t base, phys_addr_t size)
 
     return memblock_add_range(&memblock.memory, base, size, MAX_NUMNODES, 0);
 }
+```
 
-// 分配内存
-phys_addr_t __init memblock_alloc_range(phys_addr_t size, phys_addr_t align,
-                                        phys_addr_t start, phys_addr_t end)
+**memblock_alloc_range_nid() 位置**：`mm/memblock.c:1530`
+
+```c
+// 分配内存（NUMA感知版本）
+phys_addr_t __init memblock_alloc_range_nid(phys_addr_t size,
+                                            phys_addr_t align,
+                                            phys_addr_t start,
+                                            phys_addr_t end,
+                                            int nid,
+                                            bool exact_nid)
 {
+    enum memblock_flags flags = choose_memblock_flags();
     phys_addr_t found;
 
-    if (!align)
+    if (WARN_ONCE(nid == MAX_NUMNODES, "Usage of MAX_NUMNODES is deprecated. Use NUMA_NO_NODE instead\n"))
+        nid = NUMA_NO_NODE;
+
+    if (!align) {
+        /* Can't use WARNs this early in boot on powerpc */
+        dump_stack();
         align = SMP_CACHE_BYTES;
+    }
 
-    // 从 memblock 中找到合适的区域
-    found = memblock_find_in_range(start, end, size, align);
-    if (!found)
-        return 0;
+retry:
+    found = memblock_find_in_range_node(size, align, start, end, nid,
+                                        flags);
+    if (found && !memblock_reserve(found, size))
+        goto done;
 
-    // 标记为已使用
-    memblock_reserve(found, size);
+    if (nid != NUMA_NO_NODE && !exact_nid) {
+        found = memblock_find_in_range_node(size, align, start,
+                                           end, NUMA_NO_NODE,
+                                           flags);
+        if (found && !memblock_reserve(found, size))
+            goto done;
+    }
 
+    if (flags & MEMBLOCK_MIRROR) {
+        flags &= ~MEMBLOCK_MIRROR;
+        pr_warn("Could not allocate %pap bytes of mirrored memory\n",
+                &size);
+        goto retry;
+    }
+
+    return 0;
+done:
     return found;
 }
 ```
 
 ### 3.3 buddy allocator 实现
 
-**位置**：`mm/page_alloc.c`
+**memblock_free_all() 位置**：`mm/memblock.c:2395`
 
 ```c
 // 从 memblock 转换到 buddy
@@ -1280,41 +1298,60 @@ void __init memblock_free_all(void)
 {
     unsigned long pages;
 
-    // 重置 memblock 分配器
+    // 重置所有zone的managed pages计数
     reset_all_zones_managed_pages();
 
     // 释放所有页到 buddy allocator
     pages = free_low_memory_core_early();
 
+    // 更新总内存页数
     totalram_pages_add(pages);
 }
+```
 
+**页分配器核心函数** ：`mm/page_alloc.c`
+
+```c
 // 分配页（buddy allocator 核心函数）
-struct page *__alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
-                                    int preferred_nid,
-                                    nodemask_t *nodemask)
+struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
+                           nodemask_t *nodemask)
 {
     struct page *page;
     unsigned int alloc_flags = ALLOC_WMARK_LOW;
-    gfp_t alloc_mask;
+    gfp_t alloc_gfp;
     struct alloc_context ac = { };
 
+    // 如果order过大，直接失败
+    if (WARN_ON_ONCE_GFP(order >= MAX_ORDER, gfp))
+        return NULL;
+
+    gfp &= gfp_allowed_mask;
+
     // 准备分配上下文
-    prepare_alloc_pages(gfp_mask, order, preferred_nid, nodemask,
-                       &ac, &alloc_mask, &alloc_flags);
+    alloc_gfp = gfp;
+    if (!prepare_alloc_pages(gfp, order, preferred_nid, nodemask, &ac,
+                             &alloc_gfp, &alloc_flags))
+        return NULL;
 
     // 快速路径：从 Per-CPU 页缓存分配
-    page = get_page_from_freelist(alloc_mask, order, alloc_flags, &ac);
+    page = get_page_from_freelist(alloc_gfp, order, alloc_flags, &ac);
     if (likely(page))
         goto out;
 
     // 慢速路径：从伙伴系统分配
-    alloc_mask = current_gfp_context(gfp_mask);
-    page = __alloc_pages_slowpath(alloc_mask, order, &ac);
+    alloc_gfp = gfp;
+    ac.spread_dirty_pages = false;
+
+    // 如果是MOVABLE，重置preferred_nid
+    if (unlikely(ac.migratetype == MIGRATE_MOVABLE))
+        ac.preferred_nid = numa_node_id();
+
+    page = __alloc_pages_slowpath(alloc_gfp, order, &ac);
 
 out:
     return page;
 }
+EXPORT_SYMBOL(__alloc_pages);
 ```
 
 ---

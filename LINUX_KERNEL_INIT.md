@@ -1393,77 +1393,24 @@ static const struct idt_data ia32_idt[] __initconst = {
 
 ### Q: 硬件中断、软件中断、异常有什么本质区别？
 
-**A: 核心区别在于触发方式（同步/异步）和是否受 EFLAGS.IF 控制。**
+**A: 参见 [X86_INTERRUPT_EXCEPTION_TRAP.md - x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现](X86_INTERRUPT_EXCEPTION_TRAP.md)。**
 
-#### 三者的完整对比
+该文档详细说明了：
+- Intel SDM 官方定义（Interrupt vs Exception）
+- 三者的完整对比表（触发方式、是否受 IF 控制、CPU 分类、优先级等）
+- Exception 的三种类型（Fault/Trap/Abort）及其区别
+- 中断/异常优先级（为什么异常优先于硬件中断）
+- IDT 门描述符类型（Interrupt Gate vs Trap Gate）
+- Linux 内核源码实现（异常向量、Event Type、IDT 初始化）
+- 常见误解澄清（为什么软件中断在 CPU 层面实际上是异常）
 
-| 特性 | 硬件中断（IRQ） | 软件中断（如 INT 0x80） | 异常（如 #PF、#BP） |
-|------|----------------|---------------------|------------------|
-| **触发方式** | 异步，外部硬件设备 | 同步，`int n` 指令 | 同步，当前指令或错误条件 |
-| **触发时机** | 任意时刻（与指令执行无关） | 执行 `int n` 指令时 | 执行特定指令或发生错误时 |
-| **受 IF 控制？** | ✅ 是（IF=0 时被屏蔽） | ❌ 否（IF=0 时仍会触发） | ❌ 否（IF=0 时仍会触发） |
-| **CPU 分类** | Interrupt | Exception | Exception |
-| **Intel 手册名称** | Hardware Interrupt | Software Interrupt | Exception |
-| **典型示例** | IRQ 0（时钟中断）<br>IRQ 1（键盘中断） | INT 0x80（系统调用）<br>INT 3（断点） | #PF（缺页异常）<br>#GP（保护异常）<br>#VC（虚拟化异常） |
-| **优先级** | 低（可被异常抢占） | 中（不可被硬件中断抢占） | 高（最先处理） |
-| **DPL 设置** | 通常 DPL=0（内核态） | 可设为 DPL=3（用户态可触发） | 多数 DPL=0，少数 DPL=3（#BP） |
+**简短答案**：
+- **核心区别**：触发方式（同步/异步）+ 是否受 EFLAGS.IF 控制
+- **硬件中断（IRQ）**：异步 + 受 IF 控制（IF=0 时被屏蔽）
+- **软件中断/异常**：同步 + 不受 IF 控制（IF=0 时仍会触发）
+- **关键洞察**：Software Interrupt 在 Intel SDM 中归类为 Exception，不是 Interrupt
 
-#### 关键洞察：软件中断在 CPU 层面是异常
-
-虽然习惯上称 `int 0x80` 为"软件中断"（Software Interrupt），但在 **CPU 硬件层面**，它被归类为 **异常**（Exception）：
-
-```c
-// 用户态程序
-int main() {
-    asm("int $0x80");  // 触发"软件中断"
-
-    // CPU 的实际行为：
-    // 1. 同步触发（当前指令引起）
-    // 2. 即使 IF=0 也会触发（不受 EFLAGS.IF 控制）
-    // 3. 查找 IDT[0x80]
-    // 4. 跳转到内核系统调用处理函数
-    //
-    // 这些特征与 #PF、#GP 等异常完全一致！
-}
-```
-
-**为什么会有这种混淆？**
-
-1. **指令名称**：`int` 指令名称包含 "interrupt"，容易误解
-2. **用途相似**：硬件中断和软件中断都用于"打断"正常执行流程
-3. **历史习惯**：从 8086 时代就称呼 `int n` 为"软件中断"
-
-**真正的本质区别**：
-
-```
-异步（外部触发） + 受 IF 控制 = 硬件中断（Interrupt）
-同步（指令触发） + 不受 IF 控制 = 软件中断/异常（Exception）
-```
-
-#### 实际影响：早期启动阶段
-
-这个区别在 Linux 启动早期非常重要（参见 [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)）：
-
-```c
-// arch/x86/kernel/head_64.S
-startup_64:
-    cli  // EFLAGS.IF = 0，关闭硬件中断
-
-    // 此时状态：
-    // ✅ 可以处理异常（#PF, #GP, #VC 等）- 不受 IF 控制
-    // ✅ 可以执行 int 3 (调试断点) - 不受 IF 控制
-    // ✅ 可以执行 int 0x80 (系统调用) - 不受 IF 控制
-    // ❌ 不会响应硬件中断（IRQ 0, IRQ 1 等）- 被 IF=0 屏蔽
-
-    call verify_cpu  // 可能触发 #VC 异常（SEV-SNP 环境）
-```
-
-这就是为什么内核在早期阶段（IF=0）只需要设置少数几个异常处理函数（如 #VC），而不需要处理硬件中断。
-
-#### 相关文档
-
-- [LINUX_KERNEL_IDT_EVOLUTION.md - 中断 vs 异常的根本区别](LINUX_KERNEL_IDT_EVOLUTION.md)：详细解释早期启动阶段的 IDT 设置
-- [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)：系统调用机制的详细说明
+这个区别在内核早期启动阶段非常重要：内核在 `cli`（IF=0）后仍然可以处理异常（如 #PF、#VC），但不会响应硬件中断（IRQ）。
 
 ---
 
@@ -1536,9 +1483,11 @@ startup_64:
 
 ### 中断与系统调用
 
+- **[X86_INTERRUPT_EXCEPTION_TRAP.md](X86_INTERRUPT_EXCEPTION_TRAP.md)** - x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现（基础概念、三者区别、Exception 分类、优先级、IDT 门类型）
 - **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解 - 两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
 - **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - 系统调用初始化详解（trap_init、syscall_init、INT 0x80 vs SYSCALL/SYSENTER 对比、MSR 配置）
 - **[LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)** - Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue）
+- **[X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)** - x86 中断控制器演进（8259 PIC vs APIC）
 - **[BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)** - BIOS IVT 与 Kernel IDT 对比
 
 ### 重定位与解压专题

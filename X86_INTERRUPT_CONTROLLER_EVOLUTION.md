@@ -11,8 +11,10 @@
 - 现代发展：MSI/MSI-X、x2APIC
 
 **相关文档：**
+- [x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现](X86_INTERRUPT_EXCEPTION_TRAP.md) - 中断/异常基础概念、优先级、IDT 门类型
 - [Linux 内核初始化](LINUX_KERNEL_INIT.md) - init_IRQ() 中的 PIC/APIC 初始化
-- [Linux 中断处理](LINUX_INTERRUPT_GUIDE.md) - 运行时中断处理机制
+- [Linux 中断处理](LINUX_INTERRUPT_GUIDE.md) - 运行时中断处理机制（Top Half/Bottom Half）
+- [Linux IDT 演进](LINUX_KERNEL_IDT_EVOLUTION.md) - IDT 表的演进流程
 - [键盘中断示例](APPENDIX_A_KEYBOARD_INTERRUPT.md) - 8259 PIC 的实际应用
 - [E820 内存映射](E820_MEMORY_MAP.md) - LAPIC/IOAPIC 内存地址映射
 

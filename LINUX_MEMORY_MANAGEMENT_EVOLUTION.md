@@ -31,7 +31,7 @@ Linux x86-64 内核启动过程经历四个内存管理阶段，每个阶段都�
 ├──────────┼─────────────┼─────────────┼──────────────┼─────────────────┤
 │ ① BIOS   │ 实模式      │ 无          │ 无           │ 1MB 直接寻址    │
 │ ② GRUB   │ 保护模式    │ GRUB GDT    │ 无(CR0.PG=0) │ 扁平模式        │
-│ ③ 压缩   │ 长模式      │ boot_gdt    │ pgtable      │ Identity(VA=PA) │
+│ ③ 压缩   │ 长模式      │ gdt64+gdt   │ pgtable      │ Identity(VA=PA) │
 │ ④ 主内核 │ 长模式      │ gdt_page    │ swapper_pg   │ Direct(VA=PA+⊿)│
 └──────────┴─────────────┴─────────────┴──────────────┴─────────────────┘
 ```
@@ -42,6 +42,199 @@ Linux x86-64 内核启动过程经历四个内存管理阶段，每个阶段都�
 - **压缩内核 → 主内核**：切换到完整 GDT 和高地址映射
 
 本文档按时间线详细讲解每个阶段的演化过程。
+
+---
+
+## 关键概念：x86-64 地址空间布局
+
+在阅读本文档之前，需要理解 x86-64 架构下的**低地址**和**高地址**概念，这对理解内核启动过程至关重要。
+
+### 地址空间划分
+
+x86-64 架构的 64 位虚拟地址空间被分为两个主要区域：
+
+```
+64 位虚拟地址空间（理论 2^64 = 16EB，实际 48/57 位）：
+
+┌─────────────────────────────────────────────────────────┐
+│ 高半部分（内核空间）                                      │
+│ 0xFFFF800000000000 - 0xFFFFFFFFFFFFFFFF                 │
+│ └─ 高地址（High Addresses）                              │
+│                                                          │
+│ 【内核区域】：                                            │
+│ 0xFFFF888000000000 - 0xFFFFC87FFFFFFFFF: Direct Mapping │
+│   (物理内存直接映射区，64TB)                              │
+│ 0xFFFFFFFF80000000 - 0xFFFFFFFFFFFFFFFF: 内核代码/数据   │
+│   (内核镜像链接地址)                                      │
+└─────────────────────────────────────────────────────────┘
+                        中间是非规范地址
+                  (0x0000800000000000 - 0xFFFF7FFFFFFFFFFF)
+                         不可使用
+┌─────────────────────────────────────────────────────────┐
+│ 低半部分（用户空间）                                      │
+│ 0x0000000000000000 - 0x00007FFFFFFFFFFF                 │
+│ └─ 低地址（Low Addresses）                               │
+│                                                          │
+│ 【用户区域】：                                            │
+│ 0x0000000000000000 - 0x00007FFFFFFFFFFF: 用户进程空间    │
+│   (代码、数据、堆、栈、共享库等)                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 术语定义
+
+**低地址（Low Addresses）**：
+- **范围**：`0x0000000000000000 - 0x00007FFFFFFFFFFF`（理论上限 128TB，实际更小）
+- **用途**：用户空间（User Space）
+- **特点**：
+  - 地址以 `0x0000` 开头
+  - 每个用户进程有独立的低地址映射
+  - 不能直接访问内核数据
+
+**高地址（High Addresses）**：
+- **范围**：`0xFFFF800000000000 - 0xFFFFFFFFFFFFFFFF`
+- **用途**：内核空间（Kernel Space）
+- **特点**：
+  - 地址以 `0xFFFF` 开头
+  - 所有进程共享相同的高地址映射
+  - 内核代码、数据、直接映射区都在这里
+
+**规范地址（Canonical Address）**：
+- x86-64 实际只使用 48 位或 57 位地址
+- 规范地址要求：高位必须是第 47 位（或第 56 位）的符号扩展
+- 低地址：bit[63:48] 全为 0
+- 高地址：bit[63:48] 全为 1
+- 中间地址（非规范）会触发 #GP 异常
+
+### 内核启动过程中的地址使用
+
+**阶段 1-2：BIOS/GRUB（无分页或低地址）**
+```
+物理地址直接访问，或使用扁平模式：
+  - 内核镜像加载位置：通常在 1MB（0x00100000）附近
+  - 地址范围：0x00000000 - 0xFFFFFFFF（32位地址空间）
+```
+
+**阶段 3：压缩内核（Identity Mapping，低地址）**
+```
+首次启用分页，使用恒等映射（VA = PA）：
+  - 虚拟地址 = 物理地址
+  - 例如：物理 0x01000000 → 虚拟 0x01000000
+  - 仍在低地址范围（< 4GB）
+  - 这是过渡阶段，代码运行在低地址
+```
+
+**阶段 4：主内核（Direct Mapping，高地址）**
+```
+切换到最终的内核地址空间布局：
+  - 内核代码：0xFFFFFFFF80000000 + offset
+  - 物理内存直接映射：0xFFFF888000000000 + PA
+  - 所有内核代码都运行在高地址
+```
+
+### 为什么需要低地址和高地址分离？
+
+**1. 地址隔离（安全）**
+```
+用户进程：
+  └─ 只能访问低地址（0x0000...）
+  └─ 访问高地址 → #GP 异常（权限不足）
+
+内核：
+  └─ 可以访问所有地址
+  └─ 通过页表权限位控制
+```
+
+**2. 共享内核映射（效率）**
+```
+所有进程的高地址映射相同：
+  ┌─────────────┐
+  │ 进程 A 页表 │ ← PML4[256-511] 指向共享的内核页表
+  ├─────────────┤
+  │ 进程 B 页表 │ ← PML4[256-511] 指向相同的内核页表
+  └─────────────┘
+
+好处：
+  - 进程切换不需要刷新内核映射
+  - 系统调用无需切换页表（只切换特权级）
+```
+
+**3. 直接映射物理内存（便利）**
+```
+内核需要访问任意物理内存：
+  物理地址 PA → 虚拟地址 0xFFFF888000000000 + PA
+
+例如：
+  物理 0x12345000 → 虚拟 0xFFFF888012345000
+  内核可以直接通过这个虚拟地址访问
+```
+
+### 本文档中的地址术语
+
+当我们说：
+- **"低地址运行"** = 代码在 0x0000xxxx 范围执行（如 0x01000000）
+- **"高地址运行"** = 代码在 0xFFFFxxxx 范围执行（如 0xFFFFFFFF81000000）
+- **"切换到高地址"** = 从 Identity Mapping 切换到 Direct Mapping
+- **"链接地址"** = 链接器分配的虚拟地址（通常是高地址，如 0xFFFFFFFF81000000）
+- **"运行时地址"** = 代码实际执行的地址（可能是低地址）
+
+### 关键时刻：低地址 → 高地址切换
+
+```
+启动过程中的地址转换：
+
+T1: 压缩内核 startup_64（低地址）
+    ├─ 代码位置：VA 0x01000000 = PA 0x01000000
+    ├─ 映射方式：Identity Mapping（VA = PA）
+    └─ 地址范围：低地址（< 4GB）
+
+T2: 建立高地址映射
+    ├─ 创建 Direct Mapping（VA = PA + 0xFFFF888000000000）
+    ├─ 映射内核代码（VA = PA + 0xFFFFFFFF80000000）
+    └─ 两种映射共存
+
+T3: 跳转到高地址
+    ├─ jmp 到 0xFFFFFFFF81xxxxxx
+    ├─ 代码位置：VA 0xFFFFFFFF81000000 → PA 0x01000000（同一物理地址）
+    └─ 地址范围：高地址
+
+T4: 移除低地址映射
+    └─ 只保留高地址映射（最终状态）
+```
+
+### 实际例子
+
+**低地址示例**：
+```c
+// 压缩内核 startup_64 早期
+当前 RIP = 0x0000000001000000  ← 低地址
+gdt_page 物理地址 = 0x0000000001234000  ← 低地址
+```
+
+**高地址示例**：
+```c
+// 主内核运行时
+当前 RIP = 0xFFFFFFFF81234000  ← 高地址
+gdt_page 虚拟地址 = 0xFFFFFFFF82345000  ← 高地址
+              ↓（页表转换）
+gdt_page 物理地址 = 0x0000000001345000  ← 同一物理地址
+```
+
+**为什么需要 RIP 相对寻址**：
+```
+问题：代码在低地址运行，但符号链接在高地址
+
+startup_64 早期：
+  - 当前位置：0x01000000（低地址，能访问）
+  - gdt_page 链接地址：0xFFFFFFFF82345000（高地址，未映射）
+  - 直接用链接地址 → #PF（页面不存在）
+
+解决方案：
+  - 使用 RIP 相对寻址：leaq gdt_page(%rip), %rax
+  - 计算相对偏移：offset = 0x82345000 - 0x81000000 = 0x01345000
+  - 实际地址：0x01000000 + 0x01345000 = 0x02345000
+  - 这是当前可访问的低地址 ✅
+```
 
 ---
 
@@ -172,7 +365,7 @@ LOCAL(gdt):
 1. **首次建立页表**（pgtable）
 2. **首次进入长模式**
 
-### 3.1 压缩内核的 GDT（boot_gdt）
+### 3.1 压缩内核的 GDT（gdt64 + gdt）
 
 #### 为什么要换 GDT
 
@@ -180,33 +373,81 @@ GRUB 的 GDT 有两个问题：
 1. **位置不安全**：GRUB GDT 位于 GRUB 内存区域，内核解压时可能被覆盖
 2. **生命周期不匹配**：GRUB 运行结束后，GRUB GDT 不再可靠
 
-因此，压缩内核必须建立 **自己的 GDT**（boot_gdt）。
+因此，压缩内核必须建立 **自己的 GDT**（gdt64 + gdt）。
 
-#### boot_gdt 的内容
+#### 压缩内核 GDT 的内容（gdt64 + gdt）
 
-boot_gdt 定义在 `arch/x86/boot/compressed/head_64.S`：
+压缩内核的 GDT 结构定义在 `arch/x86/boot/compressed/head_64.S:491-505`：
 
 ```assembly
-# 简化版本（实际定义更复杂）
-    .data
-boot_gdt:
-    .quad   0x0000000000000000        # NULL 段
-    .quad   0x00af9a000000ffff        # 64位代码段（__KERNEL_CS）
-    .quad   0x00cf92000000ffff        # 数据段（__KERNEL_DS）
-    .quad   0x00cf9a000000ffff        # 32位兼容代码段
+# arch/x86/boot/compressed/head_64.S
+# 结构 1：64 位 GDT 描述符（GDTR）
+SYM_DATA_START_LOCAL(gdt64)
+    .word   gdt_end - gdt - 1        # Limit: GDT 表大小 - 1
+    .quad   gdt - gdt64               # Base: gdt 相对于 gdt64 的偏移
+SYM_DATA_END(gdt64)
+
+    .balign 8
+# 结构 2：32 位 GDT 描述符 + GDT 表（巧妙的二合一设计）
+SYM_DATA_START_LOCAL(gdt)
+    # ===== 前 10 字节：可作为 32 位 GDTR =====
+    .word   gdt_end - gdt - 1        # Limit（2 字节）
+    .long   0                         # Base 低 32 位（运行时填充，4 字节）
+    .word   0                         # Base 高 16 位 + 填充（2 字节）
+    # 注：32 位模式只使用 6 字节（limit + base），
+    #     但为了 8 字节对齐，定义了 10 字节
+
+    # ===== 从这里开始是实际的 GDT 段描述符 =====
+    .quad   0x00cf9a000000ffff       # GDT[1]: __KERNEL32_CS (32位代码段)
+    .quad   0x00af9a000000ffff       # GDT[2]: __KERNEL_CS (64位代码段)
+    .quad   0x00cf92000000ffff       # GDT[3]: __KERNEL_DS (数据段)
+    .quad   0x0080890000000000       # GDT[4]: TS descriptor
+    .quad   0x0000000000000000       # GDT[5]: TS continued
+SYM_DATA_END_LABEL(gdt, SYM_L_LOCAL, gdt_end)
 ```
 
-**四个段描述符**：
-1. **NULL 段**：必须存在，未使用
-2. **64位代码段**：L=1（长模式），用于 startup_64
-3. **数据段**：DS, ES, SS 使用
-4. **32位兼容代码段**：startup_32 使用
+**设计巧妙之处**：
 
-#### boot_gdt 的生命周期
+1. **gdt64 结构**（10 字节）：
+   - 专门给 **64 位模式**使用的 GDTR
+   - 8 字节 base 地址（64 位地址空间）
+   - 使用相对偏移（`gdt - gdt64`），便于重定位
 
-- **加载时机**：startup_32 早期加载（`lgdt boot_gdt`）
+2. **gdt 结构**（自包含设计）：
+   - **前 10 字节**：可以作为 **32 位模式** GDTR（6 字节有效 + 4 字节填充）
+   - **第 10 字节之后**：实际的 GDT 段描述符表
+   - 一个结构，两种用途！
+
+**加载方式对比**：
+
+```assembly
+# 方式 1：32 位模式（startup_32，第 106-108 行）
+leal    rva(gdt)(%ebp), %eax    # %eax = gdt 的物理地址
+movl    %eax, 2(%eax)            # 填充 base 字段（gdt 结构的 2-5 字节）
+lgdt    (%eax)                   # 加载：使用 gdt 前 6 字节作为 32 位 GDTR
+
+# 方式 2：64 位模式（startup_64，第 359-361 行）
+leaq    gdt64(%rip), %rax        # %rax = gdt64 的地址
+addq    %rax, 2(%rax)            # 修正 base 地址（gdt64 的相对偏移改为绝对地址）
+lgdt    (%rax)                   # 加载：使用 gdt64 作为 64 位 GDTR
+
+# 方式 3：64 位模式重定位后（startup_64，第 433-436 行）
+leaq    rva(gdt64)(%rbx), %rax  # 重定位后的 gdt64 地址
+leaq    rva(gdt)(%rbx), %rdx    # 重定位后的 gdt 地址
+movq    %rdx, 2(%rax)            # 更新 gdt64 的 base 指向新的 gdt 位置
+lgdt    (%rax)                   # 重新加载
+```
+
+**段选择子**：
+- `__KERNEL32_CS = 0x10`：GDT[1]，32 位代码段（startup_32 使用）
+- `__KERNEL_CS = 0x18`：GDT[2]，64 位代码段（startup_64 使用）
+- `__KERNEL_DS = 0x20`：GDT[3]，数据段
+
+#### 压缩内核 GDT 的生命周期
+
+- **加载时机**：startup_32 早期加载（`lgdt gdt`，head_64.S:108）
 - **使用期间**：startup_32 → startup_64 → 解压内核 → 跳转到主内核早期
-- **废弃时机**：主内核设置 gdt_page 后，boot_gdt 所在内存被释放
+- **废弃时机**：主内核调用 startup_64_setup_gdt_idt() 切换到 gdt_page 后被释放
 
 > **详细的 struct desc_struct 定义和 GDT_ENTRY_INIT 宏请参考 [实现篇](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)**
 
@@ -293,7 +534,7 @@ pgtable:
 └─────────────────────────────────────────────────────────────┘
                         ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. 加载 boot_gdt (lgdt boot_gdt)                            │
+│ 1. 加载 GDT (lgdt gdt)  # 使用 gdt 结构（32位模式）        │
 └─────────────────────────────────────────────────────────────┘
                         ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -329,7 +570,7 @@ pgtable:
 
 | 步骤 | CPU 状态 | 关键寄存器 | 说明 |
 |------|---------|-----------|------|
-| 步骤1 | 32位保护模式 | GDTR = boot_gdt | 切换到内核自己的 GDT |
+| 步骤1 | 32位保护模式 | GDTR = gdt | 切换到内核自己的 GDT (32位模式加载) |
 | 步骤2 | 32位保护模式 | - | 页表已存在但未激活 |
 | 步骤3-4 | 32位保护模式 | CR4.PAE=1, CR3=pgtable | PAE 已启用，页表已加载 |
 | 步骤5 | 32位保护模式 | EFER.LME=1 | 长模式已启用但未激活 |
@@ -360,7 +601,7 @@ pgtable:
 jmp *%rax  // 跳转到解压后的主内核入口（startup_64）
 ```
 
-**演化意义**：此时进入主内核阶段，boot_gdt 和 pgtable 即将被废弃。
+**演化意义**：此时进入主内核阶段，压缩内核的 gdt/gdt64 和 pgtable 即将被废弃。
 
 ---
 
@@ -372,10 +613,10 @@ jmp *%rax  // 跳转到解压后的主内核入口（startup_64）
 
 #### 为什么再次换 GDT
 
-压缩内核的 boot_gdt 有三个限制：
-1. **段数量少**：只有 4 个段，不足以支持完整功能
+压缩内核的 GDT (gdt64 + gdt) 有三个限制：
+1. **段数量少**：只有 5 个显式段（GDT[1-5]），不足以支持完整功能
 2. **不支持 Per-CPU**：单一 GDT 无法支持多 CPU
-3. **会被释放**：boot_gdt 所在内存（压缩内核段）会被释放回收
+3. **会被释放**：gdt/gdt64 所在内存（压缩内核段）会被释放回收
 
 主内核需要 **gdt_page**：
 - **Per-CPU 架构**：每个 CPU 有自己的 GDT
@@ -442,23 +683,39 @@ __USER_CS     = 0x30
 
 入口：
 ```c
-// arch/x86/kernel/head_64.S
+// arch/x86/kernel/head_64.S:74
 SYM_CODE_START_NOALIGN(startup_64)
     call startup_64_setup_gdt_idt  // 设置早期 GDT
 ```
 
-加载 **early_gdt_descr**：
-```assembly
-early_gdt_descr:
-    .word   GDT_ENTRIES*8-1
-    .quad   INIT_PER_CPU_VAR(gdt_page)
+**GDT 描述符的构建方式**：
+```c
+// arch/x86/boot/startup/gdt_idt.c:49-70
+void __head startup_64_setup_gdt_idt(void)
+{
+    // 使用 RIP 相对寻址获取 gdt_page 地址
+    struct gdt_page *gp = rip_rel_ptr((void *)&gdt_page);
+
+    // 在栈上动态构建 GDT 描述符
+    struct desc_ptr startup_gdt_descr = {
+        .address = (unsigned long)gp->gdt,
+        .size = GDT_SIZE - 1
+    };
+
+    // 加载 GDT
+    native_load_gdt(&startup_gdt_descr);
+
+    // 重载段寄存器...
+}
 ```
 
 **特点**：
+- **动态构建**：在栈上构建 `desc_ptr` 结构（不是静态定义的数据）
+- **RIP 相对寻址**：使用 `rip_rel_ptr()` 计算 gdt_page 的当前可访问地址
 - 使用 gdt_page 结构，但此时还是单一的（BSP 的 gdt_page）
 - 所有 CPU 共享同一个 GDT（Per-CPU 机制尚未建立）
 
-> **关键技术细节**：`startup_64_setup_gdt_idt()` 函数使用 **RIP 相对寻址**（`rip_rel_ptr(&gdt_page)`）来计算 gdt_page 的地址，而不是直接使用 `early_gdt_descr` 的链接时地址。这是因为在 startup_64 早期，代码可能还在低地址运行，链接时地址（高地址）还未映射。详细的地址计算方式对比请参考 **[实现篇 1.3.5节](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md#135-关键对比early_gdt_descr-vs-startup_64_setup_gdt_idt)**。
+> **架构说明**：64 位内核（x86_64）不使用静态的 `early_gdt_descr` 数据结构。`early_gdt_descr` 只存在于 32 位内核（i386）的 `arch/x86/kernel/head_32.S` 中。64 位内核通过 `startup_64_setup_gdt_idt()` 函数动态构建 GDT 描述符，使用 **RIP 相对寻址**来适应启动早期的低地址环境。详细的技术细节请参考 **[实现篇 1.3.5节](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md#135-64位vs32位gdt描述符加载方式)**。
 
 **2. Per-CPU GDT（setup_per_cpu_areas）**
 
@@ -601,7 +858,7 @@ start_kernel()
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  GRUB GDT   │ →   │  boot_gdt   │ →   │  gdt_page   │
+│  GRUB GDT   │ →   │ gdt64+gdt   │ →   │  gdt_page   │
 │  (GRUB区)   │     │  (内核镜像) │     │  (Per-CPU)  │
 └─────────────┘     └─────────────┘     └─────────────┘
   GRUB 运行期       压缩→主内核早期      主内核运行期
@@ -609,9 +866,9 @@ start_kernel()
 
 #### 三套 GDT 对比表
 
-| 特性 | GRUB GDT | boot_gdt | gdt_page |
+| 特性 | GRUB GDT | 压缩内核 GDT (gdt64+gdt) | gdt_page |
 |------|---------|----------|----------|
-| **段数量** | 4个（NULL + CS + DS + 32位CS） | 4个（NULL + 64位CS + DS + 32位CS） | 32个（内核/用户/TSS/LDT...） |
+| **段数量** | 4个（NULL + CS + DS + 32位CS） | 5个显式段（GDT[1-5]: 32位CS + 64位CS + DS + TSS） | 32个（内核/用户/TSS/LDT...） |
 | **生命周期** | GRUB 运行期 | 压缩内核 → 主内核早期 | 主内核运行期（永久） |
 | **位置** | GRUB 内存区 | 内核镜像 .data 段 | Per-CPU 区域 |
 | **CPU 支持** | 单 CPU | 单 CPU（BSP） | Per-CPU（每个 CPU 独立） |
@@ -625,12 +882,12 @@ start_kernel()
 - **必要性**：从实模式进入保护/长模式必须有 GDT
 - **局限性**：位于 GRUB 内存，内核运行后不可靠
 
-**2. boot_gdt**：
+**2. 压缩内核 GDT (gdt64 + gdt)**：
 - **必要性**：GRUB GDT 会被覆盖，需要内核自己的 GDT
-- **局限性**：段数量少，不支持 Per-CPU 和用户态
+- **局限性**：段数量少（仅5个），不支持 Per-CPU 和用户态
 
 **3. gdt_page**：
-- **必要性**：boot_gdt 被释放，需要永久 GDT
+- **必要性**：压缩内核 GDT 被释放，需要永久 GDT
 - **完整功能**：Per-CPU、用户态、TSS、系统调用
 
 ### 页表演化全程
@@ -669,7 +926,7 @@ start_kernel()
 |------|---------|-----|------|---------|---------|
 | **① BIOS** | 实模式 | 无 | 无 | 1MB 直接寻址 | 段基址 × 16 + 偏移 |
 | **② GRUB** | 保护模式 | GRUB GDT | 无(CR0.PG=0) | 扁平模式 | 线性地址 = 物理地址 |
-| **③ 压缩内核** | 长模式 | boot_gdt | pgtable | Identity (VA=PA) | 首次启用分页 |
+| **③ 压缩内核** | 长模式 | gdt64+gdt | pgtable | Identity (VA=PA) | 首次启用分页 |
 | **④ 主内核** | 长模式 | gdt_page | swapper_pg_dir | Direct (VA=PA+⊿) | 完整内存管理 |
 
 **关键演化时刻**：
@@ -725,7 +982,7 @@ start_kernel()
 |------|-----------|-----------|------|
 | BIOS | - | - | 实模式无 GDTR |
 | GRUB | GRUB GDT 地址 | 23 (3个段 × 8 - 1) | GRUB 内存区 |
-| 压缩内核 | boot_gdt 地址 | 31 (4个段 × 8 - 1) | 内核镜像 .data |
+| 压缩内核 | gdt 地址 | 47 (6个GDT项 × 8 - 1) | 内核镜像 .data |
 | 主内核早期 | gdt_page 地址 | 255 (32个段 × 8 - 1) | 共享 gdt_page |
 | 主内核运行 | Per-CPU gdt_page | 255 | 每 CPU 独立 |
 

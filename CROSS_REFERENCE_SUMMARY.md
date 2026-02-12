@@ -1,8 +1,88 @@
 # 文档交叉引用总结
 
-## 最新更新（2026-02-07）
+## 最新更新（2026-02-12）
 
-### 硬件中断、软件中断、异常的系统性对比说明
+### 中断/异常/陷阱基础概念文档重组
+
+**新建独立基础文档**：
+- `X86_INTERRUPT_EXCEPTION_TRAP.md` - x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现
+
+**涉及文档**：
+- `X86_INTERRUPT_EXCEPTION_TRAP.md`（新建）
+- `LINUX_INTERRUPT_GUIDE.md`（更新）
+- `LINUX_KERNEL_INIT.md`（更新）
+- `LINUX_KERNEL_IDT_EVOLUTION.md`（更新）
+- `LINUX_KERNEL_SYSCALL_INIT.md`（更新）
+
+**更新内容**：
+
+1. **X86_INTERRUPT_EXCEPTION_TRAP.md - 新建基础理论文档**：
+   - **Intel SDM 官方定义**：Interrupt vs Exception 的权威定义（基于 SDM Volume 3A Chapter 6）
+   - **三者的本质区别**：完整对比表（触发方式、IF 控制、优先级、DPL 等）
+   - **Exception 的三种类型**：
+     - Fault（故障）：保存 EIP 指向引起故障的指令，可恢复（如 #PF, #GP）
+     - Trap（陷阱）：保存 EIP 指向下一条指令，可恢复（如 #BP, #OF）
+     - Abort（中止）：EIP 不可靠，不可恢复（如 #DF, #MC）
+   - **中断/异常优先级**：基于 Intel SDM Table 6-2，说明为什么异常优先于硬件中断
+   - **IDT 门描述符类型**：Interrupt Gate vs Trap Gate，为什么 Linux 只用 Interrupt Gate
+   - **Linux 内核实现**：异常向量定义、Event Type、IDT 布局、初始化流程
+   - **常见误解澄清**：5 个常见误解及其正确理解
+   - **文档规模**：600+ 行，完整独立体系
+
+2. **LINUX_INTERRUPT_GUIDE.md - 删除重复内容，引用基础文档**：
+   - 删除原有的"基础概念：硬件中断、软件中断、异常的本质区别"章节
+   - 在开头"相关文档"部分添加对 X86_INTERRUPT_EXCEPTION_TRAP.md 的引用
+   - 在"IDT 与中断类型概览"添加引用说明
+
+3. **LINUX_KERNEL_INIT.md - 更新引用**：
+   - 更新"Q: 硬件中断、软件中断、异常有什么本质区别？"章节
+   - 改为引用 X86_INTERRUPT_EXCEPTION_TRAP.md，并提供简短答案
+   - 在"相关文档 > 中断与系统调用"部分添加新文档（第一位置）
+
+4. **LINUX_KERNEL_IDT_EVOLUTION.md - 添加基础文档引用**：
+   - 在"相关文档"部分添加 X86_INTERRUPT_EXCEPTION_TRAP.md（第一位置）
+
+5. **LINUX_KERNEL_SYSCALL_INIT.md - 更新引用**：
+   - 在"相关文档"部分更新引用，指向新的基础文档
+
+**文档引用关系图（中断/异常）**：
+
+```
+基础理论层（x86 架构）
+  ├─ X86_INTERRUPT_EXCEPTION_TRAP.md ⭐ 新建
+  │   └─ Intel SDM 规范 + 三者本质区别 + Exception 分类
+  └─ X86_INTERRUPT_CONTROLLER_EVOLUTION.md
+      └─ 硬件：PIC/APIC
+
+Linux 实现层
+  ├─ LINUX_KERNEL_IDT_EVOLUTION.md
+  │   └─ IDT 表演进（引用基础理论）
+  ├─ LINUX_KERNEL_SYSCALL_INIT.md
+  │   └─ 系统调用初始化（引用基础理论）
+  ├─ LINUX_INTERRUPT_GUIDE.md
+  │   └─ Top/Bottom Half（引用基础理论）
+  └─ LINUX_KERNEL_INIT.md
+      └─ 内核启动流程（引用基础理论）
+```
+
+**核心价值**：
+- **结构清晰**：基础概念独立成文，与实现文档分离
+- **权威准确**：基于 Intel SDM 官方定义和 Linux 源码验证
+- **引用合理**：所有 Linux 实现文档引用基础理论文档
+- **易于维护**：单一信息源，避免重复和不一致
+- **完整性**：涵盖 Intel SDM 规范、Exception 分类、Linux 实现、误解澄清
+
+**参考来源**：
+- Intel SDM Volume 3A Chapter 6: Interrupt and Exception Handling
+- Linux 内核源码：`arch/x86/include/asm/trapnr.h`, `arch/x86/kernel/idt.c`, `arch/x86/kernel/traps.c`
+
+---
+
+## 历史更新（2026-02-07）
+
+### 硬件中断、软件中断、异常的系统性对比说明（已合并到新文档）
+
+**注**：此章节内容已合并到 `X86_INTERRUPT_EXCEPTION_TRAP.md`，以下为历史记录。
 
 **涉及文档**：
 - `LINUX_KERNEL_INIT.md`
