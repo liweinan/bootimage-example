@@ -491,9 +491,10 @@ vmlinuz 结构：
 
 ## 参考资料
 
-- Linux 源代码：`arch/x86/boot/compressed/head_64.S`
-- Linux 源代码：`arch/x86/boot/compressed/misc.c:389-403`
-- Linux 源代码：`arch/x86/boot/header.S:428-509`
+- Linux 源代码：
+  - `arch/x86/boot/compressed/head_64.S` - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/boot/compressed/head_64.S`
+  - `arch/x86/boot/compressed/misc.c` - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/boot/compressed/misc.c`
+  - `arch/x86/boot/header.S` - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/boot/header.S`
 - 详细分析专题：
   - [SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md) - 完整答案：为什么 extract_kernel 不被覆盖
   - [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) - KASLR 与重定位的必要性

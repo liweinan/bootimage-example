@@ -722,8 +722,8 @@ dd if=/Users/weli/works/qemu/pc-bios/bios.bin bs=1 skip=$((0x1FFF0)) count=16 2>
 
 ## 参考资料
 
-1. SeaBIOS 源代码: `/Users/weli/works/seabios/src/romlayout.S`
-2. fill.txt 文档: `/Users/weli/works/qemu/fill.txt`
+1. SeaBIOS 源代码: `https://github.com/qemu/seabios/blob/master/src/romlayout.S`
+2. fill.txt 文档（QEMU 开发笔记）：可通过 QEMU 源码仓库查找相关说明文档
 3. IBM PC Technical Reference Manual (1981/1984)
-4. Ralf Brown's Interrupt List
+4. Ralf Brown's Interrupt List: `http://www.ctyme.com/rbrown.htm`
 

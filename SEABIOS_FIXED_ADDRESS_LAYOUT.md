@@ -249,10 +249,10 @@ int 0x10        ; 触发 INT 10h
 ## 参考资料
 
 1. **IBM Personal Computer Technical Reference Manual** (1981/1984)
-2. **Ralf Brown's Interrupt List** - http://www.ctyme.com/rbrown.htm
-3. **SeaBIOS Source Code** - `~/works/seabios`
-   - `src/romlayout.S` - ORG 宏定义和固定地址入口
-   - `src/post.c` - POST 流程
+2. **Ralf Brown's Interrupt List** - `http://www.ctyme.com/rbrown.htm`
+3. **SeaBIOS Source Code** - `https://github.com/qemu/seabios`
+   - `src/romlayout.S` - ORG 宏定义和固定地址入口 - `https://github.com/qemu/seabios/blob/master/src/romlayout.S`
+   - `src/post.c` - POST 流程 - `https://github.com/qemu/seabios/blob/master/src/post.c`
    - `src/clock.c`, `src/kbd.c`, `src/disk.c` - 各种 BIOS 服务实现
 4. **Phoenix BIOS Specification**
 5. **Award BIOS Specification**

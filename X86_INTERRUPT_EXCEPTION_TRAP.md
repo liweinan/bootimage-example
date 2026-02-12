@@ -793,13 +793,13 @@ cli;  // EFLAGS.IF = 0
 
 1. **Intel® 64 and IA-32 Architectures Software Developer's Manual**
    - Volume 3A, Chapter 6: Interrupt and Exception Handling
-   - `/Users/weli/Desktop/64-ia-32-architectures-software-developer-vol-3a-part-1-manual.pdf`
+   - `https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html`
 
 2. **Linux Kernel Source Code**
-   - `/Users/weli/works/linux/arch/x86/include/asm/trapnr.h` - 异常向量定义
-   - `/Users/weli/works/linux/arch/x86/include/asm/irq_vectors.h` - IRQ 向量布局
-   - `/Users/weli/works/linux/arch/x86/kernel/idt.c` - IDT 初始化
-   - `/Users/weli/works/linux/arch/x86/kernel/traps.c` - 异常处理器
+   - `arch/x86/include/asm/trapnr.h` - 异常向量定义 - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/trapnr.h`
+   - `arch/x86/include/asm/irq_vectors.h` - IRQ 向量布局 - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/irq_vectors.h`
+   - `arch/x86/kernel/idt.c` - IDT 初始化 - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/kernel/idt.c`
+   - `arch/x86/kernel/traps.c` - 异常处理器 - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/kernel/traps.c`
 
 3. **AMD64 Architecture Programmer's Manual**
    - Volume 2: System Programming

@@ -989,9 +989,10 @@ startup_64:
 
 ## 参考资料
 
-- Linux 内核源代码：`arch/x86/boot/startup/`
-- Linux 内核源代码：`arch/x86/include/asm/linkage.h`
-- Linux 内核源代码：`arch/x86/include/asm/init.h`
+- Linux 内核源代码：
+  - `arch/x86/boot/startup/` - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/boot/startup`
+  - `arch/x86/include/asm/linkage.h` - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/linkage.h`
+  - `arch/x86/include/asm/init.h` - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/init.h`
 - Linux 内核文档：Position Independent Executables (PIE)
 - x86-64 ABI 规范：RIP-relative addressing
 - 详细流程分析：[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)

@@ -986,9 +986,10 @@ Direct Mapping:
 ## 参考资料
 
 1. Linux Kernel Source
-   - `arch/x86/boot/compressed/head_64.S` - Identity mapping 构建代码
-   - `arch/x86/kernel/head_64.S` - 主内核页表初始化
-   
+   - `arch/x86/boot/compressed/head_64.S` - Identity mapping 构建代码 - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/boot/compressed/head_64.S`
+   - `arch/x86/kernel/head_64.S` - 主内核页表初始化 - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/kernel/head_64.S`
+
 2. Intel® 64 and IA-32 Architectures Software Developer's Manual Volume 3A
    - Chapter 4: Paging
    - Section 4.5: 4-Level Paging
+   - `https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html`

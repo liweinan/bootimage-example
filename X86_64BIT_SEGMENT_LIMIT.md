@@ -470,7 +470,8 @@ uint64_t value = *(uint64_t *)kernel_ptr;  // ✅ 合法（如果页存在）
 1. Intel® 64 and IA-32 Architectures Software Developer's Manual Volume 3A
    - Section 3.2.4: Segmentation in IA-32e Mode
    - Section 5.3.1: Limit Checking in 64-bit Mode
-   
+   - `https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html`
+
 2. Linux Kernel Source
-   - `arch/x86/kernel/head_64.S` - 内核 GDT 定义
-   - `arch/x86/include/asm/segment.h` - 段定义和宏
+   - `arch/x86/kernel/head_64.S` - 内核 GDT 定义 - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/kernel/head_64.S`
+   - `arch/x86/include/asm/segment.h` - 段定义和宏 - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/segment.h`
