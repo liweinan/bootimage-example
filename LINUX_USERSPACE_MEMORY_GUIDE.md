@@ -19,7 +19,7 @@
 - `arch/x86/kernel/process_64.c` - arch_prctl() 系统调用（FS/GS 设置）
 - `arch/x86/include/asm/fsgsbase.h` - FS/GS 寄存器操作
 
-**学习路径建议**：查看 [内存管理文档完整导读](LINUX_KERNEL_INIT.md#交叉引用与深入阅读) 了解推荐阅读顺序
+**学习路径建议**：查看 [内存管理文档完整导读](LINUX_KERNEL_INIT.md#相关文档) 了解推荐阅读顺序
 
 ---
 
