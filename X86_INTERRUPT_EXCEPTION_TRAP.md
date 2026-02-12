@@ -2,6 +2,9 @@
 
 本文档基于 **Intel Software Developer Manual (SDM) Volume 3A Chapter 6** 和 **Linux 内核源码**，详细阐述 x86 架构中 Interrupt（中断）、Exception（异常）、Trap（陷阱）的本质区别及其在 Linux 内核中的实现。
 
+**补充文档**：
+- **[x86 异常的硬件触发机制：Page Fault 与 Breakpoint 深入剖析](X86_EXCEPTION_HARDWARE_TRIGGER.md)** - 通过实际案例详解异常的硬件触发流程、向量号的硬件规范、以及软件职责边界
+
 ---
 
 ## 目录
@@ -769,6 +772,7 @@ cli;  // EFLAGS.IF = 0
 
 ### 8.2 Linux 中断系统
 
+- **[X86_EXCEPTION_HARDWARE_TRIGGER.md](X86_EXCEPTION_HARDWARE_TRIGGER.md)** - 异常的硬件触发机制：Page Fault 与 Breakpoint 深入剖析（本文档补充）
 - **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解
 - **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - 系统调用初始化详解（INT 0x80 vs SYSCALL/SYSENTER）
 - **[LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)** - Linux 中断处理机制（Top Half/Bottom Half）
