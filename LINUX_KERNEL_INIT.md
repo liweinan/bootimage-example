@@ -1471,11 +1471,22 @@ static const struct idt_data ia32_idt[] __initconst = {
 
 ### 内存管理
 
+**理论基础**：
+- **[WHY_VIRTUAL_MEMORY.md](WHY_VIRTUAL_MEMORY.md)** - 为什么需要虚拟内存 - 从物理地址的缺陷到分页的必然性、碎片化问题的数学分析、工作集理论与局部性原理、性能代价分析、历史案例对比
+
+**内核空间内存管理**：
 - **[LINUX_MEMORY_MANAGEMENT_EVOLUTION.md](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - Linux 内核分页机制完整指南 - 理论基础、Phase 1 早期页表、Phase 2 完整页表（E820/memblock/zone）
 - **[E820_MEMORY_MAP.md](E820_MEMORY_MAP.md)** - E820 内存映射表详解 - E820 数据结构、内核接收流程、与分页机制的分阶段依赖关系（为何早期不需要 E820、后期必须依赖 E820）、驱动页表初始化的详细代码分析
 - **[X86_MEMORY_MANAGEMENT_THEORY.md](X86_MEMORY_MANAGEMENT_THEORY.md)** - GDT 详解：从保护模式到长模式 - GDT 演化（4阶段）、段描述符详解、与分页的协作、GDT Identity Mapping 机制
 - **[LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)** - x86-64 多级页表设计详解 - 页表建立过程、硬件要求、多级设计原理、MMU 遍历伪代码、实战计算示例
+
+**物理内存分配**：
 - **[BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md)** - 伙伴系统与 Slab 分配器详解 - 伙伴系统原理与实现、Slab/SLUB 分配器、从 memblock 到 buddy 的转换
+- **[SLAB_ALLOCATOR_EXPLAINED.md](SLAB_ALLOCATOR_EXPLAINED.md)** - Slab 分配器专题深入 - 三层架构详解、性能优化、SLUB/SLUB_TINY、安全加固特性、实战使用与调试
+
+**运行时内存管理**：
+- **[LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)** - 缺页异常与按需分配 - Page Fault 完整流程、TLB/MMU 工作机制、错误码分析、内核处理路径
+- **[LINUX_USERSPACE_MEMORY_GUIDE.md](LINUX_USERSPACE_MEMORY_GUIDE.md)** - 用户空间内存模型 - 虚拟地址空间布局、VMA 管理、brk/mmap 系统调用、FS/GS 寄存器、地址转换完整流程
 
 ### 架构细节
 
