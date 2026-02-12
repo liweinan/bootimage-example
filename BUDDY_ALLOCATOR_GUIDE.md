@@ -2,23 +2,27 @@
 
 ## 文档定位
 
-本文档详细介绍 Linux 内核的**物理内存分配体系**，包括伙伴系统（Buddy Allocator）和 Slab 分配器（Slab/SLUB/SLOB）的实现原理、数据结构和使用方法。
+本文档详细介绍 Linux 内核的**物理页框分配体系**，以**伙伴系统（Buddy Allocator）**为核心，兼顾 Slab 分配器在整体架构中的位置。
 
-**核心内容**：
-- 内核内存分配的层次结构
-- 伙伴系统的原理与实现
-- Slab 分配器的设计与优化
-- 从 memblock 到 buddy allocator 的过渡
+**核心聚焦**：
+- ✅ **伙伴系统**的原理、算法、反碎片化机制（核心重点）
+- ✅ **memblock → buddy** 的启动时过渡流程
+- ✅ **zone 管理**、水位线、GFP 标志
+- ⚠️  **Slab 概览**：与伙伴系统的协作关系（详细内容见专题文档）
 
 **适合读者**：
-- 想深入理解内核内存管理的开发者
-- 需要优化内存分配性能的系统程序员
-- 对操作系统底层实现感兴趣的学习者
+- 想深入理解伙伴系统实现的开发者
+- 需要优化大块内存分配的系统程序员
+- 对物理页框管理感兴趣的学习者
+
+**文档分工**：
+- **本文档**：伙伴系统 + 内存分配体系全景
+- **[Slab 分配器原理与实践](SLAB_ALLOCATOR_EXPLAINED.md)**：Slab 专题深入教程
 
 **相关文档**：
-- [Slab 分配器原理与实践](SLAB_ALLOCATOR_EXPLAINED.md) - Slab 分配器的原理教学（推荐先读）
-- [Linux 内核分页机制完整指南](LINUX_PAGING_COMPLETE_GUIDE.md) - 页表管理与物理内存分配的关系
+- [Slab 分配器原理与实践](SLAB_ALLOCATOR_EXPLAINED.md) - **推荐配合阅读**
 - [Linux 内核启动流程](LINUX_KERNEL_INIT.md) - memblock 和 buddy 系统的初始化时机
+- [Linux 内存管理演化](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md) - 从 BIOS 到内核的内存管理演化
 
 ---
 
@@ -454,6 +458,11 @@ static struct page *__alloc_pages_nodemask(gfp_t gfp_mask,
 
 ## 三、Slab 分配器
 
+> **深入学习 Slab 分配器**（架构设计、性能分析、实战示例、安全特性等），请参见：
+> [Slab 分配器原理与实践](SLAB_ALLOCATOR_EXPLAINED.md) - 完整的专题教程
+
+本章节聚焦于 **Slab 在内核内存分配体系中的位置**，以及它与伙伴系统的协作关系。
+
 ### 3.1 Slab 的必要性
 
 **为什么需要 Slab 分配器？**
@@ -480,6 +489,8 @@ static struct page *__alloc_pages_nodemask(gfp_t gfp_mask,
 
 ### 3.2 Slab 核心概念
 
+**三层架构**：Cache（缓存）→ Slab（物理页容器）→ Object（对象）
+
 ```
 Slab 分配器架构：
 
@@ -493,7 +504,7 @@ Slab 分配器架构：
 │      CPU 1: [obj4] [obj5] [obj6] ...                    │
 ├─────────────────────────────────────────────────────────┤
 │  Slab (物理页容器)                                       │
-│  ├─ 从伙伴系统申请的连续物理页（1-8 页）                 │
+│  ├─ 从伙伴系统申请的连续物理页（1-8 页）← 关键：Slab 依赖 Buddy │
 │  ├─ 切割成固定大小的对象                                 │
 │  └─ 状态：满/部分满/空                                   │
 │      ┌──────┬──────┬──────┬──────┬──────┐              │
@@ -502,196 +513,25 @@ Slab 分配器架构：
 └─────────────────────────────────────────────────────────┘
 ```
 
-**核心数据结构关系**：
+**Slab 与伙伴系统的协作**：
+1. **后端分配**：Slab 需要新页面时，调用 `alloc_pages()` 从伙伴系统获取
+2. **批量申请**：一次申请 1-8 页，避免频繁调用伙伴系统
+3. **碎片优化**：多个小对象共享同一页，减少伙伴系统的外部碎片
 
-```
-kmem_cache (缓存)
-    ├─ cpu_slab (Per-CPU)
-    │   ├─ freelist: 空闲对象链表
-    │   └─ page: 当前使用的 slab 页面
-    ├─ node[N] (Per-NUMA-Node)
-    │   ├─ partial: 部分满的 slab 链表
-    │   ├─ full: 满的 slab 链表（SLUB 不维护）
-    │   └─ nr_partial: 部分满 slab 数量
-    └─ 对象元数据
-        ├─ size: 对象大小
-        ├─ align: 对齐要求
-        ├─ ctor: 构造函数
-        └─ flags: 缓存标志
-```
+### 3.3 Slab 分配流程概览
 
-### 3.3 SLUB 分配器（当前主流）
+**快速路径**（无锁，极快）：
+1. 从 Per-CPU freelist 获取空闲对象
+2. 直接返回（约 10-20 CPU 周期）
 
-Linux 内核目前主要使用 **SLUB** 分配器（SL: 前缀来自 Slab，UB: Unqueued Buddy）。
+**慢速路径**（需要锁，较慢）：
+1. 尝试从 Per-CPU partial 链表获取 slab
+2. 尝试从 Per-Node partial 链表获取 slab
+3. **调用 `alloc_pages()` 从伙伴系统分配新页面** ← 关键协作点
+4. 初始化 slab，构建 freelist
 
-#### 3.3.1 SLUB 核心数据结构
-
-```c
-// Linux Kernel - include/linux/slub_def.h
-
-struct kmem_cache {
-    /* Per-CPU slab */
-    struct kmem_cache_cpu __percpu *cpu_slab;
-
-    /* Per-Node slab 链表 */
-    struct kmem_cache_node *node[MAX_NUMNODES];
-
-    /* 对象属性 */
-    unsigned int size;          // 对象大小（包括元数据）
-    unsigned int object_size;   // 实际对象大小
-    unsigned int offset;        // freelist 指针偏移
-    unsigned int align;         // 对齐要求
-
-    /* Slab 分配参数 */
-    gfp_t allocflags;           // 分配标志
-    int refcount;               // 引用计数
-    void (*ctor)(void *);       // 构造函数
-
-    /* 缓存名称 */
-    const char *name;
-
-    /* 链表节点（所有缓存的链表） */
-    struct list_head list;
-
-    /* ... 更多字段 ... */
-};
-
-struct kmem_cache_cpu {
-    void **freelist;            // 空闲对象链表
-    unsigned long tid;          // Transaction ID（检测竞态）
-    struct page *page;          // 当前 slab 页面
-    struct page *partial;       // 本地部分满 slab 链表
-};
-
-struct kmem_cache_node {
-    spinlock_t list_lock;       // 保护链表的锁
-    unsigned long nr_partial;   // 部分满 slab 数量
-    struct list_head partial;   // 部分满 slab 链表
-    atomic_long_t nr_slabs;     // 总 slab 数量
-    atomic_long_t total_objects;// 总对象数量
-};
-```
-
-#### 3.3.2 SLUB 分配流程
-
-```c
-// Linux Kernel - mm/slub.c
-
-/*
- * SLUB 分配流程（快速路径）
- */
-void *kmem_cache_alloc(struct kmem_cache *s, gfp_t gfpflags)
-{
-    void *ret;
-
-    /* 快速路径：从 Per-CPU freelist 分配 */
-    ret = slab_alloc(s, gfpflags, _RET_IP_);
-    return ret;
-}
-
-static __always_inline void *slab_alloc(struct kmem_cache *s,
-                                          gfp_t gfpflags,
-                                          unsigned long addr)
-{
-    void **object;
-    struct kmem_cache_cpu *c;
-    unsigned long tid;
-
-    /* 获取 Per-CPU slab */
-    c = this_cpu_ptr(s->cpu_slab);
-    tid = c->tid;
-
-    /* 快速路径：freelist 非空 */
-    object = c->freelist;
-    if (unlikely(!object || !node_match(c, node)))
-        goto slow_path;  // freelist 为空，进入慢速路径
-
-    /* 从 freelist 取出对象 */
-    c->freelist = get_freepointer(s, object);
-    c->tid = next_tid(tid);
-
-    return object;
-
-slow_path:
-    /* 慢速路径：重新加载 slab 或分配新 slab */
-    return __slab_alloc(s, gfpflags, node, addr, c);
-}
-
-/*
- * SLUB 分配流程（慢速路径）
- */
-static void *__slab_alloc(struct kmem_cache *s, gfp_t gfpflags, int node,
-                           unsigned long addr, struct kmem_cache_cpu *c)
-{
-    void *freelist;
-    struct page *page;
-
-    /* 尝试从 Per-CPU partial 链表获取 slab */
-    page = c->page;
-    if (!page) {
-        if (c->partial) {
-            page = c->partial;
-            c->partial = page->next;
-            c->page = page;
-            goto load_freelist;
-        }
-    }
-
-    /* 尝试从 Per-Node partial 链表获取 slab */
-    freelist = get_partial(s, gfpflags, node, c);
-    if (freelist)
-        return freelist;
-
-    /* 都没有，从伙伴系统分配新 slab */
-    page = new_slab(s, gfpflags, node);
-    if (unlikely(!page)) {
-        /* OOM */
-        return NULL;
-    }
-
-    c->page = page;
-
-load_freelist:
-    freelist = page->freelist;
-    page->freelist = NULL;
-    c->freelist = get_freepointer(s, freelist);
-    return freelist;
-}
-
-/*
- * 从伙伴系统分配新 slab
- */
-static struct page *new_slab(struct kmem_cache *s, gfp_t flags, int node)
-{
-    struct page *page;
-    void *start;
-    void *p;
-    int order;
-
-    /* 计算需要多少页（通常 1-2 页） */
-    order = oo_order(s->oo);
-
-    /* 从伙伴系统分配 */
-    page = alloc_slab_page(s, flags, node, order);
-    if (!page)
-        return NULL;
-
-    /* 初始化 slab 页面 */
-    start = page_address(page);
-
-    /* 构建 freelist：将所有对象链接起来 */
-    for (p = start; p < start + s->size * s->objects; p += s->size) {
-        set_freepointer(s, p, p + s->size);
-    }
-    set_freepointer(s, p - s->size, NULL);  // 最后一个指向 NULL
-
-    page->freelist = start;
-    page->inuse = 0;
-    page->frozen = 1;
-
-    return page;
-}
-```
+> **详细的 SLUB 数据结构、分配算法、性能优化**，请参见：
+> [SLAB_ALLOCATOR_EXPLAINED.md - 第二、三、五章](SLAB_ALLOCATOR_EXPLAINED.md#二slab-的三层架构)
 
 ### 3.4 kmalloc() 与通用对象缓存
 

@@ -2,24 +2,29 @@
 
 ## 文档定位
 
-本文档深入讲解 Linux 内核 **Slab 分配器**的设计原理、核心优势和使用方法，采用问题驱动的教学方式，从"为什么需要 Slab"到"如何使用 Slab"，帮助读者全面理解这个关键的内核子系统。
+本文档是 **Slab 分配器的专题深入教程**，采用问题驱动的教学方式，从"为什么需要 Slab"到"如何使用 Slab"，帮助读者全面掌握这个关键的内核子系统。
 
-**核心内容**：
-- Slab 解决的问题（传统页分配器的不足）
-- 三层架构（Cache → Slab → Object）
-- 核心优势（性能、内存利用率、缓存友好性）
-- 实战使用（创建自定义缓存、监控与调试）
-- 现代变体（SLAB/SLUB/SLOB 对比）
-- 局限性与挑战
+**核心内容**（完整覆盖）：
+- ✅ Slab 解决的问题（传统页分配器的不足）
+- ✅ 三层架构（Cache → Slab → Object）详细讲解
+- ✅ 核心优势（性能、内存利用率、缓存友好性）
+- ✅ 现代变体（SLUB、SLUB_TINY、Linux 6.x 更新）
+- ✅ 实战使用（创建自定义缓存、监控与调试）
+- ✅ 安全加固特性（Freelist Randomization、KASAN、Bucket 隔离）
+- ✅ 局限性与挑战
 
 **适合读者**：
 - 内核开发者和系统程序员
-- 想深入理解内核内存管理的学习者
+- 想深入理解 Slab 分配器的学习者
 - 需要优化小对象分配性能的开发者
 
+**文档定位**：
+- **本文档**：Slab 分配器专题深入（教学导向）
+- **[伙伴系统详解](BUDDY_ALLOCATOR_GUIDE.md)**：物理页框分配体系（伙伴系统为核心）
+
 **相关文档**：
+- [伙伴系统与 Slab 分配器详解](BUDDY_ALLOCATOR_GUIDE.md) - **推荐配合阅读**，了解 Slab 与伙伴系统的协作
 - [为什么需要虚拟内存](WHY_VIRTUAL_MEMORY.md) - 前置阅读，理解分页系统的必要性
-- [伙伴系统与 Slab 分配器详解](BUDDY_ALLOCATOR_GUIDE.md) - 深入源码实现
 
 ---
 
@@ -443,11 +448,13 @@ kmalloc(size)
 
 ---
 
-## 五、Slab 的现代变体：SLUB 和 SLOB
+## 五、Slab 的现代变体：SLUB 和 SLUB_TINY
 
-Linux 现在有三种 Slab 实现，满足不同需求：
+**重要说明**：Linux 6.x 已统一使用 **SLUB** 作为唯一的 Slab 实现。传统的 SLAB 和 SLOB 已被移除。
 
-### 5.1 SLAB（经典实现）
+### 5.1 SLAB（经典实现 - 已移除）
+
+**历史地位**：Linux 2.0-5.x 的经典实现，已在 Linux 6.x 移除。
 
 **设计特点**：
 - 复杂的队列、链表管理
@@ -462,6 +469,8 @@ Linux 现在有三种 Slab 实现，满足不同需求：
 - ❌ 代码复杂（~6000 行）
 - ❌ 有锁竞争问题
 - ❌ 元数据开销大
+
+**移除原因**：SLUB 在性能和简洁性上全面超越，维护两套代码不再必要。
 
 ### 5.2 SLUB（默认，Unified Buffering）
 
@@ -485,9 +494,10 @@ struct kmem_cache {
 - 更好的 NUMA 支持
 
 **优点**：
-- ✅ 性能好（比 SLAB 快 10-20%）
-- ✅ 代码简洁（~4000 行）
-- ✅ 锁竞争少
+- ✅ 性能好（比历史 SLAB 快 10-20%）
+- ✅ 代码简洁（~7870 行，含所有优化）
+- ✅ 锁竞争少（使用 Per-CPU local_lock）
+- ✅ 安全加固（Freelist Randomization、Hardened Metadata）
 
 **缺点**：
 - ❌ 可能略微增加内部碎片
@@ -495,7 +505,11 @@ struct kmem_cache {
 
 **适用场景**：大多数现代系统（**Linux 默认选择**）
 
-### 5.3 SLOB（Simple List Of Blocks）
+### 5.3 SLOB（Simple List Of Blocks - 已移除）& SLUB_TINY（替代者）
+
+#### SLOB（历史实现 - 已移除）
+
+**历史地位**：用于极小内存嵌入式系统，已在 Linux 6.x 被 SLUB_TINY 替代。
 
 **设计特点**：
 - 极简设计
@@ -510,7 +524,20 @@ struct kmem_cache {
 - ❌ 性能差（比 SLUB 慢 3-5 倍）
 - ❌ 碎片多
 
-**适用场景**：嵌入式系统（内存 < 64MB）
+#### SLUB_TINY（现代替代方案）
+
+**设计定位**：SLUB 的精简版本，保留核心功能，减少内存占用。
+
+**配置选项**：`CONFIG_SLUB_TINY=y`
+
+**优化措施**：
+- 禁用 Per-CPU 部分缓存
+- 减少统计信息收集
+- 优化元数据大小
+
+**适用场景**：嵌入式系统（内存 < 16MB）
+
+**优势**：相比 SLOB，性能更好且代码统一，易于维护。
 
 ### 5.4 选择策略
 
@@ -544,11 +571,13 @@ CONFIG_SLAB_FREELIST_HARDENED=y # 加固空闲链表元数据（安全加固）
 |           | 分配 | 释放 | 总内存使用 | 相比无 Slab |
 |-----------|-----|-----|----------|-----------|
 | **无 Slab**   | 125 | 110 | 4.0 MB | 基准 |
-| **经典 SLAB** | 28  | 24  | 0.67 MB | **快 4.5 倍，省内存 6 倍** |
-| **SLUB（默认）** | 22 | 19 | 0.69 MB | **快 5.7 倍，省内存 5.8 倍** |
-| **SLOB**     | 85  | 78  | 0.85 MB | **快 1.5 倍，省内存 4.7 倍** |
+| **经典 SLAB**（已移除） | 28  | 24  | 0.67 MB | **快 4.5 倍，省内存 6 倍** |
+| **SLUB（当前默认）** | 22 | 19 | 0.69 MB | **快 5.7 倍，省内存 5.8 倍** |
+| **SLOB**（已移除）     | 85  | 78  | 0.85 MB | **快 1.5 倍，省内存 4.7 倍** |
 
 **结论**：SLUB 比无 Slab 快 5-6 倍，节省内存 6 倍！
+
+**注意**：经典 SLAB 和 SLOB 的数据为历史参考，这些实现已在 Linux 6.x 移除。
 
 ### 6.2 真实系统数据
 
@@ -700,6 +729,127 @@ my_data_cache      5000    5040     64    4    1
 # 3. 使用 kmemleak 检测（需要 CONFIG_DEBUG_KMEMLEAK）
 $ echo scan > /sys/kernel/debug/kmemleak
 $ cat /sys/kernel/debug/kmemleak
+```
+
+### 7.4 现代 SLUB 的安全加固特性（Linux 6.x）
+
+现代 SLUB 实现包含多项安全加固措施，防止内核堆攻击：
+
+#### 7.4.1 空闲链表随机化（SLAB_FREELIST_RANDOM）
+
+```c
+// 配置选项：CONFIG_SLAB_FREELIST_RANDOM=y
+// 功能：随机化 Slab 中对象的分配顺序
+
+// 传统顺序分配：
+// Slab: [obj0] [obj1] [obj2] [obj3] [obj4] ...
+// 分配顺序可预测 → 易受堆喷射攻击
+
+// 随机化后：
+// 分配顺序：obj2 → obj4 → obj1 → obj0 → obj3
+// 攻击者无法预测相邻对象 → 提高利用难度
+```
+
+**源码实现**：`mm/slub.c` 中的 `init_cache_random_seq()`
+
+**安全效果**：
+- ✅ 防止堆喷射（Heap Spraying）攻击
+- ✅ 增加对象布局的不可预测性
+- ❌ 轻微性能损失（~1-2%）
+
+#### 7.4.2 加固空闲链表元数据（SLAB_FREELIST_HARDENED）
+
+```c
+// 配置选项：CONFIG_SLAB_FREELIST_HARDENED=y
+// 功能：对空闲链表指针进行混淆和完整性检查
+
+struct slab {
+    void *freelist;  // 空闲对象链表头
+    unsigned long random;  // 随机密钥
+};
+
+// 加固前：freelist 直接指向下一个空闲对象
+// 风险：攻击者可篡改 freelist 指向任意地址
+
+// 加固后：freelist 经过异或混淆
+void *next = freelist ^ random ^ ptr_addr;
+// 攻击者需要知道 random 密钥才能篡改
+```
+
+**源码实现**：`mm/slub.c` 中的 `freelist_ptr()` 和 `freelist_dereference()`
+
+**安全效果**：
+- ✅ 防止 UAF（Use-After-Free）利用
+- ✅ 防止任意地址写入攻击
+- ❌ 轻微性能损失（~2-3%）
+
+#### 7.4.3 Bucket 隔离（SLAB_BUCKETS）
+
+```c
+// 配置选项：CONFIG_SLAB_BUCKETS=y
+// 功能：将用户控制的分配与内核分配分离到不同的 Bucket
+
+// 问题场景：
+// 用户通过 ioctl 分配 256 字节对象（可控内容）
+// 内核也在同一 kmalloc-256 缓存分配关键结构
+// → 攻击者可利用堆布局进行攻击
+
+// 解决方案：
+// kmalloc-256           → 内核内部使用
+// kmalloc-256-user      → 用户可控分配
+// 两者使用不同的缓存，避免混合
+```
+
+**源码实现**：`mm/slab_common.c` 中的 bucket 管理
+
+**安全效果**：
+- ✅ 防止跨对象类型的堆攻击
+- ✅ 提高内核堆安全隔离性
+- ❌ 增加内存开销（~5-10%）
+
+#### 7.4.4 KASAN 集成（Kernel Address Sanitizer）
+
+```bash
+# 配置选项：CONFIG_KASAN=y
+# 功能：运行时内存错误检测
+
+# 检测能力：
+# - UAF（Use-After-Free）
+# - Double Free
+# - Out-of-Bounds Access
+# - 内存泄漏
+
+# 示例输出：
+==================================================================
+BUG: KASAN: use-after-free in my_function+0x123/0x456
+Read of size 8 at addr ffff888012345678 by task test/1234
+Freed by task test/1234:
+  kfree+0x45/0x67
+  my_cleanup+0x12/0x34
+==================================================================
+```
+
+**源码实现**：`mm/kasan/` 目录
+
+**开发建议**：
+- 开发/测试环境强烈推荐启用
+- 生产环境禁用（性能损失 20-50%）
+
+#### 7.4.5 安全配置推荐
+
+```makefile
+# 生产环境安全配置（平衡安全与性能）
+CONFIG_SLUB=y
+CONFIG_SLAB_FREELIST_RANDOM=y        # 推荐启用
+CONFIG_SLAB_FREELIST_HARDENED=y      # 推荐启用
+CONFIG_SLAB_BUCKETS=y                # 推荐启用
+CONFIG_KASAN=n                       # 生产禁用
+
+# 开发/测试环境（最大安全检测）
+CONFIG_SLUB_DEBUG=y
+CONFIG_KASAN=y
+CONFIG_SLUB_DEBUG_ON=y
+CONFIG_KFENCE=y                      # 轻量级内存错误检测
 ```
 
 ---
