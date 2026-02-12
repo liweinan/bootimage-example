@@ -405,11 +405,74 @@ x86-64 长模式的硬件强制要求：
    - 位于压缩内核的 `.pgtable` 段，后续会被释放
 
 4. **安全性考虑**：
-   - 虽然映射了 4GB，但压缩内核只访问很小的区域（内核镜像和栈）
-   - 不会实际访问保留区域（BIOS ROM、设备内存映射），所以不会触发问题
-   - 这是一个"宽松映射"策略：映射范围大，但实际访问范围小
+   - 虽然映射了 4GB（包括保留区域），但这个映射是**临时的**
+   - 压缩内核只访问很小的区域（内核镜像、栈、VGA 显存、解压目标）
+   - **关键**：进入主内核后，这个映射被**立即清空**（`reset_early_page_tables()`）
+   - 不会长期保留对保留区域的映射，避免潜在问题
 
-##### 阶段2：完整页表（主内核，必须用 E820）
+5. **映射的生命周期**：
+   ```c
+   // arch/x86/kernel/head64.c:238
+   asmlinkage void __init x86_64_start_kernel(char *real_mode_data)
+   {
+       /* Kill off the identity-map trampoline */
+       reset_early_page_tables();  // ← 立即清空压缩内核的 4GB 映射！
+
+       ...
+
+       idt_setup_early_handler();  // ← 设置 page fault handler
+
+       // 之后访问新地址会触发 page fault，
+       // 由 early_make_pgtable() 按需建立页表
+   }
+   ```
+
+##### 阶段2：主内核早期（按需分页，不需要 E820）
+
+**时机**：主内核 `x86_64_start_kernel()` 到 `setup_arch()` 之间
+
+**机制**：**按需分页**（Demand Paging）
+
+1. **清空临时页表**（`reset_early_page_tables()`）：
+   ```c
+   // arch/x86/kernel/head64.c:68-73
+   static void __init reset_early_page_tables(void)
+   {
+       memset(early_top_pgt, 0, sizeof(pgd_t)*(PTRS_PER_PGD-1));  // ← 清空！
+       next_early_pgt = 0;
+       write_cr3(__sme_pa_nodebug(early_top_pgt));
+   }
+   ```
+
+2. **设置 early page fault handler**（`idt_setup_early_handler()`）
+
+3. **按需建立页表**：
+   ```c
+   // arch/x86/kernel/head64.c:156-160
+   void __init do_early_exception(struct pt_regs *regs, int trapnr)
+   {
+       if (trapnr == X86_TRAP_PF &&          // ← Page Fault！
+           early_make_pgtable(native_read_cr2()))  // ← 读取 CR2（触发 PF 的地址）
+           return;  // ← 建立页表后返回，CPU 重试访问
+   }
+   ```
+
+**为什么不需要 E820？**
+
+- 只为**实际访问**的地址建立页表
+- 访问的地址都是已知安全的（内核代码、数据、栈）
+- 不会盲目映射整个地址空间
+
+**注释证据**（`arch/x86/kernel/e820.c:1270-1272`）：
+```c
+/*
+ * At this point only the first megabyte is mapped for sure, the
+ * rest of the memory cannot be used for memblock resizing
+ */
+```
+说明在 `e820__memblock_setup()` 被调用时，大部分内存还没有映射！
+
+##### 阶段3：完整页表（主内核，必须用 E820）
 
 **时机**：主内核的 `init_mem_mapping()` 阶段（`arch/x86/mm/init.c:758`）
 
@@ -458,31 +521,42 @@ flowchart TD
 
 ##### 阶段对比总结
 
-| 特性 | 阶段1：临时页表（startup_32） | 阶段2：完整页表（init_mem_mapping） |
-|------|----------------------------|--------------------------------|
-| **文件位置** | `arch/x86/boot/compressed/head_64.S:200-231` | `arch/x86/mm/init.c:758` |
-| **页表类型** | 临时身份映射（Identity Mapping） | 完整直接映射（Direct Mapping） |
-| **映射范围** | 固定 0-4GB（硬编码2048个2MB页） | 所有物理RAM（根据E820动态确定） |
-| **映射方式** | VA = PA | VA = PA + PAGE_OFFSET |
-| **数据来源** | **硬编码常量** | **E820表** |
-| **是否需要E820** | ❌ **不需要** | ✅ **必须** |
-| **主要目的** | 满足进入长模式的硬件要求 | 为所有可用物理内存建立映射 |
-| **生命周期** | 临时使用，解压后废弃 | 永久使用，内核运行期一直有效 |
-| **为什么这样设计** | 启动早期E820表尚未解析，硬编码4GB足够覆盖启动所需的内存区域 | 需要管理所有物理内存，必须精确知道哪些是RAM、哪些是保留区域 |
+| 特性 | 阶段1：临时页表<br>(startup_32) | 阶段2：按需分页<br>(early boot) | 阶段3：完整页表<br>(init_mem_mapping) |
+|------|-----------------------------|------------------------------|----------------------------------|
+| **文件位置** | `arch/x86/boot/compressed/`<br>`head_64.S:200-231` | `arch/x86/kernel/`<br>`head64.c:68-160` | `arch/x86/mm/`<br>`init.c:758` |
+| **页表类型** | 临时身份映射<br>(Identity Mapping) | 按需建立的映射<br>(Demand Paging) | 完整直接映射<br>(Direct Mapping) |
+| **映射范围** | 固定 0-4GB<br>(硬编码2048个2MB页) | 只映射访问的地址<br>(通常<1MB) | 所有物理RAM<br>(根据E820动态确定) |
+| **映射方式** | VA = PA | VA = PA（早期）<br>后切换到高地址 | VA = PA + PAGE_OFFSET |
+| **建立机制** | **硬编码循环** | **Page Fault Handler**<br>(`early_make_pgtable()`) | **遍历E820表**<br>(`kernel_physical_mapping_init()`) |
+| **数据来源** | **硬编码常量** | **运行时按需** | **E820表** |
+| **是否需要E820** | ❌ **不需要** | ❌ **不需要** | ✅ **必须** |
+| **主要目的** | 满足进入长模式的<br>硬件要求 | 支持早期内核初始化<br>（清BSS、early IDT等） | 为所有可用物理内存<br>建立映射 |
+| **生命周期** | 临时使用<br>**进入主内核后立即清空** | 临时使用<br>直到 `init_mem_mapping()` | 永久使用<br>内核运行期一直有效 |
+| **为什么这样设计** | 启动早期E820表尚未解析<br>硬编码4GB足够 | 避免盲目映射保留区域<br>只映射必要的地址 | 需要管理所有物理内存<br>必须精确知道RAM/保留区域 |
+| **被清空的时机** | `x86_64_start_kernel():238`<br>`reset_early_page_tables()` | `init_mem_mapping()` 完成后<br>切换到 `swapper_pg_dir` | N/A（永久使用） |
 
 **关键区别**：
 
-1. **初期目的简单**：
+1. **阶段1（压缩内核）- 目的简单，临时使用**：
    - 只是为了满足"进入长模式必须启用分页"的硬件要求
    - 不需要精确的内存布局信息
    - 硬编码 4GB 映射足够覆盖压缩内核（1MB）和解压目标（16MB）
+   - **虽然映射了保留区域，但进入主内核后立即被清空**
 
-2. **后期目的复杂**：
+2. **阶段2（主内核早期）- 按需建立，安全可控**：
+   - 清空阶段1的 4GB 映射（`reset_early_page_tables()`）
+   - 设置 page fault handler（`idt_setup_early_handler()`）
+   - 只为**实际访问**的地址建立页表（通过 `early_make_pgtable()`）
+   - 访问的都是已知安全的地址（内核代码、数据、栈），不会盲目映射保留区域
+   - 代码证据：`e820.c:1270` 注释说明"此时只有第一个 MB 被映射"
+
+3. **阶段3（主内核后期）- 目的复杂，必须精确**：
    - 要管理所有物理内存（可能几十GB、几百GB）
    - 必须知道：
-     - 哪些物理地址是 RAM（可以映射）
-     - 哪些是保留区域（BIOS、设备内存映射，不能覆盖）
+     - 哪些物理地址是 RAM（可以映射为 cacheable）
+     - 哪些是保留区域（BIOS、设备内存映射，不能用 cached 映射）
      - 哪些是坏内存（不能使用）
+     - 需要为不同类型的内存设置正确的缓存属性（RAM: WB, MMIO: UC）
 
 **典型的 E820 表示例**（8GB 系统）：
 ```
@@ -495,12 +569,56 @@ flowchart TD
 0x1_0000_0000 - 0x2_4000_0000: RAM    ← 可映射（高端内存）
 ```
 
-**如果后期不用 E820 会怎样？**
+**为什么阶段1映射保留区域不会有问题，但阶段3必须避免？**
 
-假设盲目映射整个物理地址空间：
-- ❌ **0x000A0000-0x000FFFFF**：这是 VGA 显存和 BIOS ROM，用 cached 映射会导致数据不一致
-- ❌ **0xFEC00000-0xFED00000**：这是 LAPIC/IOAPIC 寄存器，必须用 uncached 映射，用 cached 映射会导致中断控制器失效
-- ❌ **未知的保留区域**：可能触发 machine check exception，导致系统崩溃
+**阶段1（压缩内核）为什么安全**：
+1. **生命周期极短**：
+   - 只在解压内核期间使用（几百毫秒）
+   - 进入主内核后**立即清空**（`reset_early_page_tables()`）
+   - 不会长期保留对保留区域的映射
+
+2. **访问范围极小**：
+   - 只访问：代码段（1MB）、栈（几KB）、VGA 显存（用于显示启动信息）、解压目标（16MB）
+   - **不访问**：LAPIC/IOAPIC、PCI 配置空间、其他设备内存映射
+
+3. **VGA 显存访问是安全的**：
+   ```c
+   // arch/x86/boot/compressed/misc.c:423-428
+   if (boot_params_ptr->screen_info.orig_video_mode == 7) {
+       vidmem = (char *) 0xb0000;  // ← 虽然是保留区域，但专门用于访问
+   } else {
+       vidmem = (char *) 0xb8000;  // ← 写入字符显示启动信息
+   }
+   ```
+   VGA 显存虽然在 E820_TYPE_RESERVED 区域，但设计上就是允许被访问的（用于文本模式显示）
+
+**阶段3（init_mem_mapping）如果不用 E820 会怎样？**
+
+假设盲目映射整个物理地址空间为 cacheable RAM：
+
+1. ❌ **LAPIC/IOAPIC（0xFEC00000-0xFED00000）**：
+   - 这是中断控制器的 MMIO 寄存器
+   - 必须用 uncached 映射（UC），每次访问都直达硬件
+   - 如果用 cached 映射（WB），CPU 可能缓存寄存器值
+   - **后果**：写入 EOI（End of Interrupt）不会立即到达硬件，中断系统失效
+
+2. ❌ **PCI 配置空间（0xE0000000-0xF0000000）**：
+   - 用于配置 PCI 设备
+   - 必须用 uncached 映射
+   - **后果**：设备配置可能失败，硬件初始化异常
+
+3. ❌ **DMA 缓冲区**：
+   - DMA 和 CPU 必须看到一致的数据
+   - 必须用 uncached 或 write-combining 映射
+   - **后果**：DMA 数据不一致，网络/磁盘 I/O 损坏
+
+4. ❌ **覆盖 BIOS 数据（0xBFFD0000-0xC0000000）**：
+   - ACPI 表、SMBIOS 表等
+   - **后果**：ACPI 解析失败，电源管理、热管理失效
+
+5. ❌ **未知的保留区域**：
+   - 可能触发 machine check exception
+   - **后果**：系统崩溃
 
 **实际代码中的依赖**（`arch/x86/mm/init.c:init_mem_mapping()`）：
 
