@@ -239,7 +239,8 @@ DISPLAY=:1 make run-gui
 
 #### 用户空间内存
 - **[LINUX_USERSPACE_MEMORY_GUIDE.md](LINUX_USERSPACE_MEMORY_GUIDE.md)** - Linux 用户空间内存管理
-- **[FILL.md](FILL.md)** - 内存填充相关文档
+- **[LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)** - Linux 缺页异常与按需分配
+- **[SEABIOS_FIXED_ADDRESS_LAYOUT.md](SEABIOS_FIXED_ADDRESS_LAYOUT.md)** - SeaBIOS 固定地址布局
 
 ### UEFI 相关文档
 

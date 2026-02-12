@@ -555,6 +555,15 @@ static inline void do_user_addr_fault(struct pt_regs *regs,
 3. **向量号固定**：14 是 Intel 规定的，Linux 无法改变
 4. **软件职责**：只需在 IDT[14] 填入处理函数地址，并实现处理逻辑
 
+> **更详细的缺页处理流程见**：[LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)
+>
+> 该文档深入讲解：
+> - 页表逐级查找与分配（`__handle_mm_fault`）
+> - 物理页分配机制（`do_anonymous_page`）
+> - PTE 创建与映射建立
+> - Demand Paging（按需分配）策略
+> - 三种缺页类型（Minor/Major/COW）
+
 ---
 
 ## 四、案例 2：Breakpoint 的实现与触发
