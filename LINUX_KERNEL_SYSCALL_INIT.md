@@ -10,6 +10,23 @@
 3. INT 0x80 vs SYSCALL/SYSENTER 详细对比
 4. 32位兼容机制与 entry_SYSCALL_64 入口
 
+**Intel SDM 参考**：
+- **Volume 3A, Section 5.8.7**: "Performing Fast Calls to System Procedures with the SYSENTER and SYSEXIT Instructions" (page 5-20 ~ 5-21)
+  - **Section 5.8.7.1**: "SYSENTER and SYSEXIT Instructions in IA-32e Mode"
+- **Volume 3A, Section 5.8.8**: "Fast System Calls in 64-Bit Mode" (page 5-22 ~ 5-23) - SYSCALL and SYSRET
+  - **Figure 5-14**: MSRs Used by SYSCALL and SYSRET
+- **MSR 寄存器规范**：
+  - IA32_SYSENTER_CS (0x174), IA32_SYSENTER_ESP (0x175), IA32_SYSENTER_EIP (0x176)
+  - IA32_STAR (0xC0000081), IA32_LSTAR (0xC0000082), IA32_CSTAR (0xC0000083), IA32_FMASK (0xC0000084)
+
+**Linux Kernel 源码参考**（基于 `/Users/weli/works/linux`）：
+- `arch/x86/kernel/cpu/common.c:2234-2248` - syscall_init() 和 idt_syscall_init()
+- `arch/x86/entry/entry_64.S:87-170` - entry_SYSCALL_64
+- `arch/x86/entry/entry_64_compat.S:50-134` - entry_SYSENTER_compat
+- `arch/x86/entry/syscall_64.c:87-119` - do_syscall_64()
+- `arch/x86/include/asm/msr-index.h:11-14,243-245` - MSR 寄存器定义
+- `arch/x86/include/asm/segment.h:213-217` - 段选择子定义
+
 **相关文档**：
 - [x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现](X86_INTERRUPT_EXCEPTION_TRAP.md) - 基础概念（INT 0x80 为何在 CPU 层面是 Exception、Interrupt/Exception/Trap 区别）
 - [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) - 主启动流程
@@ -37,9 +54,20 @@ start_kernel()
 **syscall_init()**：
 
 ```c
+// arch/x86/kernel/cpu/common.c:2234-2248
+// 参考 Intel SDM Vol.3A Section 5.8.8 "Fast System Calls in 64-Bit Mode"
 void syscall_init(void)
 {
+	/* The default user and kernel segments */
 	wrmsr(MSR_STAR, 0, (__USER32_CS << 16) | __KERNEL_CS);
+
+	/*
+	 * Except the IA32_STAR MSR, there is NO need to setup SYSCALL and
+	 * SYSENTER MSRs for FRED, because FRED uses the ring 3 FRED
+	 * entrypoint for SYSCALL and SYSENTER, and ERETU is the only legit
+	 * instruction to return to ring 3 (both sysexit and sysret cause
+	 * #UD when FRED is enabled).
+	 */
 	if (!cpu_feature_enabled(X86_FEATURE_FRED))
 		idt_syscall_init();
 }
@@ -48,16 +76,41 @@ void syscall_init(void)
 **idt_syscall_init()**：
 
 ```c
+// arch/x86/kernel/cpu/common.c:2198-2229
+// 参考 Intel SDM Vol.3A Section 5.8.7 (SYSENTER/SYSEXIT) 和 Section 5.8.8 (SYSCALL/SYSRET)
 static inline void idt_syscall_init(void)
 {
 	wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);  // 64 位 syscall 入口
+
 	if (ia32_enabled()) {
 		wrmsrq_cstar((unsigned long)entry_SYSCALL_compat);
+		/*
+		 * This only works on Intel CPUs.
+		 * On AMD CPUs these MSRs are 32-bit, CPU truncates MSR_IA32_SYSENTER_EIP.
+		 * This does not cause SYSENTER to jump to the wrong location, because
+		 * AMD doesn't allow SYSENTER in long mode (either 32- or 64-bit).
+		 */
 		wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)__KERNEL_CS);
-		wrmsrq_safe(MSR_IA32_SYSENTER_ESP, ...);
+		wrmsrq_safe(MSR_IA32_SYSENTER_ESP,
+			    (unsigned long)(cpu_entry_stack(smp_processor_id()) + 1));
 		wrmsrq_safe(MSR_IA32_SYSENTER_EIP, (u64)entry_SYSENTER_compat);
+	} else {
+		wrmsrq_cstar((unsigned long)entry_SYSCALL32_ignore);
+		wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)GDT_ENTRY_INVALID_SEG);
+		wrmsrq_safe(MSR_IA32_SYSENTER_ESP, 0ULL);
+		wrmsrq_safe(MSR_IA32_SYSENTER_EIP, 0ULL);
 	}
-	wrmsrq(MSR_SYSCALL_MASK, X86_EFLAGS_CF|...|X86_EFLAGS_ID);  // syscall 时清除的 RFLAGS
+
+	/*
+	 * Flags to clear on syscall; clear as much as possible
+	 * to minimize user space-kernel interference.
+	 */
+	wrmsrq(MSR_SYSCALL_MASK,
+	       X86_EFLAGS_CF|X86_EFLAGS_PF|X86_EFLAGS_AF|
+	       X86_EFLAGS_ZF|X86_EFLAGS_SF|X86_EFLAGS_TF|
+	       X86_EFLAGS_IF|X86_EFLAGS_DF|X86_EFLAGS_OF|
+	       X86_EFLAGS_IOPL|X86_EFLAGS_NT|X86_EFLAGS_RF|
+	       X86_EFLAGS_AC|X86_EFLAGS_ID);
 }
 ```
 
@@ -278,6 +331,11 @@ static inline long syscall(long number, ...)
 
 #### SYSCALL vs SYSENTER 详细对比
 
+> **参考 Intel SDM Vol.3A**:
+> - **Section 5.8.7**: SYSENTER and SYSEXIT Instructions
+> - **Section 5.8.8**: SYSCALL and SYSRET in 64-Bit Mode
+> - **Figure 5-14**: MSRs Used by SYSCALL and SYSRET
+
 虽然都是快速系统调用机制，SYSCALL 和 SYSENTER 有重要区别：
 
 | 特性 | SYSCALL | SYSENTER |
@@ -296,61 +354,99 @@ static inline long syscall(long number, ...)
 
 **硬件行为差异**：
 
-1. **SYSCALL 自动保存返回信息**：
+1. **SYSCALL 自动保存返回信息**（参考 Intel SDM Vol.3A Section 5.8.8, Figure 5-14）：
    ```asm
    ; 用户态执行 syscall
    syscall
-   ; 硬件自动完成：
+   ; 硬件自动完成（Intel SDM 规范）：
    ; RCX ← RIP（保存返回地址）
    ; R11 ← RFLAGS（保存标志位）
-   ; RFLAGS ← RFLAGS & ~MSR_SYSCALL_MASK
-   ; RIP ← MSR_LSTAR（跳转到内核入口）
-   ; CS ← MSR_STAR[47:32]
-   ; SS ← MSR_STAR[47:32] + 8
+   ; RFLAGS ← RFLAGS & ~IA32_FMASK（即 MSR_SYSCALL_MASK，清除指定标志位）
+   ; RIP ← IA32_LSTAR（即 MSR_LSTAR，跳转到内核入口）
+   ; CS.Selector ← IA32_STAR[47:32]（内核代码段）
+   ; SS.Selector ← IA32_STAR[47:32] + 8（内核栈段）
+   ; CS.Base, CS.Limit, CS.AR ← 固定值（64位代码段属性）
+   ; CPL ← 0（切换到 Ring 0）
    ```
 
-2. **SYSENTER 需要手动管理**：
+2. **SYSENTER 需要手动管理**（参考 Intel SDM Vol.3A Section 5.8.7）：
    ```asm
    ; 用户态执行 sysenter（通常通过 vDSO）
-   ; 调用者必须先保存 EIP 和 ESP
+   ; 调用者必须先保存 EIP 和 ESP（SYSENTER 不保存！）
    push ebp
    mov ebp, esp
    sysenter
-   ; 硬件完成：
-   ; EIP ← MSR_IA32_SYSENTER_EIP
-   ; ESP ← MSR_IA32_SYSENTER_ESP
-   ; CS ← MSR_IA32_SYSENTER_CS
-   ; SS ← MSR_IA32_SYSENTER_CS + 8
-   ; （不保存 EFLAGS）
+   ; 硬件完成（Intel SDM 规范）：
+   ; EFLAGS.VM ← 0, EFLAGS.IF ← 0（关中断）
+   ; EIP ← IA32_SYSENTER_EIP（跳转到内核入口）
+   ; ESP ← IA32_SYSENTER_ESP（切换到内核栈）
+   ; CS.Selector ← IA32_SYSENTER_CS & 0xFFFC（内核代码段，清除 RPL）
+   ; SS.Selector ← (IA32_SYSENTER_CS + 8) & 0xFFFC（内核栈段）
+   ; CPL ← 0（切换到 Ring 0）
+   ; （不保存返回地址、不保存栈指针、不保存 EFLAGS）
    ```
 
-**Linux 内核的使用策略**：
+**Linux 内核的使用策略**（参考 SDM Vol.3A Section 5.8.7 和 5.8.8）：
 
 ```c
-// arch/x86/kernel/cpu/common.c:2234
+// arch/x86/kernel/cpu/common.c:2234-2248
 void syscall_init(void) {
+    /* The default user and kernel segments */
+    // MSR_STAR[63:48] = __USER32_CS（用户态 CS，SYSRET 恢复时使用）
+    // MSR_STAR[47:32] = __KERNEL_CS（内核态 CS，SYSCALL 跳转时使用）
     wrmsr(MSR_STAR, 0, (__USER32_CS << 16) | __KERNEL_CS);
 
     if (!cpu_feature_enabled(X86_FEATURE_FRED))
         idt_syscall_init();
 }
 
+// arch/x86/kernel/cpu/common.c:2198-2229
 static inline void idt_syscall_init(void) {
     // 64位 SYSCALL（主流路径）
+    // IA32_LSTAR: 64位程序 syscall 指令的目标 RIP
     wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);
 
     if (ia32_enabled()) {
         // 32位兼容模式 SYSCALL
+        // IA32_CSTAR: 32位程序在兼容模式下 syscall 指令的目标 RIP
         wrmsrq_cstar((unsigned long)entry_SYSCALL_compat);
 
         // 32位 SYSENTER（Intel CPU）
+        // 注意：AMD CPU 在 long mode 不支持 SYSENTER，这些设置在 AMD 上无效
         wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)__KERNEL_CS);
-        wrmsrq_safe(MSR_IA32_SYSENTER_ESP, (unsigned long)(cpu_entry_stack(smp_processor_id()) + 1));
+        wrmsrq_safe(MSR_IA32_SYSENTER_ESP,
+                    (unsigned long)(cpu_entry_stack(smp_processor_id()) + 1));
         wrmsrq_safe(MSR_IA32_SYSENTER_EIP, (u64)entry_SYSENTER_compat);
+    } else {
+        // 未启用 IA32 兼容时，设置为无效/忽略
+        wrmsrq_cstar((unsigned long)entry_SYSCALL32_ignore);
+        wrmsrq_safe(MSR_IA32_SYSENTER_CS, (u64)GDT_ENTRY_INVALID_SEG);
+        wrmsrq_safe(MSR_IA32_SYSENTER_ESP, 0ULL);
+        wrmsrq_safe(MSR_IA32_SYSENTER_EIP, 0ULL);
     }
 
-    wrmsrq(MSR_SYSCALL_MASK, X86_EFLAGS_TF|X86_EFLAGS_DF|...|X86_EFLAGS_AC);
+    // IA32_FMASK (MSR_SYSCALL_MASK): syscall 指令执行时清除的 RFLAGS 位
+    // 清除尽可能多的标志位以减少用户态-内核态干扰
+    wrmsrq(MSR_SYSCALL_MASK,
+           X86_EFLAGS_CF|X86_EFLAGS_PF|X86_EFLAGS_AF|
+           X86_EFLAGS_ZF|X86_EFLAGS_SF|X86_EFLAGS_TF|
+           X86_EFLAGS_IF|X86_EFLAGS_DF|X86_EFLAGS_OF|
+           X86_EFLAGS_IOPL|X86_EFLAGS_NT|X86_EFLAGS_RF|
+           X86_EFLAGS_AC|X86_EFLAGS_ID);
 }
+```
+
+**MSR 寄存器详解**（参考 Intel SDM Vol.3A Figure 5-14 和 arch/x86/include/asm/msr-index.h）：
+
+| MSR 寄存器 | 地址 | 用途 | 字段布局 |
+|-----------|------|------|---------|
+| **IA32_STAR** | 0xC0000081 | SYSCALL/SYSRET 段选择子 | [63:48]=SYSRET CS+SS<br>[47:32]=SYSCALL CS/SS<br>[31:0]=保留 |
+| **IA32_LSTAR** | 0xC0000082 | 64位 SYSCALL 目标地址 | [63:0]=entry_SYSCALL_64 |
+| **IA32_CSTAR** | 0xC0000083 | 32位兼容 SYSCALL 目标 | [63:0]=entry_SYSCALL_compat |
+| **IA32_FMASK** | 0xC0000084 | SYSCALL RFLAGS 掩码 | [31:0]=要清除的 RFLAGS 位 |
+| **IA32_SYSENTER_CS** | 0x174 | SYSENTER 代码段选择子 | [15:0]=CS, [31:16]=保留 |
+| **IA32_SYSENTER_ESP** | 0x175 | SYSENTER 栈指针 | [63:0]=内核栈指针（Ring 0） |
+| **IA32_SYSENTER_EIP** | 0x176 | SYSENTER 入口地址 | [63:0]=entry_SYSENTER_compat |
 ```
 
 **用户态库的选择逻辑**：
@@ -637,25 +733,58 @@ SYM_CODE_END(entry_SYSCALL_64)
 
 ### 3.2 关键硬件行为：SYSCALL 指令
 
-**用户态执行 `syscall` 指令时，CPU 自动完成**：
+> **参考 Intel SDM Vol.3A Section 5.8.8 "Fast System Calls in 64-Bit Mode"**
+
+**用户态执行 `syscall` 指令时，CPU 自动完成**（Intel SDM 规范）：
 
 ```
-硬件自动操作（SYSCALL 指令）：
-┌──────────────────────────────────────────────────────┐
-│ RCX ← RIP（保存返回地址）                             │
-│ R11 ← RFLAGS（保存标志寄存器）                        │
-│ RFLAGS ← RFLAGS & ~MSR_SYSCALL_MASK                  │
-│   （清除 TF/DF/IF/IOPL/AC/NT 等标志位）               │
-│ RIP ← MSR_LSTAR（跳转到 entry_SYSCALL_64）           │
-│ CS ← MSR_STAR[47:32]（切换到内核代码段）              │
-│ SS ← MSR_STAR[47:32] + 8（切换到内核栈段）            │
-└──────────────────────────────────────────────────────┘
+硬件自动操作（SYSCALL 指令，Intel SDM Vol.3A Section 5.8.8）：
+┌──────────────────────────────────────────────────────────────────┐
+│ RCX ← RIP（保存返回地址，供 SYSRET 使用）                         │
+│ R11 ← RFLAGS（保存标志寄存器，供 SYSRET 使用）                    │
+│ RFLAGS ← RFLAGS & ~IA32_FMASK（清除 MSR_SYSCALL_MASK 指定的位）   │
+│   （Linux 清除: TF/DF/IF/IOPL/AC/NT/RF/ID 等，见 msr-index.h）    │
+│ RIP ← IA32_LSTAR（跳转到 entry_SYSCALL_64）                       │
+│ CS.Selector ← IA32_STAR[47:32] & 0xFFFC（内核代码段，RPL=0）      │
+│ SS.Selector ← IA32_STAR[47:32] + 8（内核栈段）                    │
+│ CS.Base ← 0, CS.Limit ← 0xFFFFF, CS.AR ← 0xA09B（64位代码段属性） │
+│ SS.Base ← 0, SS.Limit ← 0xFFFFF, SS.AR ← 0xC093（可读写数据段）   │
+│ CPL ← 0（当前特权级切换到 Ring 0）                                │
+└──────────────────────────────────────────────────────────────────┘
+
+重要行为（SDM 明确说明）：
+- SYSCALL 不保存栈指针（RSP）
+- SYSCALL 不切换栈（RSP 保持用户态值）
+- SYSCALL 不保存 SS（只设置新的 SS.Selector）
+- 软件必须立即切换到内核栈（entry_SYSCALL_64 的首要任务）
 ```
 
-**注意**：
-- **SYSCALL 不保存栈指针**（RSP）和段寄存器（SS），软件需手动处理
+**SYSRET 指令的返回操作**（对应的返回指令）：
+
+```
+硬件自动操作（SYSRET 指令，Intel SDM Vol.3A Section 5.8.8）：
+┌──────────────────────────────────────────────────────────────────┐
+│ RIP ← RCX（从 RCX 恢复返回地址）                                  │
+│ RFLAGS ← R11（从 R11 恢复标志寄存器）                             │
+│ CS.Selector ← IA32_STAR[63:48] + 16（用户代码段，RPL=3）          │
+│ SS.Selector ← IA32_STAR[63:48] + 8（用户栈段，RPL=3）             │
+│ CPL ← 3（当前特权级切换回 Ring 3）                                │
+└──────────────────────────────────────────────────────────────────┘
+
+SYSRET 限制（do_syscall_64 返回 false 时不能使用）：
+- 必须满足 RCX == pt_regs->ip（返回地址未被修改）
+- 必须满足 R11 == pt_regs->flags（标志位未被修改）
+- 必须满足 CS == __USER_CS && SS == __USER_DS（段寄存器正常）
+- 如果不满足，使用 IRET 慢速路径（完整状态恢复）
+```
+
+**注意**（根据 SDM 和 Linux 实现）：
+- **SYSCALL 不保存栈指针**（RSP）和段基址（SS），软件需手动处理
 - **SYSCALL 不切换栈**，entry_SYSCALL_64 的第一件事就是切换到内核栈
-- **中断自动关闭**（IF 标志位被清除），entry_SYSCALL_64 全程在关中断状态下执行
+- **中断自动关闭**（IF 标志位被 MSR_SYSCALL_MASK 清除），entry_SYSCALL_64 全程在关中断状态下执行
+- **MSR_STAR 的段选择子布局**（Figure 5-14）：
+  - [47:32] = SYSCALL CS and SS（内核态，Linux 设置为 __KERNEL_CS）
+  - [63:48] = SYSRET CS and SS（用户态，Linux 设置为 __USER32_CS）
 
 ### 3.3 do_syscall_64() C 函数实现
 
@@ -776,10 +905,13 @@ struct pt_regs {
 
 ### 4.2 entry_SYSENTER_compat 详解
 
-**SYSENTER 的特殊性**：
-- **不保存返回地址**（EIP）和栈指针（ESP）
-- **不保存 EFLAGS**
-- **必须通过 vDSO 提供的 `__kernel_vsyscall` 函数调用**
+> **参考 Intel SDM Vol.3A Section 5.8.7 "Performing Fast Calls to System Procedures with the SYSENTER and SYSEXIT Instructions"**
+
+**SYSENTER 的特殊性**（Intel SDM 明确说明）：
+- **不保存返回地址**（EIP）- SYSEXIT 需要软件提供返回地址
+- **不保存栈指针**（ESP）- SYSEXIT 需要软件提供栈指针
+- **不保存 EFLAGS** - SYSEXIT 不恢复标志位
+- **必须通过 vDSO 提供的 `__kernel_vsyscall` 函数调用**（封装返回地址保存逻辑）
 
 ```asm
 // arch/x86/entry/entry_64_compat.S:50-134
@@ -1044,29 +1176,51 @@ start_kernel() 启动流程中的系统调用初始化：
 
 ### 5.3 三种机制对比总结
 
+> **对比基于 Intel SDM Vol.3A Chapter 6 (Interrupt and Exception Handling), Section 5.8.7 (SYSENTER/SYSEXIT), Section 5.8.8 (SYSCALL/SYSRET)**
+
 | 特性 | INT 0x80 | SYSCALL | SYSENTER |
 |------|----------|---------|----------|
-| **设置方式** | IDT 表条目 | MSR 寄存器 | MSR 寄存器 |
+| **Intel SDM 参考** | Vol.3A Ch.6 | Vol.3A Sec.5.8.8 | Vol.3A Sec.5.8.7 |
+| **设置方式** | IDT 表条目 | MSR 寄存器 (IA32_LSTAR) | MSR 寄存器 (IA32_SYSENTER_*) |
 | **依赖** | 依赖 IDT 完善 | 不依赖 IDT | 不依赖 IDT |
-| **保存返回地址** | 自动（栈） | 自动（RCX） | 不保存 |
-| **保存 RFLAGS** | 自动（栈） | 自动（R11） | 不保存 |
-| **切换栈** | 自动（TSS） | 手动（软件） | 手动（软件） |
+| **保存返回地址** | 自动（压栈 EIP/RIP） | 自动（RCX ← RIP） | 不保存（需 vDSO） |
+| **保存 RFLAGS** | 自动（压栈 EFLAGS） | 自动（R11 ← RFLAGS） | 不保存 |
+| **保存栈指针** | 自动（TSS 切换） | 不保存（需软件切换） | 不保存（MSR 提供） |
+| **切换栈** | 自动（TSS.RSP0） | 手动（软件） | 自动（IA32_SYSENTER_ESP） |
+| **关中断** | 取决于 IDT 门类型 | 自动（IA32_FMASK） | 自动（EFLAGS.IF ← 0） |
 | **性能开销** | 100-300 周期 | 60-80 周期 | 60-80 周期 |
-| **主要用途** | 32位兼容 | 64位主流 | 32位快速路径 |
+| **主要用途** | 32位兼容 | 64位主流 | 32位快速路径（Intel） |
 | **vDSO 需求** | 不需要 | 不需要 | 必须（包装返回地址） |
+| **CPU 支持** | 所有 x86 | AMD64 + Intel 64 | Intel Pentium II+ |
+| **返回指令** | IRET/IRETQ | SYSRET/SYSRETQ | SYSEXIT |
+| **MSR 地址** | N/A | 0xC0000081-0xC0000084 | 0x174-0x176 |
 
 ### 5.4 关键源码文件索引
 
-| 文件 | 作用 |
-|------|------|
-| **arch/x86/entry/entry_64.S** | entry_SYSCALL_64（64位系统调用入口） |
-| **arch/x86/entry/entry_64_compat.S** | entry_SYSENTER_compat, entry_SYSCALL_compat（32位兼容入口） |
-| **arch/x86/entry/syscall_64.c** | do_syscall_64, sys_call_table |
-| **arch/x86/entry/syscall_32.c** | ia32_sys_call_table（32位系统调用表） |
-| **arch/x86/kernel/cpu/common.c** | syscall_init(), idt_syscall_init()（MSR 配置） |
-| **arch/x86/kernel/idt.c** | idt_setup_traps(), idt_setup_apic_and_irq_gates() |
-| **arch/x86/kernel/irqinit.c** | init_IRQ(), native_init_IRQ() |
-| **arch/x86/kernel/traps.c** | trap_init() |
+> **所有源码参考基于** `/Users/weli/works/linux`
+
+| 文件 | 行号 | 作用 |
+|------|------|------|
+| **arch/x86/entry/entry_64.S** | 87-170 | entry_SYSCALL_64（64位系统调用入口汇编） |
+| **arch/x86/entry/entry_64_compat.S** | 50-134 | entry_SYSENTER_compat（32位 SYSENTER 入口）<br>136-220: entry_SYSCALL_compat（32位 SYSCALL 入口） |
+| **arch/x86/entry/syscall_64.c** | 87-119 | do_syscall_64（C 函数，SYSRET 优化判断）<br>~30: sys_call_table 定义 |
+| **arch/x86/entry/syscall_32.c** | ~20 | ia32_sys_call_table（32位系统调用表） |
+| **arch/x86/kernel/cpu/common.c** | 2234-2248 | syscall_init（MSR_STAR 配置）<br>2198-2229: idt_syscall_init（MSR_LSTAR/CSTAR/SYSENTER 配置）<br>2403: cpu_init 中调用 syscall_init |
+| **arch/x86/kernel/idt.c** | 122-128 | ia32_idt 表（INT 0x80 定义）<br>232-238: idt_setup_traps<br>285-303: idt_setup_apic_and_irq_gates |
+| **arch/x86/kernel/irqinit.c** | 75-93 | init_IRQ（硬件中断初始化）<br>95-112: native_init_IRQ |
+| **arch/x86/kernel/traps.c** | ~1561 | trap_init（系统调用和异常初始化入口） |
+| **arch/x86/include/asm/msr-index.h** | 11-14 | MSR_STAR/LSTAR/CSTAR/SYSCALL_MASK 定义<br>243-245: MSR_IA32_SYSENTER_CS/ESP/EIP 定义<br>21-39: EFER_SCE（SYSCALL Enable）定义 |
+| **arch/x86/include/asm/segment.h** | 213-217 | __KERNEL_CS, __USER_CS, __USER32_CS, __USER_DS 段选择子定义 |
+
+**Intel SDM 参考章节索引**：
+
+| 章节 | 页码 | 主题 |
+|------|------|------|
+| **Vol.3A Section 5.8.7** | 5-20 ~ 5-21 | SYSENTER and SYSEXIT Instructions |
+| **Vol.3A Section 5.8.7.1** | 5-21 | SYSENTER and SYSEXIT in IA-32e Mode |
+| **Vol.3A Section 5.8.8** | 5-22 ~ 5-23 | Fast System Calls in 64-Bit Mode (SYSCALL/SYSRET) |
+| **Vol.3A Figure 5-14** | 5-23 | MSRs Used by SYSCALL and SYSRET |
+| **Vol.3A Chapter 6** | ~6-1 | Interrupt and Exception Handling (INT 0x80 属于 Exception) |
 
 ---
 
