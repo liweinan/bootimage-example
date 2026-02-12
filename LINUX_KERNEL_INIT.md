@@ -131,7 +131,7 @@ x86_64_start_kernel()（arch/x86/kernel/head64.c:222）
     ├─ 建立内核高地址映射（0xFFFFFFFF80000000）
     └─ 调用 start_kernel()
         ↓
-start_kernel()（init/main.c:1005）
+start_kernel()（init/main.c:898）
     ├─ 【早期初始化】
     │   ├─ local_irq_disable()
     │   ├─ boot_cpu_init()
@@ -141,21 +141,23 @@ start_kernel()（init/main.c:1005）
     │   │   ├─ init_mem_mapping()（arch/x86/mm/init.c:758）
     │   │   └─ paging_init()（arch/x86/mm/init_64.c:819）
     │   ├─ build_all_zonelists()
-    │   └─ trap_init()（arch/x86/kernel/traps.c:1680）【设置完整 IDT 和系统调用入口】
-    │       ├─ idt_setup_traps()（arch/x86/kernel/idt.c:264）
-    │       ├─ idt_setup_ist_traps()（arch/x86/kernel/idt.c:269）
-    │       └─ syscall_init()（arch/x86/kernel/cpu/common.c）
+    │   └─ trap_init()（arch/x86/kernel/traps.c:1561）【设置完整 IDT 和系统调用入口】
+    │       ├─ setup_cpu_entry_areas()
+    │       ├─ sev_es_init_vc_handling()
+    │       ├─ cpu_init_exception_handling(true)【设置 IST】
+    │       ├─ idt_setup_traps()（arch/x86/kernel/idt.c:232）
+    │       └─ cpu_init() → syscall_init()（arch/x86/kernel/cpu/common.c:2234）
     │
     ├─ 【调度与中断初始化】
     │   ├─ sched_init()（kernel/sched/core.c:10056）
     │   ├─ init_IRQ()（arch/x86/kernel/irqinit.c:75）【设置硬件中断门】
-    │   │   └─ idt_setup_apic_and_irq_gates()（arch/x86/kernel/idt.c:278）
+    │   │   └─ idt_setup_apic_and_irq_gates()（arch/x86/kernel/idt.c:284）
     │   └─ local_irq_enable()
     │
     ├─ 【子系统初始化】
     │   ├─ console_init()（drivers/tty/tty_io.c:2872）
     │   ├─ vfs_caches_init()（fs/dcache.c:3277）
-    │   └─ rest_init()（init/main.c:711）
+    │   └─ rest_init()（init/main.c:699）
     │
     └─ rest_init()
         ├─ 创建 PID 1（kernel_init）（kernel/fork.c:2718） → 启动用户空间 init
@@ -1100,25 +1102,36 @@ void start_kernel(void)
 ### 2. trap_init() 与系统调用初始化
 
 **trap_init()** 在 start_kernel() 阶段 2 被调用，主要完成：
-1. 补全 IDT 异常门（idt_setup_traps()）
-2. 设置 IST 陷阱门（idt_setup_ist_traps()）
-3. **初始化系统调用入口**（cpu_init() → syscall_init()）
-4. 设置调试器门（idt_setup_debuggers()）
+1. 设置 CPU entry areas（setup_cpu_entry_areas()）
+2. 初始化 IST 异常栈（cpu_init_exception_handling(true)）
+3. 补全 IDT 异常门（idt_setup_traps()）
+4. **初始化系统调用入口**（cpu_init() → syscall_init()）
 
 **调用层级**：
 
 ```
 start_kernel()
-    └─ trap_init()（arch/x86/kernel/traps.c:1680）
-        ├─ idt_setup_traps()（补全异常向量）
-        ├─ idt_setup_ist_traps()（设置 IST）
-        ├─ cpu_init()
-        │   └─ syscall_init()【内核接管 syscall】
-        │       ├─ wrmsr(MSR_STAR, ...)           // 段选择子
-        │       ├─ wrmsrl(MSR_LSTAR, ...)         // SYSCALL 入口（entry_SYSCALL_64）
-        │       ├─ wrmsrl(MSR_CSTAR, ...)         // 32位兼容入口
-        │       └─ wrmsrl(MSR_SYSCALL_MASK, ...)  // RFLAGS 掩码
-        └─ idt_setup_debuggers()
+    └─ trap_init()（arch/x86/kernel/traps.c:1561）
+        ├─ setup_cpu_entry_areas()
+        │   └─ 为每个 CPU 设置 entry area（包括 IDT、GDT、TSS、异常栈等）
+        ├─ sev_es_init_vc_handling()
+        │   └─ SEV-ES 虚拟化支持（AMD 加密虚拟机）
+        ├─ cpu_init_exception_handling(true)【设置 IST】
+        │   ├─ 分配 per-CPU 异常栈（IST 栈）
+        │   ├─ 配置 TSS.IST[] 数组
+        │   └─ 加载 TR（Task Register）
+        ├─ if (!cpu_feature_enabled(X86_FEATURE_FRED))
+        │   └─ idt_setup_traps()（arch/x86/kernel/idt.c:232）
+        │       ├─ 设置所有 CPU 异常向量（0-31）
+        │       └─ 若启用 ia32，设置 INT 0x80（通过 ia32_idt）
+        └─ cpu_init()
+            └─ syscall_init()（arch/x86/kernel/cpu/common.c:2234）【内核接管 syscall】
+                ├─ wrmsr(MSR_STAR, ...)           // 段选择子
+                └─ if (!cpu_feature_enabled(X86_FEATURE_FRED))
+                    └─ idt_syscall_init()
+                        ├─ wrmsrq(MSR_LSTAR, entry_SYSCALL_64)   // SYSCALL 入口
+                        ├─ wrmsrq_cstar(entry_SYSCALL_compat)     // 32位兼容入口
+                        └─ wrmsrq_safe(MSR_IA32_SYSENTER_*)       // SYSENTER 支持
 ```
 
 **系统调用的两种机制**：

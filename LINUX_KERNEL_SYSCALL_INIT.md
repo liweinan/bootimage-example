@@ -72,25 +72,35 @@ Linux 内核支持**两种系统调用机制**，它们的设置阶段和实现�
 | 特性 | 说明 |
 |------|------|
 | **原理** | 软件中断，查询 IDT 表第 0x80 个条目 |
-| **设置时机** | `init_IRQ()` → `idt_setup_ia32_syscall_gate()`（IDT 演进阶段 5） |
+| **设置时机** | `trap_init()` → `idt_setup_traps()` → `idt_setup_from_table(ia32_idt)` |
 | **设置位置** | `arch/x86/kernel/idt.c` |
 | **触发方式** | `int $0x80` 指令 |
-| **入口函数** | `entry_INT80_32`（`arch/x86/entry/entry_32.S` 或 `entry_64.S`） |
+| **入口函数** | `asm_int80_emulation`（64位）或 `entry_INT80_32`（32位，`arch/x86/entry/entry_32.S`） |
 | **系统调用号** | %eax |
 | **参数传递** | %ebx, %ecx, %edx, %esi, %edi, %ebp（32位寄存器） |
 | **系统调用表** | `ia32_sys_call_table`（兼容表） |
 | **性能** | 慢（需要查 IDT、特权级切换、栈切换） |
 | **适用范围** | 32位程序（CONFIG_IA32_EMULATION），64位程序也可用但不推荐 |
 
-**设置代码**（在 `init_IRQ()` 之后）：
+**设置代码**（在 `trap_init()` 中）：
 ```c
-// arch/x86/kernel/idt.c
-#ifdef CONFIG_IA32_EMULATION
-static inline void idt_setup_ia32_syscall_gate(void) {
-    idt_setup_from_table(idt_table, &ia32_syscall, 1, true);
-    // ia32_syscall = {.vector = IA32_SYSCALL_VECTOR (0x80), .addr = entry_INT80_32}
-}
+// arch/x86/kernel/idt.c:122-128
+static const struct idt_data ia32_idt[] __initconst = {
+#if defined(CONFIG_IA32_EMULATION)
+    SYSG(IA32_SYSCALL_VECTOR,	asm_int80_emulation),  // 64位系统
+#elif defined(CONFIG_X86_32)
+    SYSG(IA32_SYSCALL_VECTOR,	entry_INT80_32),       // 32位系统
 #endif
+};
+
+// arch/x86/kernel/idt.c:232-238
+void __init idt_setup_traps(void)
+{
+    idt_setup_from_table(idt_table, def_idts, ARRAY_SIZE(def_idts), true);
+
+    if (ia32_enabled())
+        idt_setup_from_table(idt_table, ia32_idt, ARRAY_SIZE(ia32_idt), true);
+}
 ```
 
 **2. 基于 MSR 的快速机制：SYSCALL/SYSENTER（现代方式）**
@@ -146,26 +156,30 @@ static inline void idt_syscall_init(void)
 
 start_kernel()
     │
-    ├─ 阶段 2a: trap_init()  ← 第一阶段
+    ├─ 阶段 2a: trap_init()  ← 系统调用机制初始化
+    │       ├─ setup_cpu_entry_areas()
+    │       ├─ cpu_init_exception_handling(true)
+    │       ├─ idt_setup_traps()
+    │       │   └─ idt_setup_from_table(idt_table, ia32_idt, ...)
+    │       │       └─ idt_table[0x80] = asm_int80_emulation ✨ INT 0x80 就绪
+    │       │
     │       └─ cpu_init()
     │           └─ syscall_init()
     │               └─ idt_syscall_init()
     │                   ├─ wrmsr(MSR_STAR) → 设置段选择子
-    │                   ├─ wrmsr(MSR_LSTAR, entry_SYSCALL_64) ✨ 64位 syscall 就绪
+    │                   ├─ wrmsr(MSR_LSTAR, entry_SYSCALL_64) ✨ SYSCALL 就绪
     │                   ├─ wrmsr(MSR_CSTAR, entry_SYSCALL_compat) → 32位 syscall
-    │                   ├─ wrmsr(MSR_IA32_SYSENTER_EIP, entry_SYSENTER_compat) ✨ sysenter 就绪
+    │                   ├─ wrmsr(MSR_IA32_SYSENTER_EIP, entry_SYSENTER_compat) ✨ SYSENTER 就绪
     │                   └─ wrmsr(MSR_SYSCALL_MASK) → RFLAGS 掩码
-    │       【此时 SYSCALL/SYSENTER 机制已可用，但 INT 0x80 尚未就绪】
+    │       【此时所有系统调用机制（INT 0x80、SYSCALL、SYSENTER）已完全就绪】
     │
     ├─ 阶段 2b: early_irq_init()
     │
-    ├─ 阶段 2c: init_IRQ()  ← 第二阶段
-    │       ├─ idt_setup_traps() → 补全异常向量
+    ├─ 阶段 2c: init_IRQ()  ← 仅设置硬件中断，不涉及系统调用
     │       ├─ init_8259A() → 重编程 PIC
-    │       ├─ idt_setup_apic_and_irq_gates() → 设置 APIC/IRQ 门
-    │       └─ idt_setup_ia32_syscall_gate()
-    │           └─ idt_table[0x80] = entry_INT80_32 ✨ INT 0x80 就绪
-    │       【此时 INT 0x80 机制也可用，所有系统调用机制完全就绪】
+    │       └─ native_init_IRQ()
+    │           └─ idt_setup_apic_and_irq_gates() → 设置 APIC/IRQ 门
+    │       【硬件中断机制就绪】
     │
     └─ 阶段 2d: local_irq_enable()
 ```
@@ -185,14 +199,14 @@ start_kernel()
    - `SYSENTER`：Intel Pentium II+ 才有
    - 老旧 32位程序仍依赖 `INT 0x80`
 
-3. **设置时机不同**：
-   - **MSR 机制（SYSCALL/SYSENTER）**：在 `trap_init()` 中设置，**早于** IDT 的完善
-   - **IDT 机制（INT 0x80）**：在 `init_IRQ()` 中设置，作为 IDT 表的一部分
-   - 原因：MSR 写入简单（几条 wrmsr），IDT 需要完整的中断框架就绪
+3. **设置时机对比**：
+   - **IDT 机制（INT 0x80）**：在 `trap_init()` → `idt_setup_traps()` 中设置，**先于** MSR 机制
+   - **MSR 机制（SYSCALL/SYSENTER）**：在 `trap_init()` → `cpu_init()` → `syscall_init()` 中设置
+   - 两者都在同一个函数（trap_init()）中完成，INT 0x80 稍早，SYSCALL/SYSENTER 稍晚
 
 4. **是否依赖 IDT**：
    - `SYSCALL/SYSENTER`：**不依赖 IDT**，直接从 MSR 跳转
-   - `INT 0x80`：**依赖 IDT**，必须等 IDT 表完善后才能使用
+   - `INT 0x80`：**依赖 IDT**，作为 IDT 表的一个条目（向量 0x80）
 
 #### 系统调用表的统一与分离
 
@@ -221,10 +235,10 @@ __visible const sys_call_ptr_t ia32_sys_call_table[] = {
     syscall → entry_SYSCALL_64 → do_syscall_64 → sys_call_table[rax]
 
 32位程序（Intel CPU）：
-    sysenter → entry_SYSENTER_compat → do_SYSENTER_32 → ia32_sys_call_table[eax]
+    sysenter → entry_SYSENTER_compat → do_fast_syscall_32 → ia32_sys_call(switch-case)
 
 32位程序（所有 CPU，兼容路径）：
-    int $0x80 → entry_INT80_32 → do_int80_syscall_32 → ia32_sys_call_table[eax]
+    int $0x80 → asm_int80_emulation/entry_INT80_32 → do_int80_syscall_32 → ia32_sys_call(switch-case)
 ```
 
 #### 实际运行时如何选择？
