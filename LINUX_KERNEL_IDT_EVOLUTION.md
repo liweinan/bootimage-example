@@ -212,6 +212,42 @@ static gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
        - 作用：处理启动早期的异常（#PF, #DE, #GP 等）
        - 限制：尚无 IST（中断栈），尚无硬件 IRQ 门，尚无 INT 0x80
 
+#### 阶段 1 的内存管理状态：分页已启用，但内存管理未完善
+
+**关键问题**：在 `idt_setup_early_handler()` 被调用时，系统的内存管理处于什么状态？
+
+**简短回答**：
+
+| 状态项 | 是否就绪 | 说明 |
+|-------|---------|------|
+| **分页机制** | ✅ 已启用 | 压缩内核 startup_32 中启用（CR0.PG=1），使用临时身份映射（VA=PA） |
+| **memblock 分配器** | ❌ 未建立 | 在 setup_arch() 中的 e820__memblock_setup() 才建立 |
+| **完整内存映射** | ❌ 未建立 | 在 setup_arch() 中的 init_mem_mapping() 才建立 |
+| **进程管理** | ❌ 未初始化 | 在 sched_init() 才初始化 |
+| **能否为进程分配内存** | ❌ 不能 | 进程管理系统尚未建立 |
+
+**关键依赖关系**（来自内核源码注释）：
+
+文件：`arch/x86/kernel/setup.c:1119-1122`
+```c
+init_mem_mapping();
+
+/*
+ * init_mem_mapping() relies on the early IDT page fault handling.
+ *                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ */
+```
+
+**这说明 early IDT 必须先于内存管理系统建立**，因为：
+1. `init_mem_mapping()` 过程中可能触发 page fault
+2. 如果没有 early IDT 中的 #PF 处理函数 → Triple Fault → CPU 重启 💥
+3. 有了 early IDT 可以捕获和处理这些异常，保证内存初始化顺利进行
+
+**核心结论**：在设置 `early_idt_handler_array` 时，**分页已启用，但完整的内存管理系统尚未建立，不能为进程分配内存**。early IDT 是后续内存管理初始化的前提条件。
+
+> **详细的内存管理演化分析**（包含完整的内核源码追踪、时间线图、状态对比表），请参见：
+> [Linux 内存管理演化 - 4.0 从临时页表到完整内存管理](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md#40-从临时页表到完整内存管理主内核的内存初始化全过程)
+
 阶段 2: setup_arch() → idt_setup_early_traps()
     └─ idt_setup_early_traps()
        ├─ idt_setup_from_table(idt_table, early_idts, ...)

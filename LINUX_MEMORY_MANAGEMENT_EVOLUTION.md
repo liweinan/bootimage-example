@@ -609,6 +609,427 @@ jmp *%rax  // 跳转到解压后的主内核入口（startup_64）
 
 主内核（解压后的 vmlinux）接管控制权后，需要建立 **完整的内存管理系统**。
 
+### 4.0 从临时页表到完整内存管理：主内核的内存初始化全过程
+
+> **本章节回答关键问题**：在主内核启动早期（`idt_setup_early_handler()` 设置 early IDT 时），系统的内存管理处于什么状态？分页是否已启用？是否能为进程分配内存？
+
+#### 4.0.1 背景：为什么需要关注这个问题
+
+在 Linux 内核启动过程中，存在一个关键的演化阶段：**从压缩内核的临时页表过渡到主内核的完整内存管理系统**。这个过程涉及多个关键组件的初始化，时序错误可能导致系统崩溃。
+
+**核心依赖关系**（来自内核源码注释）：
+
+文件：`arch/x86/kernel/setup.c:1119-1122`
+```c
+init_mem_mapping();
+
+/*
+ * init_mem_mapping() relies on the early IDT page fault handling.
+ * 翻译：init_mem_mapping() 依赖于 early IDT 的 page fault 处理！
+ */
+```
+
+这个注释揭示了一个重要的依赖链：**early IDT → 完整内存映射 → 内存管理系统**
+
+#### 4.0.2 代码时序证据：从分页启用到内存管理建立
+
+根据内核源码（基于 Linux v6.x），让我们追踪从分页启用到完整内存管理建立的完整流程。
+
+##### 时间点 1：分页启用（压缩内核阶段）
+
+**文件**：`arch/x86/boot/compressed/head_64.S:199-241`
+
+```asm
+/* startup_32 函数中 */
+
+/* Initialize Page tables to 0 */
+leal    rva(pgtable)(%ebx), %edi
+xorl    %eax, %eax
+movl    $(BOOT_INIT_PGT_SIZE/4), %ecx
+rep     stosl                              # 清零页表
+
+/* Build Level 4 */
+leal    rva(pgtable + 0)(%ebx), %edi
+leal    0x1007 (%edi), %eax
+movl    %eax, 0(%edi)
+addl    %edx, 4(%edi)
+
+/* Build Level 3 */
+leal    rva(pgtable + 0x1000)(%ebx), %edi
+leal    0x1007(%edi), %eax
+movl    $4, %ecx
+1:  movl    %eax, 0x00(%edi)
+    addl    %edx, 0x04(%edi)
+    addl    $0x00001000, %eax
+    addl    $8, %edi
+    decl    %ecx
+    jnz     1b
+
+/* Build Level 2 */
+leal    rva(pgtable + 0x2000)(%ebx), %edi
+movl    $0x00000183, %eax                  # Present + RW + PS (2MB页)
+movl    $2048, %ecx
+1:  movl    %eax, 0(%edi)
+    addl    %edx, 4(%edi)
+    addl    $0x00200000, %eax              # 每次增加 2MB
+    addl    $8, %edi
+    decl    %ecx
+    jnz     1b
+
+/* Enable the boot page tables */
+leal    rva(pgtable)(%ebx), %eax
+movl    %eax, %cr3                         # ← 加载页表基址
+
+/* Enable Long mode in EFER (Extended Feature Enable Register) */
+movl    $MSR_EFER, %ecx
+rdmsr
+btsl    $_EFER_LME, %eax
+wrmsr                                      # ← 启用长模式
+```
+
+**此时的系统状态**：
+- ✅ 已建立**临时身份映射页表**（虚拟地址 = 物理地址）
+- ✅ CR3 已加载页表基址
+- ✅ EFER.LME = 1（长模式已启用）
+- ✅ 接下来在 `startup_32` 末尾启用 CR0.PG（分页标志）
+- ✅ 映射范围：约 4GB（2048 个 2MB 大页）
+
+##### 时间点 2：early IDT 设置时刻
+
+**文件**：`arch/x86/kernel/head64.c:219-289`
+
+```c
+asmlinkage __visible void __init __noreturn x86_64_start_kernel(char * real_mode_data)
+{
+    /* ... 编译时检查 ... */
+    BUILD_BUG_ON(MODULES_VADDR < __START_KERNEL_map);
+    /* ... */
+
+    cr4_init_shadow();
+
+    /* Kill off the identity-map trampoline */
+    reset_early_page_tables();              # ← 重置早期页表
+
+    /* ... */
+
+    clear_bss();                            # ← 清零 BSS 段
+
+    /* ... SME 初始化 ... */
+    clear_page(init_top_pgt);
+
+    sme_early_init();                       # ← SME（安全内存加密）初始化
+
+    kasan_early_init();                     # ← KASAN（内核地址消毒器）初始化
+
+    /* Flush global TLB entries */
+    __native_tlb_flush_global(this_cpu_read(cpu_tlbstate.cr4));
+
+    idt_setup_early_handler();              # ← ✨ early IDT 设置在这里！
+
+    /* ... */
+
+    /* set init_top_pgt kernel high mapping*/
+    init_top_pgt[511] = early_top_pgt[511]; # ← 设置内核高地址映射
+
+    x86_64_start_reservations(real_mode_data);
+}
+```
+
+**此时的系统状态**：
+- ✅ 分页已启用（CR0.PG = 1）
+- ✅ 使用临时身份映射（VA = PA）
+- ✅ early IDT 已设置（可以处理异常）
+- ❌ memblock 未建立
+- ❌ 完整内存映射未建立
+- ❌ 不能为进程分配内存
+
+##### 时间点 3：内存管理系统建立（晚于 early IDT）
+
+**文件**：`init/main.c:898-940`，`arch/x86/kernel/setup.c:875-1122`
+
+```c
+/* init/main.c */
+void start_kernel(void)
+{
+    /* ... */
+    local_irq_disable();                    # 关中断
+    early_boot_irqs_disabled = true;
+
+    boot_cpu_init();
+    page_address_init();
+    pr_notice("%s", linux_banner);
+    setup_arch(&command_line);              # ← ✨ 内存管理在这里建立！
+    /* ... */
+}
+
+/* arch/x86/kernel/setup.c:875-1122 */
+void __init setup_arch(char **cmdline_p)
+{
+    /* ... 前期准备 ... */
+
+    /* 1062行注释：Need to conclude brk, before e820__memblock_setup() */
+
+    e820__memblock_setup();                 # ← 1070行：建立 memblock 分配器
+
+    /* ... */
+
+    init_mem_mapping();                     # ← 1119行：建立完整的内存映射
+
+    /* 1122行注释：
+     * init_mem_mapping() relies on the early IDT page fault handling.
+     *                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     * 翻译：init_mem_mapping() 依赖于 early IDT 的 page fault 处理！
+     */
+
+    /* ... */
+}
+```
+
+**关键代码 1：e820__memblock_setup()**
+
+**文件**：`arch/x86/kernel/e820.c:1240-1279`
+
+```c
+void __init e820__memblock_setup(void)
+{
+    int i;
+    u64 end;
+
+    /* 1270行注释：
+     * At this point only the first megabyte is mapped for sure, the
+     * rest of the memory cannot be used for memblock resizing
+     * 翻译：此时只有第一个 MB 被确定映射了，其余内存还不能用于 memblock 调整大小
+     */
+    memblock_set_current_limit(ISA_END_ADDRESS);  # 限制为 1MB
+
+    /* 允许 memblock 调整大小（因为 EFI 可能传递超过 128 个条目） */
+    memblock_allow_resize();
+
+    /* 遍历 E820 内存映射，将 RAM 区域加入 memblock */
+    for (i = 0; i < e820_table->nr_entries; i++) {
+        struct e820_entry *entry = &e820_table->entries[i];
+
+        /* ... */
+
+        if (entry->type != E820_TYPE_RAM)
+            continue;
+
+        /* 将 RAM 区域加入 memblock.memory */
+        memblock_add(entry->addr, entry->size);
+    }
+    /* ... */
+}
+```
+
+**关键代码 2：init_mem_mapping()**
+
+**文件**：`arch/x86/mm/init.c:758-789`
+
+```c
+void __init init_mem_mapping(void)
+{
+    unsigned long end;
+
+    pti_check_boottime_disable();
+    probe_page_size_mask();                 # 检测页大小（4KB/2MB/1GB）
+    setup_pcid();
+
+#ifdef CONFIG_X86_64
+    end = max_pfn << PAGE_SHIFT;            # 计算最大物理地址
+#else
+    end = max_low_pfn << PAGE_SHIFT;
+#endif
+
+    /* the ISA range is always mapped regardless of memory holes */
+    init_memory_mapping(0, ISA_END_ADDRESS, PAGE_KERNEL);  # 映射 ISA 范围
+
+    /* Init the trampoline, possibly with KASLR memory offset */
+    init_trampoline();
+
+    /* 如果是 bottom-up 分配，则从下往上建立直接映射 */
+    if (memblock_bottom_up()) {
+        unsigned long kernel_end = __pa_symbol(_end);
+
+        /* 先映射 [kernel_end, end)，这样页表可以分配在内核之上 */
+        /* 然后使用这些页表映射 [ISA_END_ADDRESS, kernel_end) */
+        /* ... */
+    } else {
+        /* 否则从上往下建立映射 */
+    }
+    /* ... */
+}
+```
+
+**此时的系统状态**（`setup_arch()` 完成后）：
+- ✅ 分页已启用
+- ✅ memblock 已建立（可用于早期内存分配）
+- ✅ 完整内存映射已建立（直接映射 VA = PA + __PAGE_OFFSET）
+- ⚠️  只能用 memblock 分配，buddy/slab 还未初始化
+- ❌ 还不能创建进程（进程调度器未初始化）
+
+#### 4.0.3 时间线总结：从分页到完整内存管理
+
+```
+时间线：分页 → early IDT → memblock → 完整内存映射 → buddy/slab → 进程管理
+
+┌─────────────────────────────────────────────────────────────────┐
+│ 压缩内核 startup_32 (arch/x86/boot/compressed/head_64.S)        │
+├─────────────────────────────────────────────────────────────────┤
+│ ✅ 构建临时页表（199-231行）                                      │
+│ ✅ CR3 = pgtable (234-235行)                                    │
+│ ✅ EFER.LME = 1 (237-241行)                                     │
+│ ✅ CR0.PG = 1（启用分页，约 250行）                               │
+│                                                                  │
+│ 状态：分页已启用（身份映射：VA = PA）                              │
+│       映射范围：约 4GB（2048 个 2MB 页）                          │
+└─────────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ 主内核 x86_64_start_kernel (arch/x86/kernel/head64.c:219)      │
+├─────────────────────────────────────────────────────────────────┤
+│ reset_early_page_tables()       (238行) - 重置页表              │
+│ clear_bss()                     (246行) - 清零BSS               │
+│ sme_early_init()                (259行) - SME初始化              │
+│ kasan_early_init()              (261行) - KASAN初始化            │
+│ __native_tlb_flush_global()     (271行) - 刷新TLB               │
+│ ✨ idt_setup_early_handler()    (273行) ← 关键时刻！             │
+│                                                                  │
+│ 状态：✅ 分页已启用                                               │
+│       ❌ memblock 未建立                                         │
+│       ❌ 完整内存映射未建立                                       │
+│       ❌ 不能为进程分配内存                                       │
+└─────────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ start_kernel() → setup_arch() (init/main.c:920)                │
+├─────────────────────────────────────────────────────────────────┤
+│ ✨ e820__memblock_setup()       (setup.c:1070)                  │
+│    └─ 将 E820 RAM 区域加入 memblock.memory                       │
+│    └─ 此时只有第一个 MB 被确定映射（e820.c:1273注释）              │
+│                                                                  │
+│ ✨ init_mem_mapping()            (setup.c:1119)                 │
+│    └─ 为所有 RAM 建立直接映射页表                                 │
+│    └─ 依赖 early IDT 的 #PF 处理（setup.c:1122注释）             │
+│                                                                  │
+│ 状态：✅ 分页已启用                                               │
+│       ✅ memblock 已建立（可用于早期内存分配）                     │
+│       ✅ 完整内存映射已建立                                       │
+│       ⚠️  只能用 memblock 分配，buddy/slab 还未初始化             │
+│       ❌ 还不能创建进程（进程调度器未初始化）                       │
+└─────────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ start_kernel() 后续初始化                                        │
+├─────────────────────────────────────────────────────────────────┤
+│ mm_init()           - 初始化 buddy 和 slab 分配器                 │
+│ sched_init()        - 初始化进程调度器                            │
+│ rest_init()         - 创建第一个进程（PID 1）                     │
+│                                                                  │
+│ 状态：✅ 完整内存管理系统就绪                                      │
+│       ✅ 可以创建进程                                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 4.0.4 为什么 early IDT 必须先于 init_mem_mapping()？
+
+根据 `setup.c:1122` 的注释，`init_mem_mapping()` **依赖于 early IDT 的 page fault 处理**。原因分析：
+
+**1. 页表构建过程可能触发 #PF**
+
+```c
+/* init_mem_mapping() 内部调用 */
+void init_memory_mapping(unsigned long start, unsigned long end, pgprot_t prot)
+{
+    /* 分配新的页表页 */
+    pte_t *pte = alloc_low_page();  // ← 可能访问未映射的内存
+
+    /* 设置页表项 */
+    *pte = __pte(pfn | prot_val);   // ← 可能触发 #PF
+}
+```
+
+**2. 内存访问模式变化**
+
+- 从身份映射（VA = PA）
+- 切换到直接映射（VA = PA + __PAGE_OFFSET）
+- 过渡期间可能访问到未映射区域
+
+**3. 如果没有 early IDT 的后果**
+
+```
+init_mem_mapping() 访问未映射内存
+    ↓
+CPU 触发 #PF（向量 14）
+    ↓
+查找 IDT[14] → 如果为空或未设置
+    ↓
+触发 Double Fault (#DF, 向量 8)
+    ↓
+查找 IDT[8] → 如果为空
+    ↓
+Triple Fault → CPU 重启 💥
+```
+
+**4. 有了 early IDT 的保护**
+
+```
+init_mem_mapping() 访问未映射内存
+    ↓
+CPU 触发 #PF（向量 14）
+    ↓
+查找 IDT[14] → early_idt_handler_array[14]
+    ↓
+进入 page_fault 处理函数
+    ↓
+处理异常（打印错误信息或修复）
+    ↓
+如果是合法的延迟分配 → 分配页面、更新页表、返回
+如果是真正的错误 → 打印错误、停止系统（受控停止）
+```
+
+#### 4.0.5 状态对比表：各阶段的内存管理能力
+
+| 时刻 | CR0.PG | 页表 | memblock | 完整映射 | buddy/slab | 进程管理 | 能否为进程分配内存 |
+|------|--------|------|----------|---------|-----------|---------|------------------|
+| **startup_32 开始** | 0 | 无 | ❌ 无 | ❌ 无 | ❌ 无 | ❌ 无 | ❌ 不能 |
+| **startup_32 末尾** | 1 | 临时身份映射 | ❌ 无 | ❌ 无 | ❌ 无 | ❌ 无 | ❌ 不能 |
+| **early_idt_handler_array 设置时** | 1 | 临时身份映射 | ❌ 无 | ❌ 无 | ❌ 无 | ❌ 无 | ❌ 不能 |
+| **e820__memblock_setup 后** | 1 | 临时身份映射 | ✅ 有（1MB限制） | ❌ 无 | ❌ 无 | ❌ 无 | ⚠️  只能用 memblock |
+| **init_mem_mapping 后** | 1 | 完整直接映射 | ✅ 有（完整） | ✅ 有 | ❌ 无 | ❌ 无 | ⚠️  只能用 memblock |
+| **mm_init 后** | 1 | 完整直接映射 | ✅ 有 | ✅ 有 | ✅ 有 | ❌ 无 | ✅ 可以（buddy/slab） |
+| **sched_init 后** | 1 | 完整直接映射 | ✅ 有 | ✅ 有 | ✅ 有 | ✅ 有 | ✅ 可以 |
+| **rest_init 后** | 1 | 完整直接映射 | ✅ 有 | ✅ 有 | ✅ 有 | ✅ 有 | ✅ 可以创建进程 |
+
+#### 4.0.6 核心结论
+
+**在 `idt_setup_early_handler()` 被调用时（设置 `early_idt_handler_array`）：**
+
+✅ **分页机制已启用**
+- CR0.PG = 1
+- CR3 指向临时页表
+- 使用身份映射（VA = PA）
+- 映射范围约 4GB
+
+❌ **没有完整的内存管理系统**
+- memblock 分配器未建立
+- 完整的内存映射未建立
+- buddy 和 slab 分配器未初始化
+- 进程调度器未初始化
+
+❌ **不能为进程分配内存**
+- 进程管理系统尚未初始化
+- 只能进行静态内存访问（如访问内核代码和数据段）
+- 不能使用动态内存分配（kmalloc、vmalloc 等）
+
+✨ **early IDT 的关键作用**
+- 保护后续的内存初始化过程（特别是 `init_mem_mapping()`）
+- 提供基本的异常处理能力
+- 防止未处理的异常导致 Triple Fault 重启
+
+这就是为什么内核在 `setup.c:1122` 添加注释强调 "init_mem_mapping() relies on the early IDT page fault handling" 的原因。
+
+---
+
 ### 4.1 主内核的 GDT（gdt_page）
 
 #### 为什么再次换 GDT

@@ -515,16 +515,21 @@ struct kmem_cache {
 ### 5.4 选择策略
 
 ```makefile
-# 内核配置
-CONFIG_SLAB=y    # 经典SLAB，内存紧张的服务器
-CONFIG_SLUB=y    # 默认，通用系统（推荐）
-CONFIG_SLOB=y    # 嵌入式，内存<64MB
+# 内核配置（Linux 6.x）
+CONFIG_SLUB=y         # SLUB 分配器（默认启用，def_bool y）
+CONFIG_SLUB_TINY=n    # SLUB 最小化版本（替代原 SLOB）
+CONFIG_SLUB_CPU_PARTIAL=y  # Per-CPU 部分缓存（默认启用）
+CONFIG_SLAB_FREELIST_RANDOM=y   # 随机化空闲链表（安全加固）
+CONFIG_SLAB_FREELIST_HARDENED=y # 加固空闲链表元数据（安全加固）
 ```
 
-**选择建议**：
-- **服务器、桌面、云环境** → SLUB（默认）
-- **内存极度紧张的服务器** → SLAB
-- **嵌入式设备（< 64MB RAM）** → SLOB
+**现代选择建议（Linux 6.x+）**：
+- **服务器、桌面、云环境** → SLUB（唯一选择，默认）
+- **嵌入式设备（< 16MB RAM）** → SLUB_TINY（替代原 SLOB）
+
+**历史说明**：
+- **CONFIG_SLAB**（经典 SLAB）：已在 Linux 6.x 移除
+- **CONFIG_SLOB**（Simple List Of Blocks）：已被 SLUB_TINY 替代
 
 ---
 
@@ -835,11 +840,12 @@ Slab 分配器     → 管理小对象（字节单位）
 
 | 文件 | 说明 |
 |------|------|
-| `mm/slub.c` | SLUB 分配器实现（~5000 行） |
-| `mm/slab.c` | SLAB 分配器实现（~4000 行） |
-| `mm/slob.c` | SLOB 分配器实现（~600 行） |
-| `include/linux/slub_def.h` | SLUB 数据结构定义 |
-| `include/linux/slab.h` | Slab API 接口 |
+| `mm/slub.c` | SLUB 分配器实现（~7870 行，Linux 6.x 默认） |
+| `mm/slab_common.c` | 通用 Slab API 层（~2184 行，被 SLUB 共享） |
+| `mm/slab.h` | 内部头文件，定义共享数据结构（~693 行） |
+| `include/linux/slab.h` | Slab API 接口（统一接口） |
+
+**注意**：Linux 6.x 已移除传统的 `slab.c` 和 `slob.c`，统一使用 SLUB 作为默认实现。对于极小内存系统（<16MB），使用 `CONFIG_SLUB_TINY` 代替原来的 SLOB。
 
 ### 延伸主题
 
