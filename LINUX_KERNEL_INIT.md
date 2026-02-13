@@ -1991,8 +1991,8 @@ static const struct idt_data ia32_idt[] __initconst = {
 ### 中断与系统调用
 
 - **[X86_INTERRUPT_EXCEPTION_TRAP.md](X86_INTERRUPT_EXCEPTION_TRAP.md)** - x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现（基础概念、三者区别、Exception 分类、优先级、IDT 门类型）
-- **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解 - 两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
-- **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - 系统调用初始化详解（trap_init、syscall_init、INT 0x80 vs SYSCALL/SYSENTER 对比、MSR 配置）
+- **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解 - 两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、**IDT 中的用户态可触发门（DPL=3 门详解：INT3、INTO、INT 0x80 完整对比与设计原理）**、GDT/IDT 对比、IST 机制、中断状态管理
+- **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - 系统调用初始化详解（trap_init、syscall_init、INT 0x80 vs SYSCALL/SYSENTER 详细对比、entry_SYSCALL_64 入口分析、32位兼容机制、MSR 配置）
 - **[LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)** - Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue）
 - **[X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)** - x86 中断控制器演进（8259 PIC vs APIC）
 - **[BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)** - BIOS IVT 与 Kernel IDT 对比

@@ -12,15 +12,21 @@
    - TSS 依赖问题
    - 内核设计原则
 3. IDT 表的 5 个演进阶段详解
-4. GDT 与 IDT 的对比
-5. IST（Interrupt Stack Table）机制
-6. 内核启动过程的中断状态（IF 标志）
-7. 早期 INT vs 完整 INT 对比
+4. 中断向量布局详解
+5. **IDT 中的用户态可触发门（DPL=3 门详解）**
+   - 完整列表：INT3、INTO、INT 0x80
+   - 为什么只有这三个是 DPL=3？
+   - 现代使用情况与性能对比
+   - 常见误解澄清（INT 0x80 vs SYSCALL）
+6. GDT 与 IDT 的对比
+7. IST（Interrupt Stack Table）机制
+8. 内核启动过程的中断状态（IF 标志）
+9. 早期 INT vs 完整 INT 对比
 
 **相关文档**：
 - [x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现](X86_INTERRUPT_EXCEPTION_TRAP.md) - 基础概念（Interrupt/Exception/Trap 区别、Exception 分类、优先级、IDT 门类型）
 - [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) - 主启动流程
-- [系统调用初始化](LINUX_KERNEL_SYSCALL_INIT.md) - syscall 初始化详解
+- [系统调用初始化](LINUX_KERNEL_SYSCALL_INIT.md) - **trap_init()、syscall_init() 详解、INT 0x80 vs SYSCALL/SYSENTER 性能对比、entry_SYSCALL_64 入口分析、32位兼容机制**
 - [Linux 中断处理](LINUX_INTERRUPT_GUIDE.md) - 运行时中断处理
 - [x86 中断控制器演进](X86_INTERRUPT_CONTROLLER_EVOLUTION.md) - 8259 PIC vs APIC 详细对比
 - [BIOS IVT vs Kernel IDT](BIOS_IVT_VS_KERNEL_IDT.md) - IVT 与 IDT 对比
@@ -798,6 +804,577 @@ IRQ 15 (从 IDE)   → 向量 0x3F
 
 ---
 
+## IDT 中的用户态可触发门（DPL=3 门详解）
+
+### 核心问题
+
+**常见疑问**：IDT 表中是不是只有 INT 0x80 这一个软件中断用于系统调用，其他都是 SYSCALL 实现？
+
+**答案**：不完全正确。IDT 表中有 **3 个 DPL=3 的门**（用户态可触发），但**只有 1 个用于系统调用**。其他两个分别用于调试和溢出检查。
+
+### 完整列表：Linux IDT 中的三个 DPL=3 门
+
+| 向量 | 名称 | 触发指令 | DPL | 用途 | 现代状态 | 源码位置 |
+|------|------|---------|-----|------|---------|---------|
+| **3** | #BP (Breakpoint) | `INT3` (0xCC) | 3 | 软件调试断点 | ✅ **使用中** | idt.c:65 (early_idts) |
+| **4** | #OF (Overflow) | `INTO` (0xCE) | 3 | 算术溢出检查 | ❌ **已废弃** | idt.c:119 (def_idts) |
+| **128 (0x80)** | INT 0x80 | `INT $0x80` | 3 | 32位系统调用 | ⚠️ **兼容模式** | idt.c:122-128 (ia32_idt) |
+
+**关键洞察**：
+- **只有 INT 0x80** 是系统调用机制
+- **INT3** 是调试工具，**不是系统调用**
+- **INTO** 是历史遗留，64 位模式已移除
+- 现代 64 位系统调用主要使用 **SYSCALL 指令**（不通过 IDT）
+
+---
+
+### INT3 - 调试断点（向量 3）
+
+#### 源码定义
+
+```c
+// arch/x86/kernel/idt.c:63-76
+static const __initconst struct idt_data early_idts[] = {
+    INTG(X86_TRAP_DB,  asm_exc_debug),
+    SYSG(X86_TRAP_BP,  asm_exc_int3),  // ← INT3，向量 3，DPL=3 ✅
+    // ...
+};
+
+// arch/x86/include/asm/trapnr.h:22
+#define X86_TRAP_BP  3  /* Breakpoint */
+```
+
+**SYSG 宏定义**（`arch/x86/kernel/idt.c:37-38`）：
+```c
+#define SYSG(_vector, _addr)  \
+    G(_vector, _addr, DEFAULT_STACK, GATE_INTERRUPT, DPL3, __KERNEL_CS)
+//                                                    ^^^^
+//                                                    用户态可触发
+```
+
+#### 用途：软件调试器
+
+**调试器工作原理**（如 gdb、lldb）：
+
+1. **设置断点**：
+   ```c
+   int main() {
+       int a = 1;
+       int b = a + 1;  // ← 用户在此设置断点
+       return b;
+   }
+   ```
+
+2. **调试器操作**：
+   - 保存原始指令（`mov eax, ...`）
+   - 替换为 `0xCC`（INT3 单字节指令）
+
+3. **命中断点**：
+   ```asm
+   mov eax, 1           ; a = 1
+   0xCC                 ; ← INT3（替换了原始的 "mov ebx, eax"）
+   ```
+
+4. **内核处理**：
+   ```c
+   // arch/x86/kernel/traps.c
+   DEFINE_IDTENTRY_RAW(exc_int3)
+   {
+       // 检查是否有调试器附加（ptrace）
+       if (debugger_attached)
+           notify_debugger();  // 通知调试器（如 gdb）
+       else
+           send_signal(current, SIGTRAP);  // 发送 SIGTRAP 信号
+   }
+   ```
+
+5. **调试器响应**：
+   - 暂停被调试进程
+   - 显示当前代码位置、变量值
+   - 等待用户命令（continue、step、print 等）
+
+#### 为什么 DPL=3？
+
+**必须允许用户态触发**：
+- 调试器本身运行在**用户态**
+- 需要在被调试程序（也在用户态）中插入断点
+- 如果 DPL=0，用户态执行 INT3 会触发 #GP（一般保护异常）→ 无法调试
+
+**安全性**：
+- INT3 只会陷入内核，不会执行任意代码
+- 内核检查是否有调试器附加（通过 ptrace 机制）
+- 未附加调试器时，发送 SIGTRAP 信号给进程（通常导致崩溃）
+
+#### 现代使用情况
+
+✅ **仍在广泛使用**：
+- 所有主流调试器（gdb、lldb、WinDbg）
+- 内核调试工具（kgdb）
+- Just-In-Time (JIT) 编译器的调试支持
+- 反调试技术检测（恶意软件检测断点）
+
+**汇编示例**：
+```asm
+; 手动触发断点
+int3        ; 等价于 0xCC 字节
+
+; 调试器常用的软件断点替换
+; 原始：  mov eax, ebx     (2 字节: 89 D8)
+; 替换：  int3             (1 字节: CC)
+;         nop              (1 字节: 90, 填充对齐)
+```
+
+---
+
+### INTO - 溢出检查（向量 4）
+
+#### 源码定义
+
+```c
+// arch/x86/kernel/idt.c:84-120
+static const __initconst struct idt_data def_idts[] = {
+    INTG(X86_TRAP_DE,  asm_exc_divide_error),
+    // ... 其他异常 ...
+    SYSG(X86_TRAP_OF,  asm_exc_overflow),  // ← INTO，向量 4，DPL=3 ✅
+};
+
+// arch/x86/include/asm/trapnr.h:23
+#define X86_TRAP_OF  4  /* Overflow */
+```
+
+#### 用途：算术溢出检查（历史遗留）
+
+**设计初衷**（1970s-1980s 早期 x86）：
+
+```asm
+; 计算有符号整数加法，检测溢出
+mov eax, 0x7FFFFFFF    ; 最大正整数 (2147483647)
+add eax, 1             ; 加 1 → 溢出，OF=1（Overflow Flag）
+into                   ; 如果 OF=1，触发 INT 4 异常
+```
+
+**等价的 C 伪代码**：
+```c
+int a = INT_MAX;
+int b = a + 1;
+if (overflow_flag)  // ← INTO 做的事
+    raise_exception();
+```
+
+#### 为什么 DPL=3？
+
+**早期设计理念**：
+- 允许用户程序**主动检查**算术溢出
+- 类似于现代的 `if (__builtin_add_overflow(...)) { handle_error(); }`
+- 编译器可以在溢出敏感的代码后插入 `INTO` 指令
+
+#### 为什么废弃？
+
+**64 位模式下完全移除**：
+- 在 x86-64 长模式下，`INTO` 指令触发 **#UD（无效操作码）**
+- Intel SDM Volume 2, Instruction Set Reference：
+  > INTO (0xCE) is invalid in 64-bit mode.
+
+**32 位模式下也很少用**：
+1. **性能问题**：每次检查都陷入内核，开销大
+2. **编译器不生成**：现代编译器（gcc、clang）从不生成 `INTO` 指令
+3. **替代方案更好**：
+   ```c
+   // 现代方法 1：编译器内建函数
+   int a, b, result;
+   if (__builtin_add_overflow(a, b, &result)) {
+       // 处理溢出
+   }
+
+   // 现代方法 2：条件检查（编译器优化后效率高）
+   if (a > INT_MAX - b) {
+       // 溢出
+   }
+   ```
+
+#### 现代状态
+
+❌ **已废弃**：
+- 64 位内核：指令本身无效（#UD）
+- 32 位内核：虽然支持，但无实际用途
+- Linux 内核保留 IDT 条目仅为历史兼容性
+
+**检测方式**：
+```bash
+# 检查当前系统是否支持 INTO
+$ grep -i "into" /proc/cpuinfo
+# （无输出，因为这不是 CPU 特性，而是指令集的一部分）
+
+# 在 64 位系统上测试
+$ cat test.s
+.global _start
+_start:
+    into        # 0xCE
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+
+$ as --64 test.s -o test.o
+$ ld test.o -o test
+$ ./test
+Illegal instruction (core dumped)  # ← #UD 异常
+```
+
+---
+
+### INT 0x80 - 32位系统调用（向量 128）
+
+#### 源码定义
+
+```c
+// arch/x86/kernel/idt.c:122-128
+static const struct idt_data ia32_idt[] __initconst = {
+#if defined(CONFIG_IA32_EMULATION)
+    SYSG(IA32_SYSCALL_VECTOR, asm_int80_emulation),  // ← 64位系统，DPL=3 ✅
+#elif defined(CONFIG_X86_32)
+    SYSG(IA32_SYSCALL_VECTOR, entry_INT80_32),       // ← 32位系统
+#endif
+};
+
+// arch/x86/include/asm/irq_vectors.h:38
+#define IA32_SYSCALL_VECTOR  0x80
+```
+
+**设置时机**（`arch/x86/kernel/idt.c:232-238`）：
+```c
+void __init idt_setup_traps(void)
+{
+    idt_setup_from_table(idt_table, def_idts, ARRAY_SIZE(def_idts), true);
+
+    if (ia32_enabled())  // ← 检查是否启用 32 位兼容
+        idt_setup_from_table(idt_table, ia32_idt, ARRAY_SIZE(ia32_idt), true);
+}
+```
+
+#### 用途：32位系统调用接口
+
+**使用方式**（32 位程序）：
+```asm
+; write(1, "Hello\n", 6) 系统调用
+mov eax, 4          ; __NR_write = 4 (32位系统调用号)
+mov ebx, 1          ; fd = 1 (stdout)
+mov ecx, msg        ; buf = "Hello\n"
+mov edx, 6          ; count = 6
+int 0x80            ; 触发系统调用（通过 IDT[128]）
+
+; 内核返回后，eax = 返回值
+```
+
+**内核处理流程**（64 位系统运行 32 位程序）：
+```c
+// arch/x86/entry/entry_64_compat.S
+SYM_CODE_START(asm_int80_emulation)
+    // 1. 保存用户态寄存器
+    // 2. 切换到内核栈
+    // 3. 调用 do_int80_syscall_32()
+    // 4. 从 ia32_sys_call_table[eax] 查找系统调用
+    // 5. 执行系统调用
+    // 6. 返回用户态（iret）
+SYM_CODE_END(asm_int80_emulation)
+```
+
+#### 为什么 DPL=3？
+
+**必须允许用户态触发**：
+- 系统调用本质是**用户态请求内核服务**
+- 如果 DPL=0，用户程序无法触发 INT 0x80 → 无法使用系统调用
+- DPL=3 允许 Ring 3（用户态）执行 `INT 0x80` 指令
+
+#### 现代状态：兼容模式
+
+⚠️ **主要用于 32 位兼容**：
+
+| 场景 | 是否使用 INT 0x80 | 实际机制 |
+|------|------------------|---------|
+| **纯 32 位系统**（x86-32 内核） | ✅ 使用 | `INT 0x80` 或 `SYSENTER` |
+| **64 位系统运行 32 位程序** | ⚠️ 可用但不推荐 | `INT 0x80`（通过 `asm_int80_emulation`）|
+| **64 位原生程序** | ❌ 不使用 | `SYSCALL` 指令（不通过 IDT）|
+
+**性能对比**（典型值）：
+```
+INT 0x80:     ~300 cycles  (查 IDT、特权级检查、栈切换、门描述符解析)
+SYSENTER:     ~150 cycles  (MSR 直接跳转，Intel 32位优化)
+SYSCALL:      ~100 cycles  (MSR 直接跳转，AMD64 标准，最快)
+```
+
+**现代 64 位程序为什么不用 INT 0x80？**
+1. **性能差**：比 SYSCALL 慢 3 倍
+2. **参数传递不兼容**：
+   - INT 0x80: 32 位寄存器（ebx, ecx, edx, esi, edi, ebp）
+   - SYSCALL: 64 位寄存器（rdi, rsi, rdx, r10, r8, r9）
+3. **系统调用号不同**：
+   - INT 0x80: 32 位系统调用号（如 `__NR_write = 4`）
+   - SYSCALL: 64 位系统调用号（如 `__NR_write = 1`）
+
+**查看系统调用号差异**：
+```c
+// 32 位系统调用表（arch/x86/entry/syscalls/syscall_32.tbl）
+4    i386    write    sys_write
+
+// 64 位系统调用表（arch/x86/entry/syscalls/syscall_64.tbl）
+1    common  write    sys_write
+```
+
+**更多详细信息**：
+- 关于 **trap_init()、syscall_init() 的详细实现**，详见 [系统调用初始化详解](LINUX_KERNEL_SYSCALL_INIT.md#1-trap_init-与系统调用初始化)
+- 关于 **entry_SYSCALL_64 入口点的汇编代码分析**，详见 [系统调用初始化详解](LINUX_KERNEL_SYSCALL_INIT.md#3-entry_syscall_64-入口点详解)
+- 关于 **32位兼容机制的三种方式（INT 0x80、SYSENTER、SYSCALL）**，详见 [系统调用初始化详解](LINUX_KERNEL_SYSCALL_INIT.md#4-32-位兼容机制详解)
+
+---
+
+### 为什么只有这三个是 DPL=3？
+
+#### 设计原则：最小特权原则
+
+**DPL（Descriptor Privilege Level）机制**：
+- **DPL=0**（Ring 0）：只有内核态可以触发
+- **DPL=3**（Ring 3）：用户态也可以触发
+
+**安全考虑**：
+- 默认情况下，所有 IDT 门都应该是 DPL=0
+- 只有**明确需要用户态触发**的功能才设为 DPL=3
+- 过多的 DPL=3 门会增加攻击面
+
+#### 三个 DPL=3 门的必要性
+
+| 向量 | 为什么必须 DPL=3？ | 如果 DPL=0 会怎样？ |
+|------|-------------------|-------------------|
+| **INT3** | 调试器需要在用户态插入断点 | 无法调试用户程序 |
+| **INTO** | 历史设计，允许用户程序检查溢出 | 无法主动检查溢出（但现在已不重要）|
+| **INT 0x80** | 用户程序需要调用内核服务 | 无法进行系统调用 |
+
+#### 为什么其他异常不是 DPL=3？
+
+**示例：#PF（Page Fault，向量 14）**
+
+```c
+// arch/x86/kernel/idt.c
+INTG(X86_TRAP_PF, asm_exc_page_fault)  // ← INTG，DPL=0
+//   ^^^^                                     不是 SYSG
+```
+
+**原因**：
+- #PF 是 **CPU 自动触发** 的异常（访问无效内存时）
+- 不需要用户态主动执行 `INT 14` 指令
+- 即使 DPL=0，CPU 仍会在发生缺页时触发异常（**硬件异常不受 DPL 限制**）
+- 设为 DPL=3 会带来安全风险：用户程序可以伪造 #PF 异常
+
+**关键洞察**：
+- **硬件异常**（如 #PF、#GP、#DE）由 CPU 自动触发，不受 DPL 限制
+- **软件中断**（如 INT 3、INT 0x80）由指令触发，受 DPL 限制
+- DPL=3 只对**软件触发的 `INT n` 指令**有意义
+
+#### CPU 如何检查 DPL？
+
+**Intel SDM Volume 3A, Section 6.12.1**：
+
+> When an INT n instruction is executed, the processor compares the CPL (Current Privilege Level) with the DPL of the gate descriptor. If the CPL is numerically greater than the DPL, a general-protection exception (#GP) is generated.
+
+**公式**：
+```
+如果执行 INT n 指令时：
+    CPL (当前特权级) > DPL (门描述符特权级)
+    → 触发 #GP (一般保护异常)
+
+示例：
+    用户态执行 INT 14（#PF）
+    CPL = 3, DPL = 0
+    3 > 0 → #GP ✅（阻止用户态触发）
+
+    用户态执行 INT 3（#BP）
+    CPL = 3, DPL = 3
+    3 > 3 ❌（允许）
+```
+
+**测试示例**：
+```asm
+; 用户态程序尝试触发 #PF
+int $14        ; CPL=3, DPL=0 → #GP
+
+; 用户态程序触发断点
+int3           ; CPL=3, DPL=3 → 成功
+```
+
+---
+
+### 常见误解澄清
+
+#### 误解 1："IDT 中只有 INT 0x80 是软件中断"
+
+❌ **错误**：IDT 中有 **3 个 DPL=3 的门**（INT3, INTO, INT 0x80）
+
+✅ **正确**：
+- INT3（调试）、INTO（溢出）、INT 0x80（系统调用）都是 DPL=3
+- 但**只有 INT 0x80** 用于系统调用
+- INT3 用于调试，INTO 已废弃
+
+---
+
+#### 误解 2："所有系统调用都通过 IDT"
+
+❌ **错误**：现代 64 位系统调用**不通过 IDT**
+
+✅ **正确**：
+
+| 机制 | 通过 IDT？ | 设置方式 | 现代使用 |
+|------|-----------|---------|---------|
+| **INT 0x80** | ✅ 是（IDT[128]） | `idt_setup_traps()` | 32 位兼容 |
+| **SYSENTER** | ❌ 否（MSR） | `enable_sep_cpu()` | 32 位首选 |
+| **SYSCALL** | ❌ 否（MSR） | `syscall_init()` | 64 位首选 |
+
+**SYSCALL 机制**（`arch/x86/kernel/cpu/common.c:2234-2248`）：
+```c
+void syscall_init(void)
+{
+    // 直接写 MSR 寄存器，不涉及 IDT
+    wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);
+    //     ^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    //     MSR 寄存器  系统调用入口地址（不在 IDT 中）
+
+    wrmsrq(MSR_STAR, (__USER32_CS << 16) | __KERNEL_CS);
+}
+```
+
+**关键差异**：
+```
+INT 0x80 路径（慢）：
+    用户态执行 INT 0x80
+    → CPU 查找 IDT[128]
+    → 读取门描述符
+    → 检查 DPL
+    → 切换特权级、栈
+    → 跳转到 asm_int80_emulation
+
+SYSCALL 路径（快）：
+    用户态执行 SYSCALL
+    → CPU 直接读 MSR_LSTAR
+    → 跳转到 entry_SYSCALL_64
+    → 无需查表、无门描述符开销
+```
+
+---
+
+#### 误解 3："INT3 是系统调用的一种"
+
+❌ **错误**：INT3 不是系统调用，是调试机制
+
+✅ **正确**：
+
+| 特性 | INT3（调试） | INT 0x80（系统调用） |
+|------|-------------|---------------------|
+| **用途** | 软件断点 | 请求内核服务 |
+| **触发者** | 调试器 | 用户程序 |
+| **内核处理** | 通知调试器或发送 SIGTRAP | 执行系统调用 |
+| **返回值** | 无 | eax/rax 寄存器 |
+| **是否改变进程状态** | 暂停（等待调试器） | 继续执行 |
+
+**代码对比**：
+```c
+// INT3 处理（arch/x86/kernel/traps.c）
+DEFINE_IDTENTRY_RAW(exc_int3)
+{
+    if (notify_debugger(...))  // ← 调试相关
+        return;
+    send_signal(current, SIGTRAP);  // ← 不是系统调用
+}
+
+// INT 0x80 处理（arch/x86/entry/entry_64_compat.S）
+SYM_CODE_START(asm_int80_emulation)
+    // ...
+    call do_int80_syscall_32  // ← 调用系统调用表
+    // ...
+SYM_CODE_END(asm_int80_emulation)
+```
+
+---
+
+#### 误解 4："64 位程序可以用 INT 0x80"
+
+⚠️ **部分正确**：技术上可以，但强烈不推荐
+
+✅ **正确理解**：
+
+**可以执行，但有问题**：
+```c
+// 64 位程序使用 INT 0x80（不推荐）
+#include <unistd.h>
+
+int main() {
+    // 错误示例：使用 INT 0x80
+    asm volatile(
+        "mov $4, %%eax\n"      // 32 位 __NR_write
+        "mov $1, %%ebx\n"      // fd = 1
+        "mov %0, %%ecx\n"      // buf
+        "mov $6, %%edx\n"      // count = 6
+        "int $0x80\n"
+        :
+        : "r"("Hello\n")
+        : "eax", "ebx", "ecx", "edx"
+    );
+
+    // 正确示例：使用 SYSCALL
+    asm volatile(
+        "mov $1, %%rax\n"      // 64 位 __NR_write
+        "mov $1, %%rdi\n"      // fd = 1
+        "mov %0, %%rsi\n"      // buf
+        "mov $6, %%rdx\n"      // count = 6
+        "syscall\n"
+        :
+        : "r"("Hello\n")
+        : "rax", "rdi", "rsi", "rdx"
+    );
+}
+```
+
+**为什么不推荐？**
+1. **性能**：比 SYSCALL 慢 3 倍
+2. **参数传递错误**：
+   ```c
+   // 64 位程序的指针是 64 位
+   char *buf = malloc(100);  // 64 位地址：0x00007ffff7a00000
+
+   // INT 0x80 只使用 32 位寄存器
+   mov ecx, buf  // ← 截断！只取低 32 位：0xf7a00000（错误地址）
+
+   // SYSCALL 使用 64 位寄存器
+   mov rsi, buf  // ← 完整 64 位地址
+   ```
+
+3. **系统调用号冲突**：
+   ```c
+   // 32 位：__NR_write = 4
+   // 64 位：__NR_write = 1
+   // 如果用 INT 0x80，会调用错误的系统调用
+   ```
+
+---
+
+### 总结对比表
+
+| 向量 | 名称 | 指令 | DPL | 用途 | 设置时机 | 现代状态 |
+|------|------|------|-----|------|---------|---------|
+| **3** | #BP | INT3 | 3 | 调试断点 | `idt_setup_early_traps()` | ✅ 使用中 |
+| **4** | #OF | INTO | 3 | 溢出检查 | `idt_setup_traps()` | ❌ 已废弃 |
+| **128** | INT 0x80 | INT $0x80 | 3 | 系统调用 | `idt_setup_traps()` | ⚠️ 兼容模式 |
+| **其他异常** | #PF, #GP 等 | CPU 自动 | 0 | 异常处理 | 各阶段 | ✅ 使用中 |
+| **硬件中断** | IRQ 0-15 等 | 外部硬件 | 0 | 设备中断 | `idt_setup_apic_and_irq_gates()` | ✅ 使用中 |
+
+**关键要点**：
+1. **只有 3 个 DPL=3 门**：INT3、INTO、INT 0x80
+2. **只有 INT 0x80 是系统调用**，其他不是
+3. **现代系统调用主要用 SYSCALL/SYSENTER**，不通过 IDT
+4. **INT3 仍在使用**（调试），**INTO 已废弃**（64位无效）
+
+**延伸阅读**：
+- 关于 **INT 0x80 vs SYSCALL/SYSENTER 的详细性能对比、MSR 配置、entry_SYSCALL_64 入口点分析、32位兼容机制**，详见 [系统调用初始化详解](LINUX_KERNEL_SYSCALL_INIT.md)
+
+---
+
 ## PIC vs APIC 初始化对比
 
 ### init_IRQ() 中的中断控制器选择
@@ -926,4 +1503,6 @@ TLB:        123        112        101         90   TLB shootdowns
 **最后更新**：2026-02
 **维护者**：Linux 内核启动文档项目
 **校对日期**：2026-02-14（已验证 `/Users/weli/works/linux` 源代码）
-**新增内容**：深入分析为什么需要两个独立的 IDT 表（KASAN instrumentation、TSS 依赖、设计原则）
+**新增内容**：
+- 深入分析为什么需要两个独立的 IDT 表（KASAN instrumentation、TSS 依赖、设计原则）
+- IDT 中的用户态可触发门详解（INT3、INTO、INT 0x80 完整对比与现代使用情况）

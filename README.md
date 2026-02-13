@@ -217,8 +217,8 @@ DISPLAY=:1 make run-gui
 
 #### Linux 中断实现
 - **[LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)** - Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue）
-- **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - Linux 内核 IDT 表的演进流程详解
-- **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - Linux 系统调用初始化详解（INT 0x80 vs SYSCALL/SYSENTER）
+- **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - Linux 内核 IDT 表的演进流程详解（两个 IDT 表、5 个演进阶段、IDT 中的用户态可触发门（DPL=3）详解：INT3/INTO/INT 0x80 完整对比）
+- **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - Linux 系统调用初始化详解（trap_init/syscall_init、INT 0x80 vs SYSCALL/SYSENTER 性能对比、entry_SYSCALL_64 入口分析）
 
 #### 中断控制器
 - **[X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)** - x86 中断控制器演进：从 8259 PIC 到 APIC（架构对比、性能分析、MSI/MSI-X、x2APIC）
