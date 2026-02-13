@@ -1,6 +1,8 @@
 # Linux 内核系统调用初始化详解
 
 > **本文档为** [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) **的子文档**
+>
+> 📚 **首次阅读？** 建议先查看 [文档导读指南](READING_GUIDE.md#-中断与系统调用)，了解系统调用文档的学习路径。
 
 本文档详细介绍 Linux 内核启动过程中系统调用机制的初始化，包括 trap_init()、syscall_init() 的实现细节，以及 INT 0x80 和 SYSCALL/SYSENTER 两种系统调用机制的对比。
 
