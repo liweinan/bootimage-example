@@ -2,7 +2,9 @@
 
 > 本文档包含项目中所有 100+ 篇技术文档的详细分类列表。
 >
-> 💡 **首次访问？** 建议先查看 [📖 文档导读指南 (READING_GUIDE.md)](READING_GUIDE.md)，了解系统性的学习路径。
+> 💡 **首次访问？** 建议先查看：
+> - 🚀 [快速开始指南 (QUICKSTART.md)](QUICKSTART.md) - 快速运行引导扇区示例程序
+> - 📖 [文档导读指南 (READING_GUIDE.md)](READING_GUIDE.md) - 系统性的学习路径
 
 ---
 
