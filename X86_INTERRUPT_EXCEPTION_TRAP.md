@@ -2,6 +2,23 @@
 
 本文档基于 **Intel Software Developer Manual (SDM) Volume 3A Chapter 6** 和 **Linux 内核源码**，详细阐述 x86 架构中 Interrupt（中断）、Exception（异常）、Trap（陷阱）的本质区别及其在 Linux 内核中的实现。
 
+**⚠️ 重要勘误（2026-02-14）**：
+
+本文档经严格核对 Intel SDM Volume 3A Chapter 6 原文后，发现并修正了以下关键错误：
+
+1. **INT n 的分类**：
+   - ❌ **错误**：INT n (如 INT 0x80) 归类为 Exception
+   - ✅ **正确**：INT n 归类为 **Interrupt**（Intel SDM 6.3.3 Software-Generated Interrupts）
+   - 📖 **依据**：Table 6-1 明确标注 Vector 32-255 为 "Interrupt" 类型，Source: "External interrupt or INT n instruction"
+
+2. **INT 3 / INTO 的分类**：
+   - ✅ **正确**：INT 3, INTO, BOUND 归类为 **Exception**（Intel SDM 6.4.2 Software-Generated Exceptions）
+   - 📖 **依据**：Table 6-1 标注 Vector 3 (#BP) 和 Vector 4 (#OF) 为 "Trap" 类型
+
+3. **核心发现**：
+   - Intel SDM 将 **INT n (通用向量)** 和 **INT 3/INTO (特殊向量)** 归入**不同类别**
+   - **不能笼统地说"软件中断归类为异常"**，需要区分具体指令
+
 **补充文档**：
 - **[x86 异常的硬件触发机制：Page Fault 与 Breakpoint 深入剖析](X86_EXCEPTION_HARDWARE_TRIGGER.md)** - 通过实际案例详解异常的硬件触发流程、向量号的硬件规范、以及软件职责边界
 
@@ -34,53 +51,148 @@
 - **Interrupt（中断）**：中断是一个**异步事件**，通常由 I/O 设备触发。
 - **Exception（异常）**：异常是一个**同步事件**，当处理器在执行指令时检测到一个或多个预定义条件时产生。
 
-### 1.2 关键术语
+### 1.2 Intel SDM 分类体系
 
-| 术语 | Intel SDM 定义 | 触发方式 | 示例 |
-|------|---------------|---------|------|
-| **Interrupt** | 异步事件，由外部硬件触发 | 异步（与当前执行的指令无关） | 时钟中断、键盘中断、网卡中断 |
-| **Exception** | 同步事件，由当前指令或 CPU 状态触发 | 同步（由当前指令直接引起） | 缺页异常、除零异常、非法指令 |
-| **Software Interrupt** | 由 `INT n` 指令触发的异常 | 同步（由 `INT n` 指令触发） | `INT 0x80`、`INT 3` |
-| **Trap** | Exception 的一种类型（见下文） | 同步 | 断点异常、溢出异常 |
-| **Fault** | Exception 的一种类型（见下文） | 同步 | 缺页异常、保护异常 |
-| **Abort** | Exception 的一种类型（见下文） | 同步 | 双重故障、机器检查异常 |
+根据 **Intel SDM Volume 3A, Chapter 6** 的实际章节结构：
 
-**重要**：在 Intel SDM 中，**Software Interrupt（软件中断）** 被归类为 **Exception（异常）**，而不是 Interrupt！
+**6.3 SOURCES OF INTERRUPTS** (中断的来源)
+- 6.3.1 **External Interrupts** - 外部硬件中断
+- 6.3.2 Maskable Hardware Interrupts - 可屏蔽硬件中断
+- 6.3.3 **Software-Generated Interrupts** - 软件生成的中断（`INT n` 指令）
+
+**6.4 SOURCES OF EXCEPTIONS** (异常的来源)
+- 6.4.1 **Program-Error Exceptions** - 程序错误异常
+- 6.4.2 **Software-Generated Exceptions** - 软件生成的异常（`INT 3`, `INTO`, `BOUND`）
+
+### 1.3 关键术语
+
+| 术语 | Intel SDM 分类 | 章节位置 | 触发方式 | 示例 |
+|------|---------------|---------|---------|------|
+| **External Interrupt** | Interrupt | 6.3.1 | 异步，外部硬件设备 | 时钟中断、键盘中断、网卡中断 |
+| **Software-Generated Interrupt** | **Interrupt** | **6.3.3** | 同步，`INT n` 指令 | **`INT 0x80`**, `INT 35` |
+| **Software-Generated Exception** | **Exception** | **6.4.2** | 同步，特定指令 | **`INT 3`**, `INTO`, `BOUND` |
+| **Program-Error Exception** | Exception | 6.4.1 | 同步，指令执行错误 | #PF（缺页）、#GP（保护违例）、#DE（除零） |
+| **Trap** | Exception 的子类型 | 6.5 | 同步 | #BP（断点）、#OF（溢出） |
+| **Fault** | Exception 的子类型 | 6.5 | 同步 | #PF（缺页）、#GP（保护违例） |
+| **Abort** | Exception 的子类型 | 6.5 | 同步 | #DF（双重故障）、#MC（机器检查） |
+
+**重要发现**（基于 **Intel SDM Volume 3A, Table 6-1**）：
+
+1. **INT n (通用向量)** 在 Intel SDM 中被归类为 **Interrupt**（6.3.3 章节）
+   - Table 6-1 明确标注：Vector 32-255, Type: **Interrupt**, Source: "External interrupt **or INT n instruction**"
+   - 示例：`INT 0x80`（系统调用）、`INT 35`（自定义中断）
+
+2. **INT 3, INTO, BOUND** 在 Intel SDM 中被归类为 **Exception**（6.4.2 章节）
+   - Table 6-1 标注：Vector 3 (#BP), Type: **Trap**, Source: "INT 3 instruction"
+   - Table 6-1 标注：Vector 4 (#OF), Type: **Trap**, Source: "INTO instruction"
+
+### 1.4 Intel SDM 分类树状图
+
+基于 **Intel SDM Volume 3A Chapter 6** 的实际章节结构：
+
+```
+CPU 中断/异常事件
+│
+├─ Chapter 6.3: SOURCES OF INTERRUPTS (中断来源)
+│  │
+│  ├─ 6.3.1 External Interrupts (外部中断)
+│  │   ├─ 硬件触发，异步
+│  │   ├─ 受 EFLAGS.IF 控制（可屏蔽）
+│  │   └─ 示例：IRQ 0 (时钟), IRQ 1 (键盘), APIC 中断
+│  │
+│  ├─ 6.3.2 Maskable Hardware Interrupts (可屏蔽硬件中断)
+│  │   └─ INTR 引脚，PIC/APIC 中断控制器
+│  │
+│  └─ 6.3.3 Software-Generated Interrupts (软件生成的中断) ✅ 关键！
+│      ├─ INT n 指令触发，同步
+│      ├─ 不受 EFLAGS.IF 控制（不可屏蔽）
+│      ├─ Table 6-1 类型：Interrupt
+│      └─ 示例：INT 0x80 (系统调用), INT 35 (自定义)
+│
+└─ Chapter 6.4: SOURCES OF EXCEPTIONS (异常来源)
+   │
+   ├─ 6.4.1 Program-Error Exceptions (程序错误异常)
+   │   ├─ 指令执行时检测到错误
+   │   ├─ 不受 EFLAGS.IF 控制（不可屏蔽）
+   │   ├─ 分为三种类型（见 6.5）：
+   │   │   ├─ Fault (故障) - RIP 指向引起故障的指令
+   │   │   │   └─ 示例：#PF (缺页), #GP (保护违例), #DE (除零)
+   │   │   ├─ Trap (陷阱) - RIP 指向下一条指令
+   │   │   │   └─ 示例：#DB (调试), #BP (断点)
+   │   │   └─ Abort (中止) - RIP 不可靠，不可恢复
+   │   │       └─ 示例：#DF (双重故障), #MC (机器检查)
+   │   └─ 向量范围：0-31 (CPU 保留)
+   │
+   └─ 6.4.2 Software-Generated Exceptions (软件生成的异常) ✅ 关键！
+       ├─ 特定指令触发：INT 3, INTO, BOUND
+       ├─ 不受 EFLAGS.IF 控制（不可屏蔽）
+       ├─ Table 6-1 类型：Trap (Exception 的子类型)
+       └─ 示例：
+           ├─ INT 3 (断点，向量 3)
+           ├─ INTO (溢出检查，向量 4)
+           └─ BOUND (边界检查，向量 5)
+```
+
+**核心区别总结**：
+
+| 指令 | Intel SDM 章节 | 分类 | Table 6-1 Type | 向量范围 | 典型用途 |
+|------|---------------|------|---------------|---------|---------|
+| **INT n** | 6.3.3 Software-Generated **Interrupts** | **Interrupt** | **Interrupt** | 32-255 | 系统调用 (INT 0x80) |
+| **INT 3** | 6.4.2 Software-Generated **Exceptions** | **Exception** | **Trap** | 3 | 调试断点 |
+| **INTO** | 6.4.2 Software-Generated **Exceptions** | **Exception** | **Trap** | 4 | 溢出检测 |
+| **IRQ** | 6.3.1 External **Interrupts** | **Interrupt** | **Interrupt** | 32-255 | 硬件中断 |
 
 ---
 
-## 二、三者的本质区别
+## 二、Interrupt vs Exception 的本质区别
 
 ### 2.1 完整对比表
 
-| 特性 | **Hardware Interrupt**<br>（硬件中断） | **Software Interrupt**<br>（软件中断，如 INT 0x80） | **Exception**<br>（异常，如 #PF、#GP） |
-|------|--------------------------------------|------------------------------------------------|----------------------------------|
-| **Intel SDM 分类** | Interrupt | **Exception** | **Exception** |
-| **触发方式** | 异步，外部硬件设备 | 同步，`INT n` 指令 | 同步，当前指令或 CPU 状态 |
-| **触发时机** | 任意时刻（与指令执行无关） | 执行 `INT n` 指令时 | 执行特定指令或检测到错误时 |
-| **受 EFLAGS.IF 控制？** | ✅ **是**（IF=0 时被屏蔽） | ❌ **否**（IF=0 时仍会触发） | ❌ **否**（IF=0 时仍会触发） |
-| **可否被屏蔽？** | 可屏蔽（Maskable）<br>NMI 不可屏蔽 | 不可屏蔽 | 不可屏蔽 |
-| **优先级** | 低（可被异常抢占） | 中（与异常相同） | 高（最先处理） |
-| **向量范围** | 32-255 | 特定向量（0x80, 3, 4 等） | 0-31（CPU 保留） |
-| **DPL 设置** | 通常 DPL=0（内核态） | 可设为 DPL=3（用户态可触发） | 多数 DPL=0，少数 DPL=3（#BP, #OF） |
-| **典型示例** | IRQ 0（时钟）<br>IRQ 1（键盘）<br>IRQ 14（硬盘） | INT 0x80（系统调用）<br>INT 3（断点）<br>INT 1（ICEBP） | #PF（缺页）<br>#GP（保护违例）<br>#DE（除零） |
-| **Linux Event Type** | `EVENT_TYPE_EXTINT` (0) | `EVENT_TYPE_SWINT` (4)<br>`EVENT_TYPE_SWEXC` (6) | `EVENT_TYPE_HWEXC` (3) |
+| 特性 | **External Interrupt**<br>（外部中断，如 IRQ） | **Software-Generated Interrupt**<br>（软件中断，INT n，如 INT 0x80） | **Software-Generated Exception**<br>（软件异常，INT 3/INTO） | **Program-Error Exception**<br>（程序错误异常，如 #PF、#GP） |
+|------|--------------------------------------|------------------------------------------------|----------------------------------|----------------------------------|
+| **Intel SDM 分类** | **Interrupt** (6.3.1) | **Interrupt** (6.3.3) | **Exception** (6.4.2) | **Exception** (6.4.1) |
+| **触发方式** | 异步，外部硬件设备 | 同步，`INT n` 指令 | 同步，`INT 3`/`INTO`/`BOUND` 指令 | 同步，当前指令或 CPU 状态 |
+| **触发时机** | 任意时刻（与指令执行无关） | 执行 `INT n` 指令时 | 执行 `INT 3`/`INTO` 指令时 | 执行特定指令或检测到错误时 |
+| **受 EFLAGS.IF 控制？** | ✅ **是**（IF=0 时被屏蔽） | ❌ **否**（IF=0 时仍会触发） | ❌ **否**（IF=0 时仍会触发） | ❌ **否**（IF=0 时仍会触发） |
+| **可否被屏蔽？** | 可屏蔽（Maskable）<br>NMI 不可屏蔽 | 不可屏蔽 | 不可屏蔽 | 不可屏蔽 |
+| **优先级** | 低（优先级 6） | 与异常相同（优先级 10） | 高（优先级 4） | 高（优先级 7-10） |
+| **向量范围** | 32-255 | 32-255（用户自定义） | 0-31（CPU 保留向量） | 0-31（CPU 保留向量） |
+| **Table 6-1 Type** | **Interrupt** | **Interrupt** | **Trap** (INT 3), **Trap** (INTO) | **Fault/Trap/Abort** |
+| **DPL 设置** | 通常 DPL=0（内核态） | 可设为 DPL=3（用户态可触发） | DPL=3（用户态可触发） | 多数 DPL=0，少数 DPL=3 |
+| **典型示例** | IRQ 0（时钟）<br>IRQ 1（键盘）<br>IRQ 14（硬盘） | **INT 0x80**（系统调用）<br>INT 35（自定义） | **INT 3**（断点）<br>**INTO**（溢出检查） | #PF（缺页）<br>#GP（保护违例）<br>#DE（除零） |
+| **Linux Event Type** | `EVENT_TYPE_EXTINT` (0) | `EVENT_TYPE_SWINT` (4) | `EVENT_TYPE_SWEXC` (6) | `EVENT_TYPE_HWEXC` (3) |
 
-### 2.2 核心区别公式
+### 2.2 核心区别总结
+
+**基于 Intel SDM Volume 3A 的分类：**
 
 ```
-异步（外部触发） + 受 IF 控制 = Hardware Interrupt（硬件中断）
-同步（指令触发） + 不受 IF 控制 = Software Interrupt/Exception（软件中断/异常）
+Interrupt（中断）大类
+├─ External Interrupts (6.3.1) - 硬件触发，异步，受 IF 控制
+└─ Software-Generated Interrupts (6.3.3) - INT n 指令触发，同步，不受 IF 控制
+
+Exception（异常）大类
+├─ Program-Error Exceptions (6.4.1) - 指令执行错误，如 #PF, #GP, #DE
+└─ Software-Generated Exceptions (6.4.2) - INT 3, INTO, BOUND 指令
 ```
 
 **关键洞察**：
 
-1. **Software Interrupt 在 CPU 层面是 Exception**
-   - 虽然习惯上称 `INT 0x80` 为"软件中断"（Software Interrupt）
-   - 但在 Intel SDM 和 CPU 硬件层面，它被归类为 **Exception**
-   - 这是因为它具有 Exception 的所有特征：同步触发、不受 IF 控制
+1. **INT n 和 INT 3 的分类差异**
+   - **INT n (通用向量，如 INT 0x80)**：在 Intel SDM 中归类为 **Interrupt**（6.3.3）
+     - Table 6-1 明确标注为 "Interrupt" 类型
+     - 虽然是同步触发，但 Intel 将其归入 Interrupt 类别
+   - **INT 3, INTO, BOUND**：在 Intel SDM 中归类为 **Exception**（6.4.2）
+     - Table 6-1 标注为 "Trap" 类型（Exception 的子类型）
+     - 特殊的软件异常，主要用于调试
 
-2. **Trap 是 Exception 的一种子类型**
+2. **同步 vs 异步不是唯一分类标准**
+   - **External Interrupts**：异步 + 受 IF 控制 → Interrupt
+   - **INT n (如 INT 0x80)**：同步 + 不受 IF 控制 → 仍归类为 Interrupt（按 Intel SDM 6.3.3）
+   - **INT 3, INTO**：同步 + 不受 IF 控制 → Exception（按 Intel SDM 6.4.2）
+   - **Program Errors**：同步 + 不受 IF 控制 → Exception
+
+3. **Trap 是 Exception 的一种子类型**
    - Trap 不是与 Interrupt/Exception 平级的概念
    - Trap 是 Exception 的三种类型之一（Fault/Trap/Abort）
    - 详见下文"Exception 的三种类型"章节
@@ -641,33 +753,46 @@ void init_IRQ() {
 
 ## 七、常见误解澄清
 
-### 7.1 误解一："软件中断"是与"硬件中断"对等的概念
+### 7.1 误解一：INT n 和 INT 3 都是"软件中断"，应该归为同一类
 
 **❌ 错误理解**：
 ```
 中断
-├─ 硬件中断（Hardware Interrupt）
-└─ 软件中断（Software Interrupt）
+├─ 硬件中断（Hardware Interrupt）- IRQ
+└─ 软件中断（Software Interrupt）- INT n, INT 3, INTO
 ```
 
-**✅ 正确理解**：
+**✅ 正确理解（基于 Intel SDM Chapter 6）**：
 ```
 CPU 事件
-├─ 中断（Interrupt）
-│   ├─ 硬件中断（Maskable Interrupt）
-│   └─ NMI（Non-Maskable Interrupt）
-└─ 异常（Exception）
-    ├─ Fault（故障）- 如 #PF, #GP
-    ├─ Trap（陷阱）- 如 #BP, #OF
-    ├─ Abort（中止）- 如 #DF, #MC
-    └─ Software Interrupt（软件中断）- 如 INT 0x80, INT 3
-        ↑ 这是 Exception 的一种！
+├─ Interrupt（中断）
+│   ├─ External Interrupts (6.3.1) - 外部硬件中断（如 IRQ）
+│   └─ Software-Generated Interrupts (6.3.3) - INT n 指令（如 INT 0x80, INT 35）
+│       ↑ 注意：这归类为 Interrupt，不是 Exception！
+└─ Exception（异常）
+    ├─ Program-Error Exceptions (6.4.1)
+    │   ├─ Fault（故障）- 如 #PF, #GP
+    │   ├─ Trap（陷阱）- 如部分 #DB
+    │   └─ Abort（中止）- 如 #DF, #MC
+    └─ Software-Generated Exceptions (6.4.2)
+        └─ INT 3, INTO, BOUND
+            ↑ 这些归类为 Exception (Trap 类型)
 ```
 
 **关键点**：
-- **Software Interrupt 在 Intel SDM 中归类为 Exception**
-- 虽然名称包含"Interrupt"，但本质是 Exception
-- 因为它具有 Exception 的所有特征：同步、不受 IF 控制
+
+1. **INT n (通用向量) ≠ INT 3/INTO**
+   - **INT n (如 INT 0x80)**：Intel SDM 6.3.3 Software-Generated **Interrupts** → 归类为 **Interrupt**
+   - **INT 3, INTO, BOUND**：Intel SDM 6.4.2 Software-Generated **Exceptions** → 归类为 **Exception**
+
+2. **为什么 Intel 这样分类？**
+   - **INT n**：用户可自定义向量（32-255），功能灵活，Table 6-1 标注为 "Interrupt" 类型
+   - **INT 3, INTO**：CPU 预定义向量（3, 4），专门用于调试/异常检测，Table 6-1 标注为 "Trap" 类型
+
+3. **同步触发不等于 Exception**
+   - 虽然 INT n 是同步触发（执行指令时）
+   - 但 Intel SDM 仍将其归入 Interrupt 类别（6.3.3）
+   - 这表明分类标准不仅仅是同步/异步
 
 ### 7.2 误解二："Trap" 是独立的中断类型
 
