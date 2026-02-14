@@ -98,15 +98,17 @@ Chapter 6: INTERRUPT AND EXCEPTION HANDLING
 ├─ Chapter 6.3: SOURCES OF INTERRUPTS (中断来源)
 │  │
 │  ├─ 6.3.1 External Interrupts (外部中断)
-│  │   ├─ 通过硬件引脚或 APIC 触发，异步
+│  │   ├─ 硬件设备触发，异步
 │  │   ├─ **可屏蔽类型** (6.3.2 Maskable Hardware Interrupts)：
-│  │   │   ├─ 通过 INTR 引脚或 APIC 传递
+│  │   │   ├─ 经过中断控制器：PIC (8259A) 或 APIC (IOAPIC/LAPIC)
+│  │   │   ├─ 通过 INTR 引脚传递给 CPU
 │  │   │   ├─ 受 EFLAGS.IF 控制（可被全局屏蔽）
-│  │   │   └─ 示例：IRQ 0-15 (PIC), Vector 16-255 (APIC)
+│  │   │   └─ 示例：IRQ 0-15 (PIC), Vector 32-255 (APIC)
 │  │   └─ **不可屏蔽类型** (NMI - Non-Maskable Interrupt)：
-│  │       ├─ 通过 NMI# 引脚触发（物理引脚，异步）
+│  │       ├─ 通过独立的 NMI# 引脚直达 CPU（**不经过 PIC/APIC**）
 │  │       ├─ Vector 2（固定向量号）
 │  │       ├─ 不受 EFLAGS.IF 控制（即使 CLI 也无法屏蔽）
+│  │       ├─ 硬件原因：绕过中断控制器，直接连接到 CPU
 │  │       ├─ 优先级高于普通中断，用于关键硬件事件
 │  │       ├─ 典型用途：
 │  │       │   ├─ 内存奇偶校验错误（ECC 错误）
