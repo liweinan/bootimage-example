@@ -370,9 +370,14 @@ T4: 如果有挂起的 NMI，现在可以触发
 - Fault 是一种**通常可以被修复**的异常，一旦修复后，允许程序重新启动且**不会丢失程序连续性**（no loss of continuity）
 - 当 fault 被报告时，处理器将机器状态**恢复到故障指令开始执行之前的状态**（restores the machine state to the state prior to the beginning of execution）
 
+**术语说明**：
+- **故障指令**（faulting instruction）= **引起 Fault 类型异常的指令**
+- 包括：`MOV [无效地址]`（缺页）、`DIV 0`（除零）、访问受保护段等
+- 对比：**陷阱指令**（trapping instruction）= 引起 Trap 类型异常的指令（如 `INT 3`、`INTO`）
+
 **特征**：
 - **保存的 EIP/RIP**：指向**引起故障的指令本身**（the faulting instruction），而非下一条指令
-- **状态回滚**：CPU 回滚机器状态到该指令执行前（即使指令已部分执行）
+- **状态回滚**：CPU 回滚机器状态到故障指令执行前（即使指令已部分执行）
 - **可恢复性**：✅ **可恢复** - 修复问题后可重新执行该指令，程序连续性不受影响
 - **典型用途**：需要操作系统介入修复的条件（如缺页、段不存在、栈错误）
 
@@ -414,10 +419,15 @@ int *ptr = (int *)0x1000000;  // 假设这个页面未映射
 - Trap 是在陷阱指令**执行完成之后立即**被报告的异常（reported immediately following the execution of the trapping instruction）
 - Trap 允许程序或任务继续执行，且**不会丢失程序连续性**（without loss of program continuity）
 
+**术语说明**：
+- **陷阱指令**（trapping instruction）= **引起 Trap 类型异常的指令**
+- 包括：`INT 3`、`INTO`（如果 OF=1）、单步模式下的任意指令（TF=1）
+- 对比：**故障指令**（faulting instruction）= 引起 Fault 类型异常的指令（如 `DIV 0`、`MOV [无效地址]`）
+
 **特征**：
 - **保存的 EIP/RIP**：指向**陷阱指令之后的下一条指令**（the instruction to be executed after the trapping instruction）
-- **报告时机**：在触发指令完整执行后立即报告
-- **可恢复性**：✅ **可恢复** - 允许程序继续执行，无需重新执行触发指令
+- **报告时机**：在陷阱指令完整执行后立即报告
+- **可恢复性**：✅ **可恢复** - 允许程序继续执行，无需重新执行陷阱指令
 - **典型用途**：调试（断点、单步执行）、条件监控（溢出检测）
 
 **典型示例**：
