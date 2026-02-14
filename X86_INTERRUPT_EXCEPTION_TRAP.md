@@ -27,7 +27,10 @@
 ## 目录
 
 - [一、Intel SDM 官方定义](#一intel-sdm-官方定义)
-- [二、三者的本质区别](#二三者的本质区别)
+- [二、Interrupt vs Exception 的本质区别](#二interrupt-vs-exception-的本质区别)
+  - [2.1 完整对比表](#21-完整对比表)
+  - [2.2 核心区别总结](#22-核心区别总结)
+  - [2.3 NMI (Non-Maskable Interrupt) 详解](#23-nmi-non-maskable-interrupt-详解)
 - [三、Exception 的三种类型](#三exception-的三种类型)
 - [四、中断/异常优先级](#四中断异常优先级)
 - [五、IDT 门描述符类型](#五idt-门描述符类型)
@@ -226,6 +229,113 @@ Chapter 6: INTERRUPT AND EXCEPTION HANDLING
    - **Exception 分类**：全部都是不可屏蔽的
      - Program-Error Exceptions (6.4.1) - 不受 IF 控制
      - Software-Generated Exceptions (6.4.2) - 不受 IF 控制
+
+### 2.3 NMI (Non-Maskable Interrupt) 详解
+
+NMI 是 External Interrupt 的一种特殊类型，具有独特的硬件机制和使用场景。
+
+#### 2.3.1 硬件机制
+
+**单引脚多设备共享**：
+
+```
+硬件设备层
+├─ 内存控制器 (ECC) ───┐
+├─ PCI/PCIe 总线 (SERR#) ─┤
+├─ 看门狗定时器 ────────┤
+├─ 性能监控单元 (PMU) ───┤  OR 门    NMI# 引脚
+├─ APIC NMI IPI ────────┼────→ ─────→ CPU
+└─ I/O 通道检查 (IOCHK) ─┘
+
+芯片组层 (南桥/PCH)
+└─ NMI Status Register (记录触发源)
+```
+
+**关键特性**：
+- **独立物理引脚**：NMI# 引脚直达 CPU，**不经过 PIC/APIC**
+- **OR 门逻辑**：多个设备通过 OR 门连接到单个 NMI# 引脚
+- **固定向量**：Vector 2，无法通过向量号区分不同设备
+- **硬件不可屏蔽**：绕过中断控制器，EFLAGS.IF 无效（即使 CLI 也无法屏蔽）
+
+#### 2.3.2 来源识别问题
+
+**为什么无法自动识别来源？**
+
+| 特性 | 普通硬件中断 (INTR/APIC) | NMI |
+|------|------------------------|-----|
+| **引脚** | 经过中断控制器（多个输入引脚） | 单个 NMI# 引脚 |
+| **向量号** | 32-255（可为每个设备分配不同向量） | 固定 Vector 2 |
+| **设备识别** | 硬件自动识别（通过向量号） | 无法自动识别 |
+
+**软件解决方案**：
+
+1. **轮询机制**：NMI 处理程序必须逐个检查所有可能的 NMI 源
+   ```c
+   void nmi_handler(void) {
+       // 读取芯片组 NMI Status Register
+       uint8_t nmi_status = inb(NMI_STATUS_PORT);
+
+       if (nmi_status & NMI_ECC_ERROR)
+           handle_ecc_error();
+       if (nmi_status & NMI_PCI_SERR)
+           handle_pci_error();
+       if (nmi_status & NMI_WATCHDOG)
+           handle_watchdog_timeout();
+       // ... 检查其他 NMI 源
+   }
+   ```
+
+2. **芯片组支持**：南桥/PCH 提供状态寄存器记录哪个源触发了 NMI
+
+#### 2.3.3 典型应用场景
+
+**为什么只适合低频率、高优先级事件？**
+
+| 优点 | 缺点 |
+|------|------|
+| ✅ 不可屏蔽，保证及时响应 | ❌ 识别来源需要轮询，开销大 |
+| ✅ 硬件优先级高 | ❌ 只有一个向量号，无法区分设备 |
+| ✅ 绕过中断控制器，延迟低 | ❌ 不适合高频事件（如网络包） |
+| ✅ 可用于调试其他中断处理 | ❌ 嵌套处理复杂（需手动解除屏蔽） |
+
+**常见用途**：
+
+1. **硬件故障检测**（关键！）
+   - 内存 ECC 错误（单比特/多比特错误）
+   - PCI/PCIe 总线错误 (SERR# 信号)
+   - 系统总线奇偶校验错误
+   - I/O 通道检查失败 (IOCHK)
+
+2. **系统监控**
+   - 看门狗定时器超时（检测系统挂起）
+   - 温度过高、电压异常
+
+3. **性能分析**
+   - 性能监控计数器 (PMU) 溢出
+   - CPU 采样 profiling
+
+4. **多处理器通信**
+   - APIC 的 NMI IPI（处理器间中断）
+   - 系统调试、远程唤醒
+
+#### 2.3.4 NMI 嵌套屏蔽
+
+**特殊机制**：NMI 虽然不受 IF 控制，但有自己的嵌套屏蔽机制。
+
+```
+时间线：
+T1: NMI 触发 ───→ CPU 自动屏蔽后续 NMI（硬件机制）
+T2: NMI 处理程序执行中... （此时新的 NMI 被阻塞）
+T3: IRET 返回 ───→ 自动解除 NMI 屏蔽
+T4: 如果有挂起的 NMI，现在可以触发
+```
+
+**关键点**：
+- CPU 在进入 NMI 处理程序时**自动屏蔽后续 NMI**（防止嵌套）
+- 执行 `IRET` 返回时自动解除屏蔽
+- 如果需要在 NMI 处理程序中重新启用 NMI（危险操作），需要特殊技巧（如执行 `INT 2` 再 `IRET`）
+
+**注意**：NMI 嵌套屏蔽是**硬件机制**，与 EFLAGS.IF 无关。
 
 ---
 
