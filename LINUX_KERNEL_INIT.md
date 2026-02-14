@@ -1232,6 +1232,130 @@ start_kernel() 阶段 2（main.c）
 
 > 运行时中断模型见 [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)；BIOS IVT 与 Kernel IDT 见 [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md)；8259 PIC 与 APIC 架构对比见 [X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)。
 
+#### 开中断时机：local_irq_enable()
+
+**关键问题**：内核从哪一步开始允许硬件中断？
+
+**答案**：在 `init_IRQ()` 及相关子系统初始化**完成之后**，通过 `local_irq_enable()` 开中断。
+
+**代码位置**：`init/main.c:1027`（start_kernel 函数中）
+
+```c
+asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protector
+void start_kernel(void)
+{
+    // ...
+
+    local_irq_disable();          // 内核入口：关闭中断
+    early_boot_irqs_disabled = true;
+
+    /*
+     * Interrupts are still disabled. Do necessary setups, then
+     * enable them.
+     */
+
+    // 阶段 1：基础设施初始化
+    boot_cpu_init();
+    page_address_init();
+    setup_arch(&command_line);    // 内存接管
+
+    // 阶段 2：中断相关初始化
+    mm_core_init();
+    sched_init();
+    trap_init();                  // IDT 异常门 + 系统调用
+    early_irq_init();             // IRQ 描述符数组初始化
+    init_IRQ();                   // IDT 硬件中断门 + PIC/APIC 配置
+
+    // 阶段 3：时间子系统初始化（必须在开中断前完成）
+    tick_init();                  // 时钟事件设备
+    rcu_init_nohz();
+    timers_init();                // 定时器子系统
+    srcu_init();
+    hrtimers_init();              // 高精度定时器
+    softirq_init();               // 软中断
+    timekeeping_init();           // 时间保持
+    time_init();                  // 架构相关时间初始化
+
+    // 阶段 4：其他依赖时间的初始化
+    random_init();                // 随机数生成器
+    kfence_init();
+    boot_init_stack_canary();
+    perf_event_init();
+    profile_init();
+    call_function_init();
+
+    // ⭐ 关键检查：确认中断仍然是关闭的
+    WARN(!irqs_disabled(), "Interrupts were enabled early\n");
+
+    // ⭐⭐⭐ 开中断！！！
+    early_boot_irqs_disabled = false;
+    local_irq_enable();           // init/main.c:1027
+
+    // 开中断后立即初始化的子系统
+    kmem_cache_init_late();       // Slab 分配器后期初始化
+    console_init();               // 控制台（需要中断支持）
+    lockdep_init();
+    locking_selftest();           // 需要中断来测试锁
+
+    // ... 后续初始化 ...
+}
+```
+
+**为什么在这个时机开中断？**
+
+| 必须**先完成**的初始化 | 原因 |
+|-------------------|------|
+| **trap_init()** | 必须先设置好 IDT 异常门，否则异常无法处理 |
+| **init_IRQ()** | 必须先设置好 IDT 硬件中断门，否则 IRQ 会跳到错误地址 |
+| **tick_init()** | 时钟事件设备必须就绪，否则定时器中断无法工作 |
+| **timekeeping_init()** | 时间保持必须初始化，否则中断处理中的时间戳会错误 |
+| **timers_init()** | 定时器子系统必须就绪，否则定时器中断无法调度任务 |
+| **hrtimers_init()** | 高精度定时器必须就绪（如时钟中断依赖） |
+| **softirq_init()** | 软中断必须初始化，否则硬件中断无法触发软中断 |
+
+| 必须**在开中断后**进行 | 原因 |
+|--------------------|------|
+| **console_init()** | 控制台驱动可能需要中断支持（如串口中断） |
+| **locking_selftest()** | 锁的自测需要开中断来测试中断上下文的锁行为 |
+| **后续设备初始化** | 大部分设备驱动需要中断支持 |
+
+**local_irq_enable() 的实现**（`arch/x86/include/asm/irqflags.h`）：
+
+```c
+static __always_inline void native_irq_enable(void)
+{
+    asm volatile("sti": : :"memory");  // 设置 EFLAGS.IF = 1
+}
+
+#define local_irq_enable() \
+    do { \
+        trace_hardirqs_on(); \      // Lockdep/ftrace 追踪
+        native_irq_enable(); \      // 执行 STI 指令
+    } while (0)
+```
+
+**开中断前后的状态对比**：
+
+| 时间点 | EFLAGS.IF | IDT 状态 | early_boot_irqs_disabled | 硬件 IRQ 是否响应 |
+|--------|-----------|----------|-------------------------|----------------|
+| **start_kernel() 入口** | 0（关） | 早期 IDT（只有异常门） | true | ❌ 不响应 |
+| **init_IRQ() 后** | 0（关） | 完整 IDT（异常+IRQ+INT 0x80） | true | ❌ 不响应（IF=0） |
+| **local_irq_enable() 后** | 1（开） | 完整 IDT | false | ✅ **开始响应** |
+
+**关键洞察**：
+- ⚠️ **IDT 完整 ≠ 中断开启**：init_IRQ() 完成后 IDT 已包含所有门，但 IF=0，硬件 IRQ 仍不会交付
+- ✅ **开中断 = STI 指令**：local_irq_enable() 通过 `sti` 设置 EFLAGS.IF=1，此时 CPU 才会响应硬件 INTR 信号
+- 📍 **准确时间点**：`init/main.c:1027`（Linux v6.x）
+
+**参考源码**（`~/works/linux/`）：
+```bash
+# 查看开中断位置
+$ sed -n '1020,1035p' init/main.c
+
+# 查看 local_irq_enable 实现
+$ grep -A 5 "define local_irq_enable" arch/x86/include/asm/irqflags.h
+```
+
 ### 4. VFS 与文件系统初始化
 
 文件系统的初始化贯穿内核启动的多个阶段，从 VFS 基础设施的初始化到 initramfs 的解压，再到真正根文件系统的挂载，是一个复杂的多步骤过程。
