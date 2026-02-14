@@ -428,7 +428,23 @@ int *ptr = (int *)0x1000000;  // 假设这个页面未映射
 | **#OF (4)** | Overflow | 溢出异常 | 检测算术溢出（`INTO` 指令，32位） |
 | **#DB (1)** | Debug | 调试异常（部分情况） | 单步执行、硬件断点 |
 
-**示例代码**：
+#### 触发方式对比
+
+**重要**：并非所有 Trap 类型的异常都需要主动 INT 指令触发。
+
+| 异常 | 主动触发（需要 INT） | 被动触发（CPU 自动） | 说明 |
+|------|-------------------|-------------------|------|
+| **#BP (3)** | ✅ **INT 3** | ❌ 无 | 必须通过 `INT 3` 指令主动触发 |
+| **#OF (4)** | ✅ **INTO** | ❌ 无 | 必须通过 `INTO` 指令主动触发（仅 32 位） |
+| **#DB (1)** | ✅ **INT 1 (ICEBP)** | ✅ **单步执行、硬件断点** | **既可以主动也可以被动** |
+
+**关键洞察**：
+- ⚠️ **Trap 类型不等于需要 INT 触发**
+- ✅ **Trap 的定义是"保存的 RIP 指向下一条指令"**，与触发方式无关
+- ✅ #DB 可以由 CPU 硬件自动触发（单步、硬件断点），这是调试器的核心机制
+
+#### 示例 1：Breakpoint (#BP) - 主动触发
+
 ```c
 // 断点异常示例（调试器使用）
 int main() {
@@ -450,6 +466,142 @@ int main() {
 
 > **详细的 Breakpoint 实现见**：
 > - **[X86_EXCEPTION_HARDWARE_TRIGGER.md - 案例 2：Breakpoint 的实现与触发](X86_EXCEPTION_HARDWARE_TRIGGER.md#四案例-2breakpoint-的实现与触发)** - INT 3 指令的硬件机制、IDT[3] 的 DPL=3 设置、GDB 如何使用 ptrace 动态插入断点（0xCC）、以及 `exc_int3` 处理函数的实现细节
+
+#### 示例 2：Overflow (#OF) - 主动触发（32 位）
+
+```asm
+; 32 位代码
+mov al, 127        ; AL = 127（有符号数最大值）
+add al, 1          ; AL = 128（有符号溢出，EFLAGS.OF = 1）
+into               ; ← 检查 OF 标志，如果 OF=1 则触发 #OF (Trap)
+; 如果触发：保存的 EIP 指向下一条指令
+
+; CPU 行为（如果 OF=1）：
+; 1. 完整执行 "into" 指令
+; 2. 检查 EFLAGS.OF = 1
+; 3. 触发 #OF (Trap)
+; 4. 保存的 EIP 指向 into 的下一条指令
+; 5. 跳转到 #OF 处理程序
+```
+
+**注意**：
+- ❌ 64 位模式不支持 `INTO` 指令
+- ❌ 即使发生溢出（OF=1），如果不执行 `INTO` 也**不会触发** #OF
+- ⚠️ 现代编译器很少使用 `INTO`，通常用条件跳转检查溢出
+
+#### 示例 3：Debug (#DB) - 被动触发（CPU 自动）
+
+**3a. 单步执行（EFLAGS.TF = 1）**：
+
+```c
+// 不需要任何 INT 指令
+// 设置 EFLAGS.TF = 1 后，CPU 每执行一条指令就自动触发 #DB
+
+void enable_single_step() {
+    __asm__("pushf; or word ptr [rsp], 0x100; popf");  // 设置 TF
+}
+
+int main() {
+    enable_single_step();
+
+    int x = 10;   // ← CPU 执行后自动触发 #DB (Trap)
+                  //   保存的 RIP 指向 "int y = 20;"
+
+    int y = 20;   // ← CPU 执行后自动触发 #DB (Trap)
+                  //   保存的 RIP 指向 "return x + y;"
+
+    return x + y;
+}
+
+// CPU 行为（每条指令后）：
+// 1. 完整执行指令（如 "int x = 10;"）
+// 2. 检查 EFLAGS.TF = 1
+// 3. 自动触发 #DB (Trap)
+// 4. 保存的 RIP 指向下一条指令
+// 5. 跳转到 #DB 处理程序（调试器）
+// 6. 调试器显示当前状态，等待用户命令
+```
+
+**应用**：GDB 的 `step` 命令就是通过设置 TF 实现的，无需修改用户代码！
+
+**3b. 硬件断点（DR0-DR7 寄存器）**：
+
+```c
+// 不需要任何 INT 指令
+// 设置 DR0-DR7 后，访问指定地址时 CPU 自动触发 #DB
+
+void set_data_breakpoint(void *addr) {
+    // DR0 = 断点地址
+    __asm__("mov %0, %%dr0" :: "r"(addr));
+
+    // DR7 = 控制寄存器
+    // Bit 0 = 1: 启用 DR0
+    // Bit 16-17 = 01: 数据写入断点
+    // Bit 18-19 = 00: 1 字节大小
+    __asm__("mov $0x00010001, %%rax; mov %%rax, %%dr7" ::: "rax");
+}
+
+int main() {
+    int x = 10;
+
+    set_data_breakpoint(&x);
+
+    x = 20;  // ← 写入 x 时，CPU 自动触发 #DB (Trap)
+             //   保存的 RIP 指向下一条指令
+
+    return x;
+}
+
+// CPU 行为：
+// 1. 执行 "x = 20;" 指令
+// 2. CPU 检测到写入地址 &x
+// 3. 发现 DR0 = &x 且 DR7 启用了数据写入断点
+// 4. 自动触发 #DB (Trap)
+// 5. 保存的 RIP 指向下一条指令
+// 6. 跳转到 #DB 处理程序
+```
+
+**应用**：GDB 的 `watch` 命令（监控变量修改）就是通过硬件断点实现的！
+
+**3c. 指令断点（执行断点）**：
+
+```c
+void set_exec_breakpoint(void *func) {
+    __asm__("mov %0, %%dr0" :: "r"(func));
+
+    // DR7: Bit 0 = 1 (启用 DR0), Bit 16-17 = 00 (指令执行断点)
+    __asm__("mov $0x00000001, %%rax; mov %%rax, %%dr7" ::: "rax");
+}
+
+void target_function() {
+    // 执行到这里时，CPU 自动触发 #DB (Fault)
+    // 注意：指令断点是 Fault，保存的 RIP 指向当前指令
+}
+
+int main() {
+    set_exec_breakpoint(target_function);
+    target_function();  // ← CPU 自动触发 #DB (Fault)
+    return 0;
+}
+```
+
+**注意**：指令断点是 **Fault** 类型（保存的 RIP 指向当前指令），而数据断点和单步是 **Trap** 类型（保存的 RIP 指向下一条指令）。
+
+#### #DB 的 Fault vs Trap 区分
+
+根据 **Intel SDM Volume 3A, Table 6-1**，#DB 的类型是 **Fault/Trap**（既可以是 Fault 也可以是 Trap）：
+
+| 触发方式 | 类型 | 保存的 RIP |
+|---------|------|-----------|
+| **单步执行**（TF=1） | **Trap** | 指向下一条指令 |
+| **数据断点**（DR0-DR3，读写监控） | **Trap** | 指向下一条指令 |
+| **I/O 断点**（DR7，I/O 监控） | **Trap** | 指向下一条指令 |
+| **指令断点**（DR0-DR3，执行监控） | **Fault** | 指向当前指令 |
+| **INT 1 (ICEBP)** | **Trap** | 指向下一条指令 |
+
+**关键区别**：
+- **Trap 类型**：用于监控"已经发生的事件"（指令执行后、数据访问后）
+- **Fault 类型**：用于在"事件发生前"拦截（指令执行前）
 
 ### 3.3 Abort（中止）
 
