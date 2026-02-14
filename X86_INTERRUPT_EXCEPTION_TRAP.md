@@ -90,8 +90,10 @@
 
 基于 **Intel SDM Volume 3A Chapter 6** 的实际章节结构：
 
+**重要说明：Interrupt 和 Exception 是两个并列的分类，不是包含关系！**
+
 ```
-CPU 中断/异常事件
+Chapter 6: INTERRUPT AND EXCEPTION HANDLING
 │
 ├─ Chapter 6.3: SOURCES OF INTERRUPTS (中断来源)
 │  │
@@ -167,14 +169,14 @@ CPU 中断/异常事件
 
 ### 2.2 核心区别总结
 
-**基于 Intel SDM Volume 3A 的分类：**
+**基于 Intel SDM Volume 3A 的分类（两个并列的顶级分类）：**
 
 ```
-Interrupt（中断）大类
+【分类 1】Interrupt（中断）
 ├─ External Interrupts (6.3.1) - 硬件触发，异步，受 IF 控制
 └─ Software-Generated Interrupts (6.3.3) - INT n 指令触发，同步，不受 IF 控制
 
-Exception（异常）大类
+【分类 2】Exception（异常）⚠️ 与 Interrupt 并列，不是子集
 ├─ Program-Error Exceptions (6.4.1) - 指令执行错误，如 #PF, #GP, #DE
 └─ Software-Generated Exceptions (6.4.2) - INT 3, INTO, BOUND 指令
 ```
