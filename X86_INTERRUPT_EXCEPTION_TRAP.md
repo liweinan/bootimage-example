@@ -103,10 +103,18 @@ Chapter 6: INTERRUPT AND EXCEPTION HANDLING
 │  │   │   ├─ 通过 INTR 引脚或 APIC 传递
 │  │   │   ├─ 受 EFLAGS.IF 控制（可被全局屏蔽）
 │  │   │   └─ 示例：IRQ 0-15 (PIC), Vector 16-255 (APIC)
-│  │   └─ **不可屏蔽类型** (NMI)：
-│  │       ├─ 通过 NMI 引脚触发
-│  │       ├─ Vector 2，不受 IF 控制
-│  │       └─ 示例：硬件错误、系统故障
+│  │   └─ **不可屏蔽类型** (NMI - Non-Maskable Interrupt)：
+│  │       ├─ 通过 NMI# 引脚触发（物理引脚，异步）
+│  │       ├─ Vector 2（固定向量号）
+│  │       ├─ 不受 EFLAGS.IF 控制（即使 CLI 也无法屏蔽）
+│  │       ├─ 优先级高于普通中断，用于关键硬件事件
+│  │       ├─ 典型用途：
+│  │       │   ├─ 内存奇偶校验错误（ECC 错误）
+│  │       │   ├─ 系统总线错误、硬件故障
+│  │       │   ├─ 看门狗定时器超时
+│  │       │   └─ 性能监控计数器溢出（PMU）
+│  │       └─ 注意：NMI 不能被 IF 屏蔽，但可以被"嵌套屏蔽"
+│  │           （CPU 在处理 NMI 期间会自动屏蔽后续 NMI）
 │  │
 │  └─ 6.3.3 Software-Generated Interrupts (软件生成的中断) ✅ 关键！
 │      ├─ INT n 指令触发，同步
@@ -201,6 +209,15 @@ Chapter 6: INTERRUPT AND EXCEPTION HANDLING
    - Trap 不是与 Interrupt/Exception 平级的概念
    - Trap 是 Exception 的三种类型之一（Fault/Trap/Abort）
    - 详见下文"Exception 的三种类型"章节
+
+4. **可屏蔽性（Maskability）说明**
+   - **Interrupt 分类**：既有可屏蔽的，也有不可屏蔽的
+     - ✅ **可屏蔽**：Maskable Hardware Interrupts (6.3.2) - 通过 INTR/APIC，受 EFLAGS.IF 控制
+     - ❌ **不可屏蔽**：NMI (Vector 2) - 硬件不可屏蔽中断
+     - ❌ **不可屏蔽**：INT n 指令 (6.3.3) - 软件中断不受 IF 控制
+   - **Exception 分类**：全部都是不可屏蔽的
+     - Program-Error Exceptions (6.4.1) - 不受 IF 控制
+     - Software-Generated Exceptions (6.4.2) - 不受 IF 控制
 
 ---
 
