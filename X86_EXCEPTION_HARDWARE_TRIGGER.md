@@ -78,37 +78,21 @@
 
 ### 2.1 Intel SDM 规定的异常向量
 
-根据 **Intel SDM Volume 3A, Section 6.3.1: Protected-Mode Exceptions and Interrupts**，CPU 硬件保留了向量 0-31 用于异常：
+根据 **Intel SDM Volume 3A, Section 6.3.1: Protected-Mode Exceptions and Interrupts**，CPU 硬件保留了向量 0-31 用于异常。
 
-| 向量 | 助记符 | 异常名称 | 类型 | 错误码 | 说明 |
-|------|--------|---------|------|--------|------|
-| 0 | #DE | Divide Error | Fault | No | 除零或除法溢出 |
-| 1 | #DB | Debug | Fault/Trap | No | 调试异常 |
-| 2 | - | NMI | Interrupt | No | 不可屏蔽中断 |
-| **3** | **#BP** | **Breakpoint** | **Trap** | **No** | **INT 3 指令** |
-| 4 | #OF | Overflow | Trap | No | INTO 指令检测到溢出 |
-| 5 | #BR | Bound Range Exceeded | Fault | No | BOUND 指令范围检查 |
-| 6 | #UD | Invalid Opcode | Fault | No | 无效指令 |
-| 7 | #NM | Device Not Available | Fault | No | FPU 不可用 |
-| 8 | #DF | Double Fault | Abort | Yes (0) | 处理异常时又发生异常 |
-| 9 | - | Coprocessor Segment Overrun | Fault | No | (已废弃) |
-| 10 | #TS | Invalid TSS | Fault | Yes | TSS 无效 |
-| 11 | #NP | Segment Not Present | Fault | Yes | 段不存在 |
-| 12 | #SS | Stack-Segment Fault | Fault | Yes | 栈段错误 |
-| 13 | #GP | General Protection | Fault | Yes | 通用保护错误 |
-| **14** | **#PF** | **Page Fault** | **Fault** | **Yes** | **页面错误** |
-| 15 | - | (Reserved) | - | - | Intel 保留 |
-| 16 | #MF | x87 FPU Error | Fault | No | 浮点错误 |
-| 17 | #AC | Alignment Check | Fault | Yes (0) | 对齐检查 |
-| 18 | #MC | Machine Check | Abort | No | 硬件错误 |
-| 19 | #XM/#XF | SIMD FPU Exception | Fault | No | SIMD 浮点错误 |
-| 20 | #VE | Virtualization Exception | Fault | No | 虚拟化异常 |
-| 21 | #CP | Control Protection | Fault | Yes | CET 控制流保护 |
-| 22-28 | - | (Reserved) | - | - | Intel 保留 |
-| 29 | #VC | VMM Communication | Fault | Yes | AMD SEV-SNP 通信 |
-| 30-31 | - | (Reserved) | - | - | Intel 保留 |
+> **📖 完整的异常向量表见**：[X86_INTERRUPT_EXCEPTION_TRAP.md - 一、Intel SDM 官方定义](X86_INTERRUPT_EXCEPTION_TRAP.md#一intel-sdm-官方定义)
 
-> **来源**：Intel SDM Volume 3A, Table 6-1: Protected-Mode Exceptions and Interrupts
+本文档聚焦于以下两个异常的**硬件触发机制**：
+
+| 向量 | 助记符 | 异常名称 | 类型 | 错误码 | 硬件行为 |
+|------|--------|---------|------|--------|---------|
+| **3** | **#BP** | **Breakpoint** | **Trap** | **No** | CPU 执行 INT 3 指令 → 硬件确定向量号 = 3 → 查找 IDT[3] → 跳转处理函数 |
+| **14** | **#PF** | **Page Fault** | **Fault** | **Yes** | MMU 检测到 PTE.P=0 → 硬件确定向量号 = 14 → 保存 CR2（出错地址）→ 查找 IDT[14] → 跳转处理函数 |
+
+**关键点**：
+- ✅ 向量号（3 和 14）由 Intel SDM 规范固定，**硬编码在 CPU 微码中**
+- ✅ 软件无法改变向量号，只能在 IDT[3] 和 IDT[14] 注册处理函数
+- ✅ 整个检测→分发→跳转过程完全由 **CPU 硬件自动完成**
 
 ### 2.2 CPU 硬件异常处理流程
 
@@ -166,56 +150,20 @@
 
 **文件位置**：`arch/x86/include/asm/trapnr.h`
 
+> **📖 完整的向量定义见**：[X86_INTERRUPT_EXCEPTION_TRAP.md - 6.1 异常向量定义](X86_INTERRUPT_EXCEPTION_TRAP.md#61-异常向量定义)
+
+本文档聚焦的两个异常向量：
+
 ```c
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef _ASM_X86_TRAPNR_H
-#define _ASM_X86_TRAPNR_H
-
-/*
- * Event type codes used by FRED, Intel VT-x and AMD SVM
- */
-#define EVENT_TYPE_EXTINT       0       // External interrupt
-#define EVENT_TYPE_NMI          2       // NMI
-#define EVENT_TYPE_HWEXC        3       // Hardware originated traps, exceptions
-#define EVENT_TYPE_SWINT        4       // INT n
-#define EVENT_TYPE_PRIV_SWEXC   5       // INT1
-#define EVENT_TYPE_SWEXC        6       // INTO, INT3
-#define EVENT_TYPE_OTHER        7       // FRED SYSCALL/SYSENTER, VT-x MTF
-
-/* Interrupts/Exceptions */
-
-#define X86_TRAP_DE              0      /* Divide-by-zero */
-#define X86_TRAP_DB              1      /* Debug */
-#define X86_TRAP_NMI             2      /* Non-maskable Interrupt */
-#define X86_TRAP_BP              3      /* Breakpoint */
-#define X86_TRAP_OF              4      /* Overflow */
-#define X86_TRAP_BR              5      /* Bound Range Exceeded */
-#define X86_TRAP_UD              6      /* Invalid Opcode */
-#define X86_TRAP_NM              7      /* Device Not Available */
-#define X86_TRAP_DF              8      /* Double Fault */
-#define X86_TRAP_OLD_MF          9      /* Coprocessor Segment Overrun */
-#define X86_TRAP_TS             10      /* Invalid TSS */
-#define X86_TRAP_NP             11      /* Segment Not Present */
-#define X86_TRAP_SS             12      /* Stack Segment Fault */
-#define X86_TRAP_GP             13      /* General Protection Fault */
-#define X86_TRAP_PF             14      /* Page Fault */
-#define X86_TRAP_SPURIOUS       15      /* Spurious Interrupt */
-#define X86_TRAP_MF             16      /* x87 Floating-Point Exception */
-#define X86_TRAP_AC             17      /* Alignment Check */
-#define X86_TRAP_MC             18      /* Machine Check */
-#define X86_TRAP_XF             19      /* SIMD Floating-Point Exception */
-#define X86_TRAP_VE             20      /* Virtualization Exception */
-#define X86_TRAP_CP             21      /* Control Protection Exception */
-#define X86_TRAP_VC             29      /* VMM Communication Exception */
-#define X86_TRAP_IRET           32      /* IRET Exception */
-
-#endif
+#define X86_TRAP_BP   3    /* Breakpoint */
+#define X86_TRAP_PF   14   /* Page Fault */
 ```
 
-**代码说明**：
-- 这些 `#define` **不是定义向量号**，而是**给 Intel 规定的向量号起名字**
-- 就像 `const int PAGE_SIZE = 4096;`，4096 是硬件规定的，变量名只是方便引用
-- 即使 Linux 写成 `#define X86_TRAP_PF 99`，CPU 检测到缺页仍会查找 IDT[14]
+**关键洞察**：
+- ❌ 这些 `#define` **不是定义向量号**，而是**给 Intel 规定的向量号起名字**
+- ❌ 就像 `const int PAGE_SIZE = 4096;`，4096 是硬件规定的，变量名只是方便引用
+- ❌ 即使 Linux 写成 `#define X86_TRAP_PF 99`，CPU 检测到缺页仍会查找 IDT[14]
+- ✅ **向量号 3 和 14 是硬编码在 CPU 微码中的**，软件无法改变
 
 ---
 
@@ -284,99 +232,45 @@ int main() {
 
 #### IDT 表的设置
 
-**文件位置**：`arch/x86/kernel/idt.c:63-76`
+> **📖 完整的 IDT 初始化代码见**：[X86_INTERRUPT_EXCEPTION_TRAP.md - 6.4 IDT 初始化](X86_INTERRUPT_EXCEPTION_TRAP.md#64-idt-初始化)
+
+**Page Fault 的 IDT 设置**（`arch/x86/kernel/idt.c`）:
+
+64 位系统由于 IST 要求，#PF 不在 early_idts 中设置，而是在 `trap_init()` 阶段单独初始化：
 
 ```c
-/*
- * The IDT entries which are set up in trap_init() prior to cpu_init(). On
- * 64-bit systems the #PF entry cannot be used early due to IST requirements
- * and usage of paranoid_entry/exit.
- */
+// 早期 IDT（内核启动早期，只设置关键异常）
 static const __initconst struct idt_data early_idts[] = {
     INTG(X86_TRAP_DB,  asm_exc_debug),
-    SYSG(X86_TRAP_BP,  asm_exc_int3),
+    SYSG(X86_TRAP_BP,  asm_exc_int3),     // ← Breakpoint，DPL=3
+    // 注意：#PF 在 64 位不在这里
+};
 
-#ifdef CONFIG_X86_32
-    /*
-     * Not possible on 64-bit. See idt_setup_early_pf() for details.
-     */
-    INTG(X86_TRAP_PF,  asm_exc_page_fault),  // ← 32 位在早期阶段设置
-#endif
-#ifdef CONFIG_INTEL_TDX_GUEST
-    INTG(X86_TRAP_VE,  asm_exc_virtualization_exception),
-#endif
+// 64 位系统单独设置 #PF（trap_init() 阶段）
+void __init idt_setup_early_pf(void)
+{
+    idt_setup_from_table(idt_table, early_pf_idts,
+                         ARRAY_SIZE(early_pf_idts), true);
+}
+
+static const __initconst struct idt_data early_pf_idts[] = {
+    INTG(X86_TRAP_PF, asm_exc_page_fault),  // 向量 14 → asm_exc_page_fault
 };
 ```
 
-**64 位系统在 trap_init() 阶段设置**：
-
-**文件位置**：`arch/x86/kernel/idt.c:84-120`
+**宏定义说明**（完整定义见 [X86_INTERRUPT_EXCEPTION_TRAP.md - 6.4.1](X86_INTERRUPT_EXCEPTION_TRAP.md#641-idt-门宏定义)）:
 
 ```c
-/*
- * The default IDT entries which are set up in trap_init() before
- * cpu_init() is invoked. Interrupt stacks cannot be used at that point and
- * the traps which use them are reinitialized with IST after cpu_init() has
- * set up TSS.
- */
-static const __initconst struct idt_data def_idts[] = {
-    INTG(X86_TRAP_DE,   asm_exc_divide_error),
-    ISTG(X86_TRAP_NMI,  asm_exc_nmi, IST_INDEX_NMI),
-    INTG(X86_TRAP_BR,   asm_exc_bounds),
-    INTG(X86_TRAP_UD,   asm_exc_invalid_op),
-    INTG(X86_TRAP_NM,   asm_exc_device_not_available),
-    INTG(X86_TRAP_OLD_MF, asm_exc_coproc_segment_overrun),
-    INTG(X86_TRAP_TS,   asm_exc_invalid_tss),
-    INTG(X86_TRAP_NP,   asm_exc_segment_not_present),
-    INTG(X86_TRAP_SS,   asm_exc_stack_segment),
-    INTG(X86_TRAP_GP,   asm_exc_general_protection),
-    // 注意：#PF 在 64 位系统不在这里设置，而是单独设置
-    INTG(X86_TRAP_SPURIOUS, asm_exc_spurious_interrupt_bug),
-    INTG(X86_TRAP_MF,   asm_exc_coprocessor_error),
-    INTG(X86_TRAP_AC,   asm_exc_alignment_check),
-    INTG(X86_TRAP_XF,   asm_exc_simd_coprocessor_error),
-
-#ifdef CONFIG_X86_64
-    ISTG(X86_TRAP_DF,   asm_exc_double_fault, IST_INDEX_DF),
-    ISTG(X86_TRAP_DB,   asm_exc_debug, IST_INDEX_DB),
-#endif
-
-#ifdef CONFIG_X86_MCE
-    ISTG(X86_TRAP_MC,   asm_exc_machine_check, IST_INDEX_MCE),
-#endif
-
-#ifdef CONFIG_X86_CET
-    INTG(X86_TRAP_CP,   asm_exc_control_protection),
-#endif
-
-#ifdef CONFIG_AMD_MEM_ENCRYPT
-    ISTG(X86_TRAP_VC,   asm_exc_vmm_communication, IST_INDEX_VC),
-#endif
-
-    SYSG(X86_TRAP_OF,   asm_exc_overflow),
-};
-```
-
-**宏定义说明**：
-
-```c
-// arch/x86/kernel/idt.c
-#define DPL0         0x0  /* Kernel mode */
-#define DPL3         0x3  /* User mode */
-#define DEFAULT_STACK 0
-
-/* Interrupt gate macro */
-#define INTG(_vector, _addr) \
-    G(_vector, _addr, DEFAULT_STACK, GATE_INTERRUPT, DPL0, __KERNEL_CS)
-
-/*
- * INTG 宏的含义：
- * - _vector: 向量号（如 X86_TRAP_PF = 14）
- * - _addr: 处理函数地址（如 asm_exc_page_fault）
- * - GATE_INTERRUPT: Interrupt Gate（进入时自动清除 IF）
- * - DPL0: 特权级 0（只有内核态能触发，用户态触发会 #GP）
- * - __KERNEL_CS: 内核代码段选择子
- */
+INTG(X86_TRAP_PF, asm_exc_page_fault)
+// 等价于：
+// G(14, asm_exc_page_fault, DEFAULT_STACK, GATE_INTERRUPT, DPL0, __KERNEL_CS)
+//    ^   ^                   ^               ^               ^     ^
+//    |   |                   |               |               |     内核代码段
+//    |   |                   |               |               特权级 0（内核态）
+//    |   |                   |               Interrupt Gate（自动关中断）
+//    |   |                   不使用 IST
+//    |   处理函数地址
+//    向量号
 ```
 
 **IDT[14] 的实际内容**：

@@ -2,25 +2,46 @@
 
 本文档基于 **Intel Software Developer Manual (SDM) Volume 3A Chapter 6** 和 **Linux 内核源码**，详细阐述 x86 架构中 Interrupt（中断）、Exception（异常）、Trap（陷阱）的本质区别及其在 Linux 内核中的实现。
 
-**⚠️ 重要勘误（2026-02-14）**：
+**⚠️ 重要勘误（2026-02-15）**：
 
 本文档经严格核对 Intel SDM Volume 3A Chapter 6 原文后，发现并修正了以下关键错误：
 
-1. **INT n 的分类**：
+1. **INT n 的分类**（修正日期：2026-02-14）：
    - ❌ **错误**：INT n (如 INT 0x80) 归类为 Exception
    - ✅ **正确**：INT n 归类为 **Interrupt**（Intel SDM 6.3.3 Software-Generated Interrupts）
    - 📖 **依据**：Table 6-1 明确标注 Vector 32-255 为 "Interrupt" 类型，Source: "External interrupt or INT n instruction"
 
-2. **INT 3 / INTO 的分类**：
+2. **INT 3 / INTO 的分类**（修正日期：2026-02-14）：
    - ✅ **正确**：INT 3, INTO, BOUND 归类为 **Exception**（Intel SDM 6.4.2 Software-Generated Exceptions）
    - 📖 **依据**：Table 6-1 标注 Vector 3 (#BP) 和 Vector 4 (#OF) 为 "Trap" 类型
 
-3. **核心发现**：
+3. **Fault/Trap/Abort 定义的准确性**（修正日期：2026-02-15）：
+   - ❌ **错误**：Fault 是"在指令执行之前被检测到的异常"
+   - ✅ **正确**：Fault 是在检测到异常后，CPU **回滚机器状态到指令执行前**的异常
+   - 📖 **依据**：SDM 原文 "the processor restores the machine state to the state prior to the beginning of execution"
+   - 🔑 **关键修正**：
+     - 强调 Fault 和 Trap 都**不会丢失程序连续性**（no loss of continuity）
+     - 明确 Fault 的"状态回滚"机制，而非"执行前检测"
+     - 补充 Abort 用于报告"严重错误（severe errors）"的定义
+
+4. **核心发现**：
    - Intel SDM 将 **INT n (通用向量)** 和 **INT 3/INTO (特殊向量)** 归入**不同类别**
    - **不能笼统地说"软件中断归类为异常"**，需要区分具体指令
 
 **补充文档**：
-- **[x86 异常的硬件触发机制：Page Fault 与 Breakpoint 深入剖析](X86_EXCEPTION_HARDWARE_TRIGGER.md)** - 通过实际案例详解异常的硬件触发流程、向量号的硬件规范、以及软件职责边界
+
+本文档聚焦于**理论与规范**（Intel SDM 定义、分类体系、Linux 内核代码结构）。以下补充文档提供**实战细节**：
+
+- **[x86 异常的硬件触发机制：Page Fault 与 Breakpoint 深入剖析](X86_EXCEPTION_HARDWARE_TRIGGER.md)**
+  - 🔍 **重点**：异常如何被硬件自动触发（无需软件调用）
+  - 📌 **内容**：CPU 微架构的异常检测逻辑、向量号的硬件固定性（为什么 #PF=14）、IDT 门描述符的设置、完整的硬件处理流程（保存现场→查找 IDT→跳转处理函数）
+  - 💻 **Kernel 实现**：`arch/x86/kernel/idt.c` 的 IDT 初始化、`arch/x86/mm/fault.c` 的 `exc_page_fault`、`arch/x86/kernel/traps.c` 的 `exc_int3`
+
+- **[Linux 缺页异常与按需分配：从虚拟地址到物理地址的完整流程](LINUX_PAGE_FAULT_DEMAND_PAGING.md)**
+  - 🔍 **重点**：内核如何处理缺页异常并建立虚拟地址到物理地址的映射
+  - 📌 **内容**：TLB 查找→硬件页表遍历→触发 #PF→内核页表遍历（`pgd_offset` → `pud_alloc` → `pmd_alloc` → `pte_offset`）→物理页分配→PTE 创建→TLB 更新
+  - 💻 **Kernel 实现**：`mm/memory.c` 的 `handle_mm_fault` → `__handle_mm_fault` → `handle_pte_fault` → `do_anonymous_page`，包括详细的源码分析和函数调用链
+  - 🎯 **案例**：四种缺页类型（Minor/Major/COW/Swap）的处理差异、Demand Paging（按需分配）策略
 
 ---
 
@@ -345,12 +366,15 @@ T4: 如果有挂起的 NMI，现在可以触发
 
 ### 3.1 Fault（故障）
 
-**定义**：在引起异常的指令**执行之前**被检测到的异常。
+**定义**（基于 Intel SDM 原文）：
+- Fault 是一种**通常可以被修复**的异常，一旦修复后，允许程序重新启动且**不会丢失程序连续性**（no loss of continuity）
+- 当 fault 被报告时，处理器将机器状态**恢复到故障指令开始执行之前的状态**（restores the machine state to the state prior to the beginning of execution）
 
 **特征**：
-- **保存的 EIP/RIP**：指向**引起故障的指令**（fault instruction）
-- **可恢复性**：✅ **可恢复** - 修复问题后可以重新执行该指令
-- **典型用途**：需要操作系统介入修复的条件（如缺页、权限不足）
+- **保存的 EIP/RIP**：指向**引起故障的指令本身**（the faulting instruction），而非下一条指令
+- **状态回滚**：CPU 回滚机器状态到该指令执行前（即使指令已部分执行）
+- **可恢复性**：✅ **可恢复** - 修复问题后可重新执行该指令，程序连续性不受影响
+- **典型用途**：需要操作系统介入修复的条件（如缺页、段不存在、栈错误）
 
 **典型示例**：
 
@@ -369,23 +393,32 @@ int *ptr = (int *)0x1000000;  // 假设这个页面未映射
 *ptr = 42;                    // 触发 #PF
 
 // CPU 行为：
-// 1. 检测到页面不存在
-// 2. 触发 #PF (Fault)
-// 3. 保存的 RIP 指向 "mov [ptr], 42" 指令
-// 4. 跳转到 #PF 处理程序
-// 5. 内核分配页面，更新页表
-// 6. iret 返回，重新执行 "mov [ptr], 42" 指令
-// 7. 成功执行
+// 1. 开始执行 "mov [ptr], 42" 指令
+// 2. 在访问内存时检测到页面不存在
+// 3. 触发 #PF (Fault)
+// 4. CPU 回滚机器状态到该指令执行前（状态恢复）
+// 5. 保存的 RIP 指向 "mov [ptr], 42" 指令本身
+// 6. 跳转到 #PF 处理程序
+// 7. 内核分配页面，更新页表
+// 8. iret 返回，重新执行 "mov [ptr], 42" 指令
+// 9. 成功执行，程序连续性未受影响
 ```
+
+> **详细的 Page Fault 处理流程见**：
+> - **[X86_EXCEPTION_HARDWARE_TRIGGER.md](X86_EXCEPTION_HARDWARE_TRIGGER.md)** - CPU 硬件如何自动检测缺页并触发异常、向量号的硬件固定性、IDT 设置与处理函数实现
+> - **[LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)** - 内核如何遍历页表、分配物理页、建立映射的完整流程，包括 `do_user_addr_fault` → `handle_mm_fault` → `do_anonymous_page` 的详细源码分析
 
 ### 3.2 Trap（陷阱）
 
-**定义**：在引起异常的指令**执行之后**立即被报告的异常。
+**定义**（基于 Intel SDM 原文）：
+- Trap 是在陷阱指令**执行完成之后立即**被报告的异常（reported immediately following the execution of the trapping instruction）
+- Trap 允许程序或任务继续执行，且**不会丢失程序连续性**（without loss of program continuity）
 
 **特征**：
-- **保存的 EIP/RIP**：指向**下一条指令**（next instruction）
-- **可恢复性**：✅ **可恢复** - 允许程序继续执行
-- **典型用途**：调试、单步执行、条件监控
+- **保存的 EIP/RIP**：指向**陷阱指令之后的下一条指令**（the instruction to be executed after the trapping instruction）
+- **报告时机**：在触发指令完整执行后立即报告
+- **可恢复性**：✅ **可恢复** - 允许程序继续执行，无需重新执行触发指令
+- **典型用途**：调试（断点、单步执行）、条件监控（溢出检测）
 
 **典型示例**：
 
@@ -406,22 +439,29 @@ int main() {
 }
 
 // CPU 行为：
-// 1. 执行 "int3" 指令
-// 2. 触发 #BP (Trap)
-// 3. 保存的 RIP 指向 "int y = 20;" 指令（下一条）
+// 1. 完整执行 "int3" 指令（指令已执行完成）
+// 2. 在指令执行完成后立即触发 #BP (Trap)
+// 3. 保存的 RIP 指向 "int y = 20;" 指令（下一条指令）
 // 4. 跳转到 #BP 处理程序（调试器）
 // 5. 调试器显示断点信息
 // 6. iret 返回，继续执行 "int y = 20;"
+// 7. 程序连续性未受影响（无需重新执行 int3）
 ```
+
+> **详细的 Breakpoint 实现见**：
+> - **[X86_EXCEPTION_HARDWARE_TRIGGER.md - 案例 2：Breakpoint 的实现与触发](X86_EXCEPTION_HARDWARE_TRIGGER.md#四案例-2breakpoint-的实现与触发)** - INT 3 指令的硬件机制、IDT[3] 的 DPL=3 设置、GDB 如何使用 ptrace 动态插入断点（0xCC）、以及 `exc_int3` 处理函数的实现细节
 
 ### 3.3 Abort（中止）
 
-**定义**：不总是报告引起异常的指令的精确位置，不允许重新启动引起异常的程序或任务。
+**定义**（基于 Intel SDM 原文）：
+- Abort 是一种**不总是能报告引起异常的指令精确位置**的异常（does not always report the precise location of the instruction causing the exception）
+- Abort **不允许重新启动**引起异常的程序或任务（does not allow a restart of the program or task that caused the exception）
+- Abort 用于报告**严重错误**，如硬件错误和系统表中不一致或非法的值（severe errors, such as hardware errors and inconsistent or illegal values in system tables）
 
 **特征**：
-- **保存的 EIP/RIP**：**不可靠**，可能指向任意位置
-- **可恢复性**：❌ **不可恢复** - 严重错误，通常需要系统重启
-- **典型用途**：硬件故障、系统崩溃
+- **保存的 EIP/RIP**：**不可靠**，不保证指向精确位置
+- **可恢复性**：❌ **不可恢复** - 无法重启程序或任务，通常导致系统崩溃
+- **典型用途**：硬件故障（机器检查异常）、系统表损坏（双重故障）
 
 **典型示例**：
 
@@ -452,11 +492,11 @@ void handle_gp_fault() {
 
 ### 3.4 三种类型对比总结
 
-| 类型 | 保存的 EIP/RIP | 可恢复性 | 典型用途 | 示例 |
-|------|---------------|---------|---------|------|
-| **Fault** | 指向**引起故障的指令** | ✅ 可恢复 | 需要修复后重新执行 | #PF, #GP, #NP |
-| **Trap** | 指向**下一条指令** | ✅ 可恢复 | 调试、监控 | #BP, #OF, #DB |
-| **Abort** | **不可靠** | ❌ 不可恢复 | 严重错误 | #DF, #MC |
+| 类型 | 状态恢复 | 保存的 EIP/RIP | 程序连续性 | 可恢复性 | 典型用途 | 示例 |
+|------|---------|---------------|-----------|---------|---------|------|
+| **Fault** | 回滚到指令执行前 | 指向**故障指令本身** | ✅ 不丢失 | ✅ 可恢复 | 修复后重新执行该指令 | #PF, #GP, #NP |
+| **Trap** | 指令已执行完成 | 指向**下一条指令** | ✅ 不丢失 | ✅ 可恢复 | 调试、监控 | #BP, #OF, #DB |
+| **Abort** | 不确定 | **不可靠**，无精确位置 | ❌ 丢失 | ❌ 不可恢复 | 严重错误，无法重启 | #DF, #MC |
 
 ---
 
@@ -576,6 +616,12 @@ startup_64:
 ---
 
 ## 六、Linux 内核实现
+
+本章节介绍 Linux 内核中断/异常处理的**代码结构**（向量定义、IDT 初始化、处理函数定义）。
+
+> **💡 深入阅读**：关于异常的**硬件触发机制**和**完整处理流程**，请参考：
+> - **[X86_EXCEPTION_HARDWARE_TRIGGER.md](X86_EXCEPTION_HARDWARE_TRIGGER.md)** - CPU 如何自动检测异常、保存现场、查找 IDT、跳转处理函数的完整硬件流程
+> - **[LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)** - 缺页异常处理的完整内核实现，从 `do_user_addr_fault` 到 `do_anonymous_page` 的详细源码分析
 
 ### 6.1 异常向量定义
 
@@ -1035,9 +1081,10 @@ cli;  // EFLAGS.IF = 0
 - **[X86_MEMORY_MANAGEMENT_THEORY.md](X86_MEMORY_MANAGEMENT_THEORY.md)** - GDT 详解：从保护模式到长模式
 - **[X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md)** - 中断控制器演进（8259 PIC vs APIC）
 
-### 8.2 Linux 中断系统
+### 8.2 Linux 中断/异常系统
 
 - **[X86_EXCEPTION_HARDWARE_TRIGGER.md](X86_EXCEPTION_HARDWARE_TRIGGER.md)** - 异常的硬件触发机制：Page Fault 与 Breakpoint 深入剖析（本文档补充）
+- **[LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)** - Linux 缺页异常与按需分配：从虚拟地址到物理地址的完整流程（包括 `handle_mm_fault` → `do_anonymous_page` 的详细源码分析）
 - **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解
 - **[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)** - 系统调用初始化详解（INT 0x80 vs SYSCALL/SYSENTER）
 - **[LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md)** - Linux 中断处理机制（Top Half/Bottom Half）
