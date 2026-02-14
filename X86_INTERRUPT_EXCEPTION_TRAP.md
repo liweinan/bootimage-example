@@ -96,12 +96,15 @@ CPU 中断/异常事件
 ├─ Chapter 6.3: SOURCES OF INTERRUPTS (中断来源)
 │  │
 │  ├─ 6.3.1 External Interrupts (外部中断)
-│  │   ├─ 硬件触发，异步
-│  │   ├─ 受 EFLAGS.IF 控制（可屏蔽）
-│  │   └─ 示例：IRQ 0 (时钟), IRQ 1 (键盘), APIC 中断
-│  │
-│  ├─ 6.3.2 Maskable Hardware Interrupts (可屏蔽硬件中断)
-│  │   └─ INTR 引脚，PIC/APIC 中断控制器
+│  │   ├─ 通过硬件引脚或 APIC 触发，异步
+│  │   ├─ **可屏蔽类型** (6.3.2 Maskable Hardware Interrupts)：
+│  │   │   ├─ 通过 INTR 引脚或 APIC 传递
+│  │   │   ├─ 受 EFLAGS.IF 控制（可被全局屏蔽）
+│  │   │   └─ 示例：IRQ 0-15 (PIC), Vector 16-255 (APIC)
+│  │   └─ **不可屏蔽类型** (NMI)：
+│  │       ├─ 通过 NMI 引脚触发
+│  │       ├─ Vector 2，不受 IF 控制
+│  │       └─ 示例：硬件错误、系统故障
 │  │
 │  └─ 6.3.3 Software-Generated Interrupts (软件生成的中断) ✅ 关键！
 │      ├─ INT n 指令触发，同步
