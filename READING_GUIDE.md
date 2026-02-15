@@ -114,6 +114,47 @@
 
 ---
 
+### 🔨 内核编程与代码规范
+
+**理解内核代码的编写规范和约定**：
+
+| 需求 | 推荐文档 | 难度 |
+|------|---------|------|
+| **函数修饰符详解（asmlinkage, __visible, __init...）** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md) | ⭐⭐ 进阶 |
+| **x86 调用约定（Calling Convention）** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#一x86-调用约定基础](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#一x86-调用约定基础) | ⭐⭐ 进阶 |
+| **与汇编代码交互** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#六与汇编代码交互](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#六与汇编代码交互) | ⭐⭐⭐ 深入 |
+| **常见组合模式** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#五常见组合模式](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#五常见组合模式) | ⭐⭐ 进阶 |
+
+**学习路径**（内核编程专题）：
+```
+1. 阅读 x86 调用约定基础
+   ├─ x86-64 System V ABI（Linux 标准）
+   └─ x86-32 cdecl 约定
+   ↓
+2. 理解各函数修饰符的作用
+   ├─ asmlinkage: 强制栈传参
+   ├─ __visible: 防止 LTO 删除
+   ├─ __init: 初始化后释放
+   └─ __noreturn: 永不返回
+   ↓
+3. 查看实际代码示例
+   ├─ x86_64_start_kernel 分析
+   ├─ start_kernel 分析
+   └─ 系统调用表分析
+   ↓
+4. 学习与汇编代码交互
+   ├─ 从汇编调用 C 函数
+   └─ 从 C 调用汇编函数
+```
+
+**为什么重要？**
+- ✅ 理解内核入口函数（`x86_64_start_kernel`, `start_kernel`）的签名
+- ✅ 理解系统调用表（`sys_call_table`）的定义
+- ✅ 理解为什么需要这些修饰符（与汇编兼容、内存优化等）
+- ✅ 能够阅读和编写与汇编交互的 C 代码
+
+---
+
 ### 🔧 GRUB 引导加载程序
 
 **理解 GRUB 的工作机制**：
