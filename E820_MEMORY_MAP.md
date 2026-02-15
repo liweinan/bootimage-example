@@ -411,6 +411,9 @@ x86-64 长模式的硬件强制要求：
    - 不会长期保留对保留区域的映射，避免潜在问题
 
 5. **映射的生命周期**：
+
+   > **函数修饰符说明**：关于 `asmlinkage`, `__init` 等修饰符的详细解释，见 [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#41-x86_64_start_kernel-函数)。
+
    ```c
    // arch/x86/kernel/head64.c:238
    asmlinkage void __init x86_64_start_kernel(char *real_mode_data)

@@ -267,6 +267,8 @@ start_kernel()
 
 虽然有多种调用机制，但**系统调用表（syscall table）是统一的**：
 
+> **函数修饰符说明**：关于 `asmlinkage`, `__visible` 等修饰符的详细解释，见 [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#43-系统调用表](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#43-系统调用表)。
+
 ```c
 // arch/x86/entry/syscall_64.c
 asmlinkage const sys_call_ptr_t sys_call_table[] = {

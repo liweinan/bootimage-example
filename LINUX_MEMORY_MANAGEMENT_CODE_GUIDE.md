@@ -937,6 +937,8 @@ SYM_DATA_END(early_dynamic_pgts)
 
 **x86_64_start_kernel() 中重置页表**：`arch/x86/kernel/head64.c:219`
 
+> **函数修饰符说明**：关于 `asmlinkage`, `__visible`, `__init`, `__noreturn` 等修饰符的详细解释，见 [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#41-x86_64_start_kernel-函数)。
+
 ```c
 asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_data)
 {

@@ -1240,6 +1240,8 @@ start_kernel() 阶段 2（main.c）
 
 **代码位置**：`init/main.c:1027`（start_kernel 函数中）
 
+> **函数修饰符说明**：关于 `asmlinkage`, `__visible`, `__init`, `__noreturn` 等修饰符的详细解释，见 [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md)。
+
 ```c
 asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protector
 void start_kernel(void)
