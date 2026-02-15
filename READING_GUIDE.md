@@ -24,6 +24,7 @@
 
 | 需求 | 推荐文档 | 难度 |
 |------|---------|------|
+| **动手实践**（编译运行引导扇区程序） | [QUICKSTART.md](QUICKSTART.md) ⭐ 新增 | ⭐ 入门 |
 | **最简概览**（10分钟快速了解） | [BOOT_FLOW.md](BOOT_FLOW.md) | ⭐ 入门 |
 | **完整时间线**（QEMU → BIOS → GRUB → Linux） | [BOOT_FLOW_TIMELINE.md](BOOT_FLOW_TIMELINE.md) | ⭐⭐ 进阶 |
 | **引导扇区是什么？**（0x7C00 的秘密） | [ORG_0x7C00_EXPLANATION.md](ORG_0x7C00_EXPLANATION.md) | ⭐ 入门 |
@@ -86,30 +87,59 @@
 | 需求 | 推荐文档 | 难度 |
 |------|---------|------|
 | **中断、异常、陷阱有什么区别？** | [X86_INTERRUPT_EXCEPTION_TRAP.md](X86_INTERRUPT_EXCEPTION_TRAP.md) | ⭐⭐ 进阶 |
+| **Exception 是否可被屏蔽？** | [EXCEPTION_MASKABILITY_ANALYSIS.md](EXCEPTION_MASKABILITY_ANALYSIS.md) | ⭐⭐ 进阶 |
+| **异常硬件触发机制详解** | [X86_EXCEPTION_HARDWARE_TRIGGER.md](X86_EXCEPTION_HARDWARE_TRIGGER.md) | ⭐⭐⭐ 深入 |
 | **IDT 表如何演进？** | [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md) | ⭐⭐⭐ 深入 |
 | **为什么只有 INT3/INTO/INT 0x80 是 DPL=3？** | [LINUX_KERNEL_IDT_EVOLUTION.md#idt-中的用户态可触发门dpl3-门详解](LINUX_KERNEL_IDT_EVOLUTION.md#idt-中的用户态可触发门dpl3-门详解) | ⭐⭐ 进阶 |
 | **INT 0x80 vs SYSCALL 性能对比** | [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md) | ⭐⭐⭐ 深入 |
 | **entry_SYSCALL_64 汇编分析** | [LINUX_KERNEL_SYSCALL_INIT.md#3-entry_syscall_64-入口点详解](LINUX_KERNEL_SYSCALL_INIT.md#3-entry_syscall_64-入口点详解) | ⭐⭐⭐⭐ 核心 |
 | **中断控制器演进（PIC → APIC）** | [X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md) | ⭐⭐⭐ 深入 |
+| **PIC 与 APIC 共存机制** | [PIC_APIC_COEXISTENCE.md](PIC_APIC_COEXISTENCE.md) | ⭐⭐⭐ 深入 |
 | **Linux 中断处理机制** | [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md) | ⭐⭐⭐ 深入 |
 
 **学习路径**（中断与系统调用专题）：
 ```
 1. X86_INTERRUPT_EXCEPTION_TRAP.md（基础概念）
+   ├─ Intel SDM 分类体系
+   ├─ Interrupt vs Exception 本质区别
+   ├─ Fault/Trap/Abort 三种类型
+   └─ NMI 详解
    ↓
-2. LINUX_KERNEL_IDT_EVOLUTION.md（IDT 演进）
+2. EXCEPTION_MASKABILITY_ANALYSIS.md（可屏蔽性深入分析）⭐ 新增
+   ├─ Exception 不受 EFLAGS.IF 控制
+   ├─ "Non-Maskable" 术语精确性
+   ├─ 实际应用场景（内核启动、SEV-SNP、GDB）
+   └─ 项目文档覆盖情况
+   ↓
+3. X86_EXCEPTION_HARDWARE_TRIGGER.md（硬件触发机制）⭐ 新增
+   ├─ #BP 和 #PF 的完整流程
+   ├─ CPU 微码级别的硬件行为
+   └─ GDB 断点实现原理
+   ↓
+4. LINUX_KERNEL_IDT_EVOLUTION.md（IDT 演进）
    ├─ 两个 IDT 表的设计
    ├─ 5 个演进阶段
    └─ DPL=3 门详解（INT3/INTO/INT 0x80）
    ↓
-3. LINUX_KERNEL_SYSCALL_INIT.md（系统调用详解）
+5. LINUX_KERNEL_SYSCALL_INIT.md（系统调用详解）
    ├─ INT 0x80 机制
    ├─ SYSCALL/SYSENTER 机制
    └─ 性能对比
    ↓
-4. X86_INTERRUPT_CONTROLLER_EVOLUTION.md（中断控制器）
+6. X86_INTERRUPT_CONTROLLER_EVOLUTION.md（中断控制器演进）
+   ├─ 8259 PIC 架构
+   ├─ APIC 架构（LAPIC + IOAPIC）
+   └─ 演进过程
    ↓
-5. LINUX_INTERRUPT_GUIDE.md（中断处理）
+7. PIC_APIC_COEXISTENCE.md（PIC 与 APIC 共存）⭐ 新增
+   ├─ 为什么需要共存
+   ├─ 共存期间的中断路由
+   └─ 禁用 PIC 的过程
+   ↓
+8. LINUX_INTERRUPT_GUIDE.md（Linux 中断处理）
+   ├─ 中断处理流程
+   ├─ 软中断机制
+   └─ 工作队列
 ```
 
 ---
@@ -177,6 +207,7 @@
 | 需求 | 推荐文档 | 难度 |
 |------|---------|------|
 | **BIOS 内存布局** | [BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md) | ⭐⭐ 进阶 |
+| **SeaBIOS 固定地址布局** | [SEABIOS_FIXED_ADDRESS_LAYOUT.md](SEABIOS_FIXED_ADDRESS_LAYOUT.md) ⭐ 新增 | ⭐⭐⭐ 深入 |
 | **BIOS IVT vs Kernel IDT** | [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md) | ⭐⭐ 进阶 |
 | **SeaBIOS 如何构建 E820 表？** | [SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md) | ⭐⭐⭐ 深入 |
 | **SeaBIOS 如何加载引导扇区？** | [SEABIOS_LOAD_BOOT_SECTOR.md](SEABIOS_LOAD_BOOT_SECTOR.md) | ⭐⭐ 进阶 |
