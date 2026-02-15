@@ -30,6 +30,7 @@ asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protecto
 - [五、常见组合模式](#五常见组合模式)
 - [六、与汇编代码交互](#六与汇编代码交互)
 - [七、参考资料](#七参考资料)
+- [八、扩展阅读：权威参考文档](#八扩展阅读权威参考文档)
 
 ---
 
@@ -47,6 +48,29 @@ asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protecto
 ### 1.2 x86-64 System V ABI（Linux 标准）
 
 **64 位 Linux 默认使用的调用约定**。
+
+#### 规范定义
+
+> 📖 **权威引述**（System V ABI AMD64 Architecture Processor Supplement, Draft Version 0.99.6, Figure 3.4）
+>
+> **Register Usage**:
+>
+> | Register | Usage | Preserved across function calls |
+> |----------|-------|--------------------------------|
+> | `%rax` | temporary register; return value | No |
+> | `%rbx` | callee-saved register | Yes |
+> | `%rcx` | 4th argument to functions | No |
+> | `%rdx` | 3rd argument to functions; return register | No |
+> | `%rsi` | 2nd argument to functions | No |
+> | `%rdi` | 1st argument to functions | No |
+> | `%rbp` | callee-saved register; frame pointer | Yes |
+> | `%rsp` | stack pointer | Yes |
+> | `%r8` | 5th argument to functions | No |
+> | `%r9` | 6th argument to functions | No |
+> | `%r10`-`%r11` | temporary registers | No |
+> | `%r12`-`%r15` | callee-saved registers | Yes |
+>
+> **来源**：`reference-docs/x86_64-abi-0.99.pdf`, Page 21, Figure 3.4
 
 #### 参数传递规则
 
@@ -75,6 +99,23 @@ asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protecto
 | **Callee-saved** | `RBX, RBP, R12-R15` | 被调用者保存（必须恢复） |
 | **特殊** | `RSP` | 栈指针（必须恢复） |
 
+#### Red Zone（红区）
+
+> 📖 **权威引述**（Agner Fog, "Calling conventions", Section 7, Page 20）
+>
+> **64 bit Linux, BSD and Mac**:
+>
+> "There is no shadow space on the stack. Instead there is a **'red zone'** below the stack pointer that can be used for temporary storage. The red zone is the space from `[rsp-128]` to `[rsp-8]`. A function can rely on this space being untouched by interrupt and exception handlers (except in kernel code). It is therefore safe to use this space for temporary storage **as long as you don't do any `push` or `call` instructions**. Everything stored in the red zone is destroyed by function calls. **The red zone is not available in Windows**."
+>
+> **来源**：`reference-docs/agner_calling_conventions.pdf`, Page 20
+
+**Red Zone 要点**：
+- ✅ **128 字节临时存储空间**（位于 `RSP-128` 到 `RSP-8`）
+- ✅ 无需调整栈指针即可使用
+- ✅ 中断处理器不会破坏此区域（内核模式除外）
+- ⚠️ **不能在 Red Zone 使用后再调用 `call` 或 `push`**
+- ⚠️ **Windows 上不存在 Red Zone**
+
 **示例**：
 
 ```c
@@ -95,6 +136,42 @@ add:
 
 **32 位 Linux 默认使用的调用约定**。
 
+#### 规范定义
+
+> 📖 **权威引述**（System V ABI Intel386 Architecture Processor Supplement, Fourth Edition, Page 37-38）
+>
+> **Function Calling Sequence**:
+>
+> "The **calling function** pushes arguments onto the stack in **reverse order** (i.e., right to left), and the **called function** is responsible for removing them from the stack.
+>
+> Registers `%ebp`, `%ebx`, `%edi`, `%esi`, and `%esp` are **callee-saved** and must be preserved by the function if they are used.
+>
+> All other registers, including `%eax`, `%edx`, and `%ecx`, are **caller-saved** and may be modified by the called function.
+>
+> The return value is placed in register `%eax`, or in registers `%edx:%eax` for 64-bit values."
+>
+> **来源**：`reference-docs/abi386-4.pdf`, Page 37-38
+
+> 📖 **栈布局**（i386 ABI, Figure 3-16, Page 40）
+>
+> ```
+> +---------------------+
+> | argument word N     |  ← [ebp + 4N + 8]
+> +---------------------+
+> | ...                 |
+> +---------------------+
+> | argument word 1     |  ← [ebp + 12]
+> +---------------------+
+> | argument word 0     |  ← [ebp + 8]
+> +---------------------+
+> | return address      |  ← [ebp + 4]
+> +---------------------+
+> | previous %ebp       |  ← [ebp]  (栈帧基址)
+> +---------------------+
+> | local variables     |  ← [ebp - N]
+> +---------------------+
+> ```
+
 #### 参数传递规则
 
 | 参数位置 | 传递方式 | 压栈顺序 |
@@ -107,6 +184,13 @@ add:
 
 **栈清理**：
 - **Caller 清理**（调用者负责）
+
+#### 寄存器保存规则
+
+| 类型 | 寄存器 | 谁负责保存？ |
+|------|--------|------------|
+| **Caller-saved** | `EAX, EDX, ECX` | 调用者保存（如需要） |
+| **Callee-saved** | `EBX, ESI, EDI, EBP, ESP` | 被调用者保存（必须恢复） |
 
 **示例**：
 
@@ -134,22 +218,78 @@ call add
 add esp, 12 // 调用者清理栈（3 个参数 × 4 字节）
 ```
 
-### 1.4 为什么需要 asmlinkage？
+---
 
-在某些架构（尤其是 **x86-32**）上，编译器可能使用**寄存器传参优化**（如 GCC 的 `-mregparm=N`）：
+### 1.4 不同平台调用约定对比
 
-```c
-// 默认情况（GCC 可能优化）
-int foo(int a, int b);  // 可能使用 EAX, EDX 传参
+> 📖 **权威引述**（Agner Fog, "Calling conventions", Table 5, Page 19）
+>
+> **Function calling conventions for different C++ compilers and operating systems**:
 
-// 强制栈传参（汇编兼容）
-asmlinkage int foo(int a, int b);  // 必须使用栈传参
-```
+| 平台/编译器 | 参数传递（整数） | 参数传递（浮点） | 栈清理 | Red Zone |
+|-----------|----------------|----------------|--------|----------|
+| **64-bit Linux/BSD/Mac** | RDI, RSI, RDX, RCX, R8, R9, stack | XMM0-XMM7, stack | Caller | 有（128字节） |
+| **64-bit Windows** | RCX, RDX, R8, R9, stack | XMM0-XMM3, stack | Caller | 无 |
+| **32-bit Linux/BSD/Mac** | 栈（从右向左） | 栈（从右向左） | Caller | 无 |
+| **32-bit Windows (cdecl)** | 栈（从右向左） | 栈（从右向左） | Caller | 无 |
+| **32-bit Windows (stdcall)** | 栈（从右向左） | 栈（从右向左） | **Callee** | 无 |
 
-**asmlinkage 的作用**：
-- ✅ 强制使用**栈传参**（x86-32）
-- ✅ 确保与**汇编代码兼容**
-- ✅ 在 x86-64 上通常是空宏（因为 System V ABI 已经使用寄存器）
+**来源**：`reference-docs/agner_calling_conventions.pdf`, Table 5, Page 19
+
+**关键差异**：
+1. **64 位 Linux vs Windows**：
+   - Linux：使用 6 个寄存器（RDI, RSI, RDX, RCX, R8, R9）
+   - Windows：使用 4 个寄存器（RCX, RDX, R8, R9），且顺序不同
+   - Linux 有 Red Zone（128 字节），Windows 有 Shadow Space（32 字节）
+
+2. **32 位 cdecl vs stdcall**：
+   - cdecl：调用者清理栈（Linux 标准）
+   - stdcall：被调用者清理栈（Windows API 常用）
+
+3. **为什么 Linux 内核需要 asmlinkage**：
+   - GCC 可以用 `-mregparm=N` 启用寄存器传参优化
+   - `asmlinkage` 强制使用栈传参，确保与汇编代码兼容
+   - 在 x86-64 上，`asmlinkage` 通常是空宏（ABI 已定义寄存器传参）
+
+---
+
+### 1.5 调用约定的规范来源
+
+**重要说明**：调用约定不是由处理器硬件定义的，而是软件层面的约定。
+
+#### 规范层级
+
+| 层级 | 文档类型 | 定义内容 | 示例 |
+|------|---------|---------|------|
+| **硬件层** | Intel SDM, AMD APM | 寄存器、指令、中断机制 | `CALL`, `RET`, `SYSCALL` 指令的行为 |
+| **ABI 层** | System V ABI | 调用约定、链接格式 | 参数用哪些寄存器传递 |
+| **实现层** | Linux 内核源码 | 具体实现与注解 | `asmlinkage` 宏定义 |
+
+#### Intel SDM 的角色
+
+**Intel SDM（Software Developer's Manual）提供**：
+- ✅ 寄存器的定义和用途（RAX, RDI, RSI 等）
+- ✅ 指令的行为（`CALL`, `RET`, `PUSH`, `POP`）
+- ✅ 系统调用指令（`SYSCALL`, `SYSRET`）
+- ✅ 中断和异常的硬件机制（IDT, 错误码压栈）
+
+**Intel SDM 不提供**：
+- ❌ 哪个寄存器传递第几个参数（这是 ABI 定义的）
+- ❌ 谁负责清理栈（这是调用约定的一部分）
+- ❌ 函数属性的使用方法（这是编译器和内核实现）
+
+**相关章节**（参考 Intel SDM Volume 3A）：
+- **Volume 1, Chapter 3**：基本执行环境（寄存器）
+- **Volume 2**：指令集参考（`CALL`, `RET`, `SYSCALL` 等）
+- **Volume 3, Chapter 6**：中断和异常处理
+  - 6.12 节：异常和中断处理
+  - 6.14 节：错误码（Error Code）
+  - 说明了哪些异常会压入错误码，这影响了中断处理函数的调用约定
+
+**参考**：
+- Intel SDM：https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+- 本地文档：`~/Desktop/64-ia-32-architectures-software-developer-vol-3a-part-1-manual.pdf`
+- Linux 内核文档：`Documentation/arch/x86/entry_64.rst` 明确引用了 Intel SDM Volume 3, Chapter 6
 
 ---
 
@@ -249,10 +389,19 @@ asmlinkage void x86_64_start_kernel(char *real_mode_data) {
 
 **GCC 属性**：`__attribute__((__externally_visible__))`
 
+> 📖 **GCC 官方文档**（Common Function Attributes - externally_visible）
+>
+> "This attribute, attached to a global variable or function, **nullifies the effect of the `-fwhole-program` command-line option**, so the object remains visible outside the current compilation unit.
+>
+> If `-fwhole-program` is used together with `-flto` and `gold` is used as the linker plugin, `externally_visible` attributes are automatically added to functions (not variable yet due to a current gold issue) that are accessed outside of LTO objects according to resolution file produced by gold. For other linkers that cannot generate resolution file, explicit `externally_visible` attributes are still necessary."
+>
+> **来源**：`reference-docs/gcc_common_function_attributes.html` (GCC Documentation)
+
 **作用**：
 - ✅ **防止 LTO（Link Time Optimization）优化掉符号**
 - ✅ 确保符号在**链接时可见**
 - ✅ 即使函数看起来"未使用"，也不会被删除
+- ✅ 在使用 `-fwhole-program` 优化时保留符号
 
 #### 为什么需要？
 
@@ -418,6 +567,24 @@ $ size vmlinux
 #### 含义
 
 **GCC 属性**：`__attribute__((__noreturn__))`
+
+> 📖 **GCC 官方文档**（Common Function Attributes - noreturn）
+>
+> "A few standard library functions, such as `abort` and `exit`, cannot return. GCC knows this automatically. Some programs define their own functions that never return. You can declare them `noreturn` to tell the compiler this fact."
+>
+> **示例**：
+> ```c
+> void fatal () __attribute__ ((noreturn));
+>
+> void
+> fatal (/* ... */)
+> {
+>   /* ... */ /* Print error message. */ /* ... */
+>   exit (1);
+> }
+> ```
+>
+> **来源**：`reference-docs/gcc_common_function_attributes.html` (GCC Documentation)
 
 **作用**：
 - ✅ 告诉编译器函数**永不返回**
@@ -634,10 +801,20 @@ void start_kernel(void)
 #define __cold  __attribute__((__cold__))
 ```
 
+> 📖 **GCC 官方文档**（Common Function Attributes - cold）
+>
+> "The `cold` attribute on functions is used to inform the compiler that the function is **unlikely to be executed**. The function is **optimized for size rather than speed** and on many targets it is placed into a **special subsection of the text section** so all cold functions appear close together, **improving code locality of non-cold parts of program**. The paths leading to calls of cold functions within code are **marked as unlikely by the branch prediction mechanism**. It is thus useful to mark functions used to handle unlikely conditions, such as `perror`, as cold to improve optimization of hot functions that do call marked functions in rare occasions.
+>
+> When profile feedback is available, via `-fprofile-use`, cold functions are automatically detected and this attribute is ignored."
+>
+> **来源**：`reference-docs/gcc_common_function_attributes.html` (GCC Documentation)
+
 **作用**：
 - 告诉编译器这段代码**很少执行**
-- 编译器可能将其移到代码段末尾
-- 提高**热代码的缓存命中率**
+- 编译器将其**优化为小代码体积而非高速度**
+- 编译器可能将其移到代码段末尾（特殊子段）
+- 提高**热代码的缓存命中率**（代码局部性）
+- 分支预测器将调用路径标记为"不太可能"
 
 **使用场景**：
 - 错误处理路径
@@ -651,11 +828,20 @@ void start_kernel(void)
 #define __used  __attribute__((__used__))
 ```
 
+> 📖 **GCC 官方文档**（Common Function Attributes - used）
+>
+> "This attribute, attached to a function, means that **code must be emitted for the function even if it appears that the function is not referenced**. This is useful, for example, when the function is referenced only in inline assembly.
+>
+> When applied to a member function of a C++ class template, the attribute also means that the function is instantiated if the class itself is instantiated."
+>
+> **来源**：`reference-docs/gcc_common_function_attributes.html` (GCC Documentation)
+
 **作用**：
-- 即使符号看起来"未使用"，也**不删除**
-- 类似 `__visible`，但不影响链接可见性
+- 即使符号看起来"未使用"，也**必须生成代码**
+- 类似 `__visible`，但侧重于代码生成而非链接可见性
 
 **使用场景**：
+- 仅在内联汇编中引用的函数
 - 模块导出的符号
 - 通过特殊方式调用的函数（如 `.initcall` 段）
 
@@ -1217,34 +1403,207 @@ add esp, 12     // 清理栈（3 × 4 字节）
 
 > **参考源码目录**：`~/works/linux/`
 
-**函数修饰符定义**：
-- `include/linux/linkage.h` - asmlinkage 定义
-- `include/linux/compiler_attributes.h` - __visible, __noreturn, __cold 等
-- `include/linux/init.h` - __init, __initdata, __exit 等
-- `arch/x86/include/asm/linkage.h` - x86 特定的 asmlinkage
+#### 函数修饰符定义
 
-**实际使用示例**：
-- `arch/x86/kernel/head64.c:219` - x86_64_start_kernel
-- `init/main.c:856` - start_kernel
-- `arch/x86/entry/syscall_64.c` - sys_call_table
-- `arch/x86/kernel/traps.c` - 异常处理函数
+**调用约定（asmlinkage）**：
+- `include/linux/linkage.h:15-23` - 通用 asmlinkage 定义
+  ```c
+  #ifdef __cplusplus
+  #define CPP_ASMLINKAGE extern "C"
+  #else
+  #define CPP_ASMLINKAGE
+  #endif
 
-### 7.2 GCC 文档
+  #ifndef asmlinkage
+  #define asmlinkage CPP_ASMLINKAGE
+  #endif
+  ```
+
+- `arch/x86/include/asm/linkage.h:19-21` - **x86-32 专用定义（关键！）**
+  ```c
+  #ifdef CONFIG_X86_32
+  #define asmlinkage CPP_ASMLINKAGE __attribute__((regparm(0)))
+  #endif /* CONFIG_X86_32 */
+  ```
+  > 说明：`regparm(0)` 强制使用栈传参，这是 x86-32 上与汇编代码兼容的关键
+
+**其他修饰符**：
+- `include/linux/compiler_attributes.h` - `__visible`, `__noreturn`, `__cold`, `__used` 等
+  - 第 149 行：`#define __visible  __attribute__((__externally_visible__))`
+  - 第 262 行：`#define __noreturn  __attribute__((__noreturn__))`
+- `include/linux/init.h:54` - `__init`, `__initdata`, `__exit` 等
+  ```c
+  #define __init  __section(".init.text") __cold __latent_entropy  \
+                  __noinitretpoline __no_sanitize_coverage
+  ```
+
+#### 实际使用示例
+
+**内核入口函数**：
+- `arch/x86/kernel/head64.c:219` - `x86_64_start_kernel`
+  ```c
+  asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_data)
+  ```
+
+- `init/main.c:897-898` - `start_kernel`（**最关键的示例**）
+  ```c
+  asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protector
+  void start_kernel(void)
+  ```
+  > 这是内核的第一个 C 函数，展示了几乎所有关键修饰符的组合使用
+
+**系统调用与中断**：
+- `arch/x86/entry/syscall_64.c` - `sys_call_table` 系统调用表
+- `arch/x86/kernel/traps.c` - 异常处理函数（`do_page_fault` 等）
+- `arch/x86/entry/entry_64.S` - 汇编入口点
+
+**汇编符号注解**：
+- `include/linux/linkage.h:78-353` - `SYM_FUNC_START`, `SYM_CODE_START` 等宏定义
+- `arch/x86/include/asm/linkage.h:115-154` - x86 特定的符号注解
+
+#### 内核文档注释
+
+**关于调用约定的重要注释**：
+
+1. **linkage.h 中关于 asmlinkage_protect 的注释**（`include/linux/linkage.h:51-63`）：
+   ```c
+   /*
+    * This is used by architectures to keep arguments on the stack
+    * untouched by the compiler by keeping them live until the end.
+    * The argument stack may be owned by the assembly-language
+    * caller, not the callee, and gcc doesn't always understand
+    * that.
+    *
+    * We have the return value, and a maximum of six arguments.
+    */
+   ```
+   > 说明了为什么需要特殊处理汇编调用的 C 函数的参数
+
+2. **汇编注解的用途**（`include/linux/linkage.h:176-191`）：
+   ```c
+   /*
+    * FUNC -- C-like functions (proper stack frame etc.)
+    * CODE -- non-C code (e.g. irq handlers with different, special stack etc.)
+    *
+    * Objtool validates stack for FUNC, but not for CODE.
+    * Objtool generates debug info for both FUNC & CODE, but needs special
+    * annotations for each CODE's start (to describe the actual stack frame).
+    */
+   ```
+   > 区分了标准 C 调用约定（FUNC）和特殊调用约定（CODE，如中断处理函数）
+
+### 7.2 ABI 规范文档（已下载到本地）
+
+**说明**：调用约定（Calling Convention）不是由处理器手册（Intel SDM）定义的，而是由操作系统和编译器层面的 **ABI（Application Binary Interface）规范** 定义的。
+
+> 📁 **本地参考文档目录**：`reference-docs/`
+
+#### x86-64 System V ABI（Linux/Unix 标准）
+
+**官方规范**：
+- 在线版本：https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
+- **本地副本**：`reference-docs/x86_64-abi-0.99.pdf` (557 KB)
+- GitHub 镜像：https://github.com/hjl-tools/x86-psABI/wiki/x86-64-psABI-1.0.pdf
+
+**核心章节**：
+- **第 3 章：低级系统信息**（Low-Level System Information）
+  - 第 3.1 节：机器接口（Machine Interface）
+  - 第 3.2 节：**函数调用序列**（Function Calling Sequence）
+  - **Figure 3.4: Register Usage**（寄存器使用表）— 被本文档 1.2 节引用
+- **第 3.3 节**：操作系统接口
+
+**关键内容**：
+- ✅ 寄存器使用和保存约定（Caller-saved vs Callee-saved）
+- ✅ 参数传递规则（前 6 个整数参数用寄存器，浮点用 XMM0-7）
+- ✅ 返回值约定（RAX, XMM0）
+- ✅ 栈对齐要求（16 字节对齐）
+- ✅ Red Zone（128 字节临时区域）
+
+#### i386 System V ABI（x86-32 标准）
+
+**官方规范**：
+- 在线版本：https://refspecs.linuxbase.org/elf/abi386-4.pdf
+- **本地副本**：`reference-docs/abi386-4.pdf` (1.0 MB)
+
+**核心章节**：
+- **第 3 章：低级系统信息**
+  - 第 3.4 节：**函数调用序列**（Function Calling Sequence, Page 37-42）
+  - **Figure 3-16: Stack Frame**（栈帧布局图）— 被本文档 1.3 节引用
+
+**关键内容**：
+- ✅ cdecl 调用约定（所有参数压栈，从右向左）
+- ✅ 调用者清理栈（Caller cleans up）
+- ✅ 寄存器保存规则（EBP, EBX, ESI, EDI, ESP 必须保存）
+- ✅ 栈帧结构（EBP 作为帧指针）
+
+#### Agner Fog's Calling Conventions（性能分析视角）
+
+**官方文档**：
+- 在线版本：https://www.agner.org/optimize/calling_conventions.pdf
+- **本地副本**：`reference-docs/agner_calling_conventions.pdf` (1.0 MB)
+- 版本：2023年7月1日更新
+
+**核心章节**：
+- **第 7 章：64 位系统上的调用约定**（Calling conventions for 64-bit systems, Page 17-22）
+  - **Table 5: Function calling conventions for different compilers and OS**（被本文档 1.4 节引用）
+  - Linux vs Windows 调用约定对比
+  - Red Zone vs Shadow Space 对比
+
+**关键内容**：
+- ✅ 多平台调用约定对比（Linux, Windows, Mac, BSD）
+- ✅ 不同编译器的差异（GCC, Clang, MSVC, ICC）
+- ✅ 性能优化建议
+- ✅ 特殊约定（如 `-mregparm` 优化）
+
+#### 其他参考
+
+- **OSDev Wiki - Calling Conventions**: https://wiki.osdev.org/Calling_Conventions
+  - 系统编程视角的调用约定总结
+  - 多种架构和约定的对比
+
+### 7.3 GCC 文档（已下载到本地）
 
 **函数属性**：
-- https://gcc.gnu.org/onlinedocs/gcc/Function-Attributes.html
-  - `__attribute__((__noreturn__))`
-  - `__attribute__((__externally_visible__))`
-  - `__attribute__((__cold__))`
-  - `__attribute__((regparm(N)))`
+- 在线版本：https://gcc.gnu.org/onlinedocs/gcc/Function-Attributes.html
+- **本地副本**：
+  - `reference-docs/gcc_function_attributes.html` (9.9 KB) — 函数属性索引页
+  - `reference-docs/gcc_common_function_attributes.html` (127 KB) — 通用函数属性详细说明
 
-**ABI 文档**：
-- **x86-64 System V ABI**: https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
-  - 第 3 章：低级系统信息
-  - 第 3.2 节：函数调用序列
-  - 寄存器使用、参数传递、栈布局
+**关键属性说明**（已被本文档引用）：
+- `__attribute__((__noreturn__))` — 2.4 节引用
+- `__attribute__((__externally_visible__))` — 2.2 节引用
+- `__attribute__((__cold__))` — 2.7 节引用
+- `__attribute__((__used__))` — 2.7 节引用
+- `__attribute__((regparm(N)))` — 2.1 节提及（x86-32 专用）
+- `__attribute__((__no_sanitize_address__))` — 2.5 节
+- `__attribute__((__no_stack_protector__))` — 2.6 节
 
-### 7.3 项目文档
+**其他重要属性**：
+- `__attribute__((__section__("name")))` — 指定 ELF 段
+- `__attribute__((__aligned__(N)))` — 对齐要求
+- `__attribute__((__packed__))` — 紧凑布局
+- `__attribute__((__weak__))` — 弱符号
+
+### 7.4 Intel 处理器手册
+
+**说明**：虽然 Intel SDM 不定义调用约定，但提供了底层硬件机制的权威说明。
+
+**Intel® 64 and IA-32 Architectures Software Developer's Manual**：
+- **Volume 1: Basic Architecture**
+  - 第 3 章：基本执行环境（寄存器、数据类型）
+  - 第 5 章：指令集概述
+- **Volume 2: Instruction Set Reference**
+  - `CALL`、`RET`、`PUSH`、`POP` 等指令详解
+  - `SYSCALL`/`SYSRET` 系统调用指令
+- **Volume 3A: System Programming Guide, Part 1**
+  - 第 6 章：中断和异常处理
+  - 中断门、陷阱门的参数传递机制
+
+**下载地址**：
+- https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+- 本地参考：`~/Desktop/64-ia-32-architectures-software-developer-vol-3a-part-1-manual.pdf`
+
+### 7.5 项目文档
 
 **相关主题**：
 - [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) - start_kernel 详解
@@ -1256,16 +1615,34 @@ add esp, 12     // 清理栈（3 × 4 字节）
 - [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md) - GRUB 如何跳转到内核
 - [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md) - 中断处理流程
 
-### 7.4 在线资源
+### 7.6 Linux 内核官方文档
 
-**x86 调用约定**：
-- OSDev Wiki: https://wiki.osdev.org/Calling_Conventions
-- x86-64 ABI: https://github.com/hjl-tools/x86-psABI/wiki/x86-64-psABI-1.0.pdf
+**汇编与调用约定**：
 
-**Linux 内核文档**：
+- **Documentation/core-api/asm-annotations.rst**（源码：`~/works/linux/Documentation/core-api/asm-annotations.rst`）
+  - **SYM_FUNC_\* vs SYM_CODE_\* 的区别**（第 76-94 行）：
+    - `SYM_FUNC_*`：标准 C 调用约定的函数（栈帧规范）
+    - `SYM_CODE_*`：特殊调用约定的代码（中断处理、trampoline、启动代码）
+  - 汇编符号的正确注解方法
+  - 与 objtool 工具的集成
+
+- **Documentation/arch/x86/entry_64.rst**（源码：`~/works/linux/Documentation/arch/x86/entry_64.rst`）
+  - **不同入口点的调用约定**（第 44-51 行）：
+    ```
+    The different x86-64 entries have different calling conventions.
+    The syscall and sysenter instructions have their own peculiar
+    calling conventions. Some of the IDT entries push an error code
+    onto the stack; others don't.
+    ```
+  - 引用了 **AMD APM Volume 2, Chapter 8** 和 **Intel SDM Volume 3, Chapter 6**
+  - 系统调用、中断、异常处理的入口机制
+  - SWAPGS 指令与栈切换
+
+**内核通用文档**：
 - https://www.kernel.org/doc/html/latest/
-  - Documentation/process/coding-style.rst
-  - Documentation/kbuild/makefiles.rst
+  - **Documentation/process/coding-style.rst** - 内核编码风格
+  - **Documentation/kbuild/makefiles.rst** - 构建系统
+  - **Documentation/arch/x86/boot.rst** - x86-64 启动协议（原路径：`x86/x86_64/boot.rst`）
 
 ---
 
@@ -1311,5 +1688,276 @@ add esp, 12     // 清理栈（3 × 4 字节）
 
 ---
 
-**文档版本**：v1.0 (2026-02-15)
+## 八、扩展阅读：权威参考文档
+
+本节列出本文档引用的所有权威规范，包括原始下载链接、主要内容概述和推荐阅读目标。所有文档已下载到 `reference-docs/` 目录，可离线查阅。
+
+### 8.1 ABI 规范文档（核心必读）
+
+#### 📘 System V ABI - AMD64 Architecture Processor Supplement
+
+**官方链接**：https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
+
+**文档概述**：
+这是定义 Linux/Unix 64 位系统调用约定的**权威规范**。所有 Linux x86-64 程序的函数调用、参数传递、寄存器使用都必须遵循此规范。
+
+**主要内容**：
+- **第 3 章：低级系统信息**（Low-Level System Information）
+  - 3.1 节：机器接口（寄存器、数据类型）
+  - 3.2 节：**函数调用序列**（Function Calling Sequence）⭐ 核心章节
+    - Figure 3.4: Register Usage（寄存器使用表）
+    - 参数传递规则（前 6 个参数用寄存器）
+    - 返回值约定（RAX, XMM0）
+    - Caller-saved vs Callee-saved 寄存器
+  - 3.3 节：操作系统接口
+- **第 3.4 节**：栈帧布局（Stack Frame）
+  - Red Zone（128 字节临时区域）
+  - 栈对齐要求（16 字节）
+
+**阅读目标**：
+- ✅ **初学者**：阅读 3.2 节和 Figure 3.4，理解 x86-64 如何传递参数
+- ✅ **进阶**：理解 Red Zone 机制，为什么内核代码需要禁用它
+- ✅ **高级**：对比不同 ABI（Windows vs Linux）的差异
+
+**本文档引用位置**：1.2 节（寄存器使用表）
+
+---
+
+#### 📘 System V ABI - Intel386 Architecture Processor Supplement
+
+**官方链接**：https://refspecs.linuxbase.org/elf/abi386-4.pdf
+
+**文档概述**：
+定义 Linux/Unix 32 位系统调用约定的**权威规范**。虽然现代系统主要使用 64 位，但理解 32 位 cdecl 约定有助于：
+- 理解 `asmlinkage` 的作用（强制栈传参）
+- 理解为什么 32 位和 64 位调用约定差异巨大
+- 分析兼容层（如 ia32_sys_call_table）
+
+**主要内容**：
+- **第 3 章：低级系统信息**
+  - 3.4 节：**函数调用序列**（Page 37-42）⭐ 核心章节
+    - Figure 3-16: Stack Frame（栈帧布局图）
+    - cdecl 约定详解（所有参数压栈，从右向左）
+    - 调用者清理栈（Caller cleans up）
+  - 3.5 节：寄存器使用
+    - Callee-saved: EBP, EBX, ESI, EDI, ESP
+    - Caller-saved: EAX, EDX, ECX
+
+**阅读目标**：
+- ✅ **初学者**：阅读 Figure 3-16，理解 32 位栈帧结构
+- ✅ **进阶**：对比 x86-64，理解为什么寄存器传参更高效
+- ✅ **高级**：研究 Linux 内核如何支持 32 位兼容模式
+
+**本文档引用位置**：1.3 节（栈帧布局图、cdecl 约定说明）
+
+---
+
+### 8.2 性能分析文档（跨平台对比）
+
+#### 📙 Calling Conventions for Different C++ Compilers and Operating Systems
+
+**作者**：Agner Fog（丹麦技术大学教授，性能优化专家）
+**官方链接**：https://www.agner.org/optimize/calling_conventions.pdf
+**版本**：2023年7月1日更新
+
+**文档概述**：
+这是一份从**性能优化角度**分析调用约定的技术文档，对比了 Linux、Windows、Mac、BSD 等多个平台的调用约定差异。不同于 ABI 规范的"规定性"，本文档从"为什么这样设计"的角度解释调用约定。
+
+**主要内容**：
+- **第 7 章：64 位系统调用约定**（Page 17-22）⭐ 核心章节
+  - Table 5: Function calling conventions comparison（多平台对比表）
+  - Linux vs Windows vs Mac 的参数传递差异
+  - Red Zone（Linux）vs Shadow Space（Windows）
+  - 性能影响分析
+- **第 5 章**：32 位调用约定（cdecl, stdcall, fastcall）
+- **第 9 章**：优化建议
+
+**阅读目标**：
+- ✅ **初学者**：阅读 Table 5，快速了解不同平台的调用约定差异
+- ✅ **进阶**：理解 Red Zone 的性能优势（无需调整栈指针）
+- ✅ **高级**：如何编写跨平台代码（处理调用约定差异）
+
+**本文档引用位置**：
+- 1.2 节（Red Zone 说明）
+- 1.4 节（调用约定对比表）
+
+**为什么阅读此文档**：
+- ABI 规范告诉你"是什么"，Agner Fog 告诉你"为什么"
+- 包含大量性能测试数据和优化技巧
+- 作者是 CPU 微架构研究专家，视角独特
+
+---
+
+### 8.3 GCC 编译器文档（函数属性参考）
+
+#### 📗 GCC Function Attributes
+
+**官方链接**：https://gcc.gnu.org/onlinedocs/gcc/Function-Attributes.html
+
+**文档概述**：
+GCC 编译器官方文档，详细说明了所有函数属性（`__attribute__`）的语法、语义和用法。
+
+**主要内容**：
+- **Common Function Attributes**（通用函数属性）⭐ 核心章节
+  - `noreturn` — 永不返回函数
+  - `externally_visible` — 防止 LTO 优化删除
+  - `cold` — 冷代码标记（优化代码局部性）
+  - `used` — 强制生成代码（即使看似未使用）
+  - `section("name")` — 指定 ELF 段
+  - `aligned(N)` — 对齐要求
+- **x86 Function Attributes**（x86 特定属性）
+  - `regparm(N)` — 指定寄存器传参数量
+  - `fastcall`, `thiscall`, `ms_abi` 等调用约定
+
+**阅读目标**：
+- ✅ **初学者**：查询不熟悉的属性（如 `__noreturn`）
+- ✅ **进阶**：理解属性如何影响代码生成
+- ✅ **高级**：使用属性进行性能优化
+
+**本文档引用位置**：
+- 2.2 节（`externally_visible`）
+- 2.4 节（`noreturn`）
+- 2.7 节（`cold`, `used`）
+
+**使用建议**：
+- 配合本文档使用：先读本文档理解概念，再查 GCC 文档了解细节
+- HTML 版本支持搜索，快速定位属性说明
+- 可下载 PDF 版本：https://gcc.gnu.org/onlinedocs/gcc.pdf
+
+---
+
+### 8.4 Intel 处理器手册（硬件机制参考）
+
+#### 📕 Intel® 64 and IA-32 Architectures Software Developer's Manual
+
+**官方链接**：https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+
+**重要说明**：Intel SDM **不定义调用约定**（调用约定由 ABI 规范定义），但提供了底层硬件机制的权威说明。
+
+**相关卷册**：
+- **Volume 1: Basic Architecture**
+  - 第 3 章：基本执行环境（寄存器定义、数据类型）
+  - 第 5 章：指令集概述
+- **Volume 2: Instruction Set Reference**
+  - `CALL`, `RET`, `PUSH`, `POP` 指令详解
+  - `SYSCALL`, `SYSRET` 系统调用指令
+  - `INT`, `IRET` 中断指令
+- **Volume 3A: System Programming Guide, Part 1**
+  - 第 6 章：中断和异常处理 ⭐ 与调用约定相关
+    - 6.12 节：异常和中断处理
+    - 6.14 节：错误码（Error Code）
+    - 说明哪些异常会压入错误码（影响中断处理函数的调用约定）
+
+**阅读目标**：
+- ✅ **理解硬件行为**：中断时 CPU 如何压栈、如何传递错误码
+- ✅ **指令级优化**：`CALL` vs `JMP`，`RET` 的微架构行为
+- ✅ **系统编程**：如何使用 `SYSCALL` 指令（内核入口）
+
+**与调用约定的关系**：
+```
+硬件层（Intel SDM）→ 定义寄存器和指令行为
+    ↓
+ABI 层（System V ABI）→ 规定如何使用这些寄存器传参
+    ↓
+实现层（Linux 内核）→ 通过 asmlinkage 等宏实现约定
+```
+
+**本文档提及位置**：
+- 1.5 节（调用约定的规范来源）
+- 7.4 节（Intel 处理器手册）
+
+---
+
+### 8.5 Linux 内核官方文档
+
+#### 📖 Documentation/core-api/asm-annotations.rst
+
+**在线链接**：https://www.kernel.org/doc/html/latest/core-api/asm-annotations.html
+
+**内容概述**：
+说明 Linux 内核汇编代码的符号注解规范（`SYM_FUNC_START`, `SYM_CODE_START` 等宏）。
+
+**阅读目标**：
+- ✅ 理解 `SYM_FUNC_*`（标准 C 调用约定）vs `SYM_CODE_*`（特殊调用约定）
+- ✅ 学习如何正确注解汇编代码
+- ✅ 理解 objtool 工具的作用
+
+---
+
+#### 📖 Documentation/arch/x86/entry_64.rst
+
+**在线链接**：https://www.kernel.org/doc/html/latest/arch/x86/entry_64.html
+
+**内容概述**：
+详细说明 x86-64 内核入口点（系统调用、中断、异常）的实现机制。
+
+**关键引述**：
+> "The different x86-64 entries have different calling conventions. The syscall and sysenter instructions have their own peculiar calling conventions."
+
+**阅读目标**：
+- ✅ 理解系统调用入口（`entry_SYSCALL_64`）的调用约定
+- ✅ 理解中断/异常处理的栈切换机制
+- ✅ 理解 SWAPGS 指令的作用
+
+---
+
+### 8.6 阅读路径建议
+
+#### 🎯 路径 1：快速入门（30分钟）
+
+1. **阅读本文档 1.1-1.4 节**（理解调用约定概念）
+2. **查看 x86_64-abi-0.99.pdf Figure 3.4**（记住寄存器使用规则）
+3. **查看 Agner Fog Table 5**（了解平台差异）
+4. **完成**：能够理解 Linux 内核函数签名中的 `asmlinkage`
+
+---
+
+#### 🎯 路径 2：深入理解（2小时）
+
+1. **阅读 x86_64-abi-0.99.pdf 第 3 章**（完整理解 64 位调用约定）
+2. **阅读 abi386-4.pdf 第 3.4 节**（对比 32 位调用约定）
+3. **阅读本文档第 2 章**（理解函数修饰符）
+4. **查阅 GCC 文档**（查询不熟悉的属性）
+5. **完成**：能够正确使用函数修饰符编写内核代码
+
+---
+
+#### 🎯 路径 3：内核开发者（1周）
+
+1. **通读本文档所有章节**
+2. **精读 x86_64-abi-0.99.pdf 和 abi386-4.pdf**
+3. **阅读 Agner Fog 全文**（理解性能优化）
+4. **阅读 Linux 内核源码**：
+   - `include/linux/linkage.h`
+   - `arch/x86/include/asm/linkage.h`
+   - `init/main.c:start_kernel`
+5. **阅读 Intel SDM Volume 3A 第 6 章**（中断机制）
+6. **完成**：能够编写高质量的内核汇编/C 混合代码
+
+---
+
+### 8.7 本地文档清单
+
+所有参考文档已下载到 `reference-docs/` 目录：
+
+| 文件名 | 大小 | 原始链接 |
+|-------|------|---------|
+| `x86_64-abi-0.99.pdf` | 557 KB | https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf |
+| `abi386-4.pdf` | 1.0 MB | https://refspecs.linuxbase.org/elf/abi386-4.pdf |
+| `agner_calling_conventions.pdf` | 1.0 MB | https://www.agner.org/optimize/calling_conventions.pdf |
+| `gcc_function_attributes.html` | 9.9 KB | https://gcc.gnu.org/onlinedocs/gcc/Function-Attributes.html |
+| `gcc_common_function_attributes.html` | 127 KB | https://gcc.gnu.org/onlinedocs/gcc/Common-Function-Attributes.html |
+
+---
+
+**文档版本**：v2.0 (2026-02-15)
 **维护说明**：本文档基于 Linux v6.x 内核源码，定义可能随内核版本变化。
+
+**更新日志**：
+- **v2.0 (2026-02-15)**：
+  - ✅ 添加权威规范引述（ABI、GCC、Agner Fog）
+  - ✅ 下载所有参考文档到本地（`reference-docs/`）
+  - ✅ 新增第 8 章：扩展阅读指南
+  - ✅ 新增 1.4 节：不同平台调用约定对比
+  - ✅ 新增 1.5 节：调用约定的规范来源
+- **v1.0**：初始版本，基于内核源码分析
