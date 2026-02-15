@@ -2136,3 +2136,31 @@ static const struct idt_data ia32_idt[] __initconst = {
 
 - **[VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md)** - vmlinuz 文件结构分析
 - **[INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md)** - initramfs 分析
+
+---
+
+## 参考资料
+
+### ABI 规范文档
+
+- **System V ABI - AMD64 Architecture Processor Supplement**
+  - **在线版本**：https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
+  - **本地副本**：`reference-docs/x86_64-abi-0.99.pdf`
+  - **相关章节**：
+    - 第 3.2 节：函数调用序列 - 寄存器使用规则（RDI, RSI, RDX, RCX, R8, R9 用于前6个参数）
+    - Figure 3.4: Register Usage（Caller-saved vs Callee-saved）
+  - **说明**：本文档中 `startup_64` 使用 RSI 传递 boot_params 参数遵循此规范
+
+### Linux 内核文档
+
+- **Documentation/arch/x86/boot.rst** - Linux x86 Boot Protocol
+  - 在线版本：https://www.kernel.org/doc/html/latest/arch/x86/boot.html
+  - 说明：定义了 bootloader 和内核之间的接口规范（包括 boot_params 结构）
+
+### Intel 处理器手册
+
+- **Intel® 64 and IA-32 Architectures Software Developer's Manual**
+  - **Volume 3A**: System Programming Guide, Part 1
+    - 第 6 章：中断和异常处理
+    - 第 9 章：处理器管理和初始化
+  - **下载地址**：https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html

@@ -1233,3 +1233,12 @@ start_kernel() 启动流程中的系统调用初始化：
 - [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) - 主启动流程
 - [IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md) - IDT 初始化的 5 个演进阶段
 - [BIOS IVT vs Kernel IDT](BIOS_IVT_VS_KERNEL_IDT.md) - 实模式 IVT 与保护模式 IDT 对比
+- [Linux 内核函数修饰符与调用约定](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md) - 调用约定详解（x86-64 System V ABI、参数传递、寄存器使用）
+
+**ABI 规范参考**：
+- **System V ABI - AMD64 (x86-64)**：https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
+  - 第 3.2 节：函数调用序列（系统调用参数传递规则）
+  - 本地副本：`reference-docs/x86_64-abi-0.99.pdf`
+- **System V ABI - Intel386 (x86-32)**：https://refspecs.linuxbase.org/elf/abi386-4.pdf
+  - 第 3.4 节：函数调用序列（INT 0x80 栈传参机制）
+  - 本地副本：`reference-docs/abi386-4.pdf`

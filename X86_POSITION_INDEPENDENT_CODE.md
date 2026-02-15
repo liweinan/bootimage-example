@@ -989,10 +989,25 @@ startup_64:
 
 ## 参考资料
 
-- Linux 内核源代码：
-  - `arch/x86/boot/startup/` - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/boot/startup`
-  - `arch/x86/include/asm/linkage.h` - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/linkage.h`
-  - `arch/x86/include/asm/init.h` - `https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/init.h`
+### Linux 内核源代码
+
+- `arch/x86/boot/startup/` - https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/boot/startup
+- `arch/x86/include/asm/linkage.h` - https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/linkage.h
+- `arch/x86/include/asm/init.h` - https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/include/asm/init.h
+
+### ABI 规范文档
+
+- **System V ABI - AMD64 Architecture Processor Supplement**
+  - **在线版本**：https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
+  - **本地副本**：`reference-docs/x86_64-abi-0.99.pdf`
+  - **相关章节**：
+    - 第 3.2 节：函数调用序列（寄存器使用、参数传递）
+    - 第 3.5 节：程序加载（Position Independent Code）
+    - 第 3.6 节：RIP-relative addressing（PC 相对寻址）
+  - **说明**：x86-64 ABI 定义了 RIP-relative addressing 的规范用法，这是实现位置无关代码的核心机制
+
+### 相关文档
+
 - Linux 内核文档：Position Independent Executables (PIE)
-- x86-64 ABI 规范：RIP-relative addressing
-- 详细流程分析：[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)
+- [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) - 详细流程分析
+- [Linux 内核函数修饰符与调用约定](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md) - 调用约定与 ABI 规范详解
