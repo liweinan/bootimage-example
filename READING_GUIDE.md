@@ -150,29 +150,49 @@
 
 | 需求 | 推荐文档 | 难度 |
 |------|---------|------|
+| **Linux 启动代码是否遵守 ABI？** | [LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md](LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md) ⭐ 新增 | ⭐⭐⭐⭐ 核心 |
 | **函数修饰符详解（asmlinkage, __visible, __init...）** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md) | ⭐⭐ 进阶 |
 | **x86 调用约定（Calling Convention）** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#一x86-调用约定基础](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#一x86-调用约定基础) | ⭐⭐ 进阶 |
+| **ARM 调用约定（AAPCS/AAPCS64）** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#14-不同平台调用约定对比](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#14-不同平台调用约定对比) | ⭐⭐ 进阶 |
+| **调用约定 vs 二进制格式（ELF vs Mach-O）** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#16-调用约定与二进制格式的区别](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#16-调用约定与二进制格式的区别) | ⭐⭐⭐ 深入 |
+| **Linux 内核 ABI 稳定性** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#17-linux-内核的-abi-稳定性](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#17-linux-内核的-abi-稳定性) | ⭐⭐⭐ 深入 |
 | **与汇编代码交互** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#六与汇编代码交互](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#六与汇编代码交互) | ⭐⭐⭐ 深入 |
 | **常见组合模式** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#五常见组合模式](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#五常见组合模式) | ⭐⭐ 进阶 |
 
 **学习路径**（内核编程专题）：
 ```
-1. 阅读 x86 调用约定基础
+1. 阅读 x86/ARM 调用约定基础（LINUX_KERNEL_FUNCTION_ATTRIBUTES.md）
    ├─ x86-64 System V ABI（Linux 标准）
-   └─ x86-32 cdecl 约定
+   ├─ x86-32 cdecl 约定
+   ├─ ARM32 AAPCS（前4个参数用r0-r3）
+   ├─ ARM64 AAPCS64（前8个参数用x0-x7）⭐ 新增
+   └─ 调用约定 vs 二进制格式（ELF vs Mach-O）⭐ 新增
    ↓
-2. 理解各函数修饰符的作用
-   ├─ asmlinkage: 强制栈传参
+2. 深入理解 Linux 内核 ABI（LINUX_KERNEL_FUNCTION_ATTRIBUTES.md 1.7节）⭐ 新增
+   ├─ 硬件/编译器 ABI（调用约定，长期稳定）
+   ├─ 用户空间 ABI（系统调用，严格稳定）
+   └─ 内核内部 ABI（函数/数据结构，无稳定性保证）
+   ↓
+3. **分析启动代码 ABI 遵守情况**（LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md）⭐ 新增
+   ├─ 参数传递机制（boot_params 完整传递链）
+   ├─ 寄存器使用规则（Caller-saved vs Callee-saved）
+   ├─ 返回值传递（RAX 寄存器）
+   ├─ 栈帧管理与对齐（8字节 vs 16字节）
+   ├─ Red Zone 处理（-mno-red-zone）
+   └─ asmlinkage 真相（x86-64 上为空定义）
+   ↓
+4. 理解各函数修饰符的作用（LINUX_KERNEL_FUNCTION_ATTRIBUTES.md）
+   ├─ asmlinkage: 强制栈传参（仅x86-32有效）
    ├─ __visible: 防止 LTO 删除
    ├─ __init: 初始化后释放
    └─ __noreturn: 永不返回
    ↓
-3. 查看实际代码示例
+5. 查看实际代码示例
    ├─ x86_64_start_kernel 分析
    ├─ start_kernel 分析
    └─ 系统调用表分析
    ↓
-4. 学习与汇编代码交互
+6. 学习与汇编代码交互
    ├─ 从汇编调用 C 函数
    └─ 从 C 调用汇编函数
 ```
@@ -182,6 +202,8 @@
 - ✅ 理解系统调用表（`sys_call_table`）的定义
 - ✅ 理解为什么需要这些修饰符（与汇编兼容、内存优化等）
 - ✅ 能够阅读和编写与汇编交互的 C 代码
+- ✅ **理解 Linux 启动代码如何遵守 System V ABI 标准** ⭐ 新增
+- ✅ **区分调用约定（编译器层面）vs 内核 ABI（实现层面）** ⭐ 新增
 
 ---
 
@@ -521,8 +543,11 @@
 | 主题 | 相关文档 |
 |------|---------|
 | **A20 地址线** | [A20_ADDRESS_LINE.md](A20_ADDRESS_LINE.md) |
+| **ABI（应用程序二进制接口）** | [LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md](LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md) ⭐ 新增, [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md) |
 | **APIC** | [X86_INTERRUPT_CONTROLLER_EVOLUTION.md](X86_INTERRUPT_CONTROLLER_EVOLUTION.md), [PIC_APIC_COEXISTENCE.md](PIC_APIC_COEXISTENCE.md) |
+| **ARM 调用约定（AAPCS/AAPCS64）** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#14-不同平台调用约定对比](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#14-不同平台调用约定对比) ⭐ 新增 |
 | **ASM ORG 指令** | [ASM_ORG_INSTRUCTION.md](ASM_ORG_INSTRUCTION.md) |
+| **asmlinkage 修饰符** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#21-asmlinkage](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#21-asmlinkage), [LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md#71-asmlinkage-在-x86-64-上的真相](LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md#71-asmlinkage-在-x86-64-上的真相) ⭐ 新增 |
 | **汇编器 vs 编译器** | [ASSEMBLER_VS_COMPILER.md](ASSEMBLER_VS_COMPILER.md) |
 | **BIOS** | [BIOS_MEMORY_LAYOUT.md](BIOS_MEMORY_LAYOUT.md), [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md), [SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md) |
 | **引导扇区** | [BOOTSECTOR_EXAMPLE.md](BOOTSECTOR_EXAMPLE.md), [ORG_0x7C00_EXPLANATION.md](ORG_0x7C00_EXPLANATION.md) |
@@ -534,9 +559,11 @@
 
 | 主题 | 相关文档 |
 |------|---------|
+| **Calling Convention（调用约定）** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#一x86-调用约定基础](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#一x86-调用约定基础), [LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md](LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md) ⭐ 新增 |
 | **压缩内核重定位** | [COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md), [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) |
 | **DPL=3 门** | [LINUX_KERNEL_IDT_EVOLUTION.md#idt-中的用户态可触发门dpl3-门详解](LINUX_KERNEL_IDT_EVOLUTION.md) |
 | **E820 内存映射** | [E820_MEMORY_MAP.md](E820_MEMORY_MAP.md), [SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md) |
+| **ELF vs Mach-O** | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#16-调用约定与二进制格式的区别](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md#16-调用约定与二进制格式的区别) ⭐ 新增 |
 | **异常与中断** | [X86_INTERRUPT_EXCEPTION_TRAP.md](X86_INTERRUPT_EXCEPTION_TRAP.md), [X86_EXCEPTION_HARDWARE_TRIGGER.md](X86_EXCEPTION_HARDWARE_TRIGGER.md) |
 
 ### G - I
@@ -644,6 +671,10 @@
 
 ---
 
-**最后更新**：2026-02-14
+**最后更新**：2026-02-17
 **文档数量**：100+ 篇
 **维护者**：Linux 内核启动文档项目
+
+**最新更新**：
+- ⭐ 新增 [LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md](LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md) - Linux 内核 ABI 合规性分析（98% 符合）
+- ⭐ 扩展 [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md) - 新增 ARM 调用约定、ELF vs Mach-O、内核 ABI 稳定性分析

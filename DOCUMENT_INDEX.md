@@ -132,6 +132,8 @@
 |------|------|
 | [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) | **Linux 内核启动与初始化**（64 位，不走 Setup）⭐ 核心文档<br>• GRUB/压缩内核、模式切换<br>• startup_32/startup_64<br>• x86_64_start_kernel、start_kernel<br>• 中断接管、系统调用<br>• PID 0/1/2、核心进程 |
 | [LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md) | Linux 内核 Setup 流程详解 |
+| [LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md](LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md) | **Linux 内核启动代码 System V ABI 遵守情况分析报告** ⭐ 新增<br>• 详细分析启动代码对 ABI 的遵守（综合评分：98%）<br>• 参数传递机制（boot_params 完整传递链）<br>• 寄存器使用规则（Caller/Callee-saved）<br>• 返回值传递、栈帧管理、Red Zone 处理<br>• asmlinkage 真相揭秘（x86-64 上为空定义）<br>• 内核特殊优化（8字节栈对齐、禁用 Red Zone）<br>• 14+ 代码示例 + 权威规范引用<br>• 30+ 交叉引用链接 |
+| [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md) | **Linux 内核函数修饰符与调用约定**（已更新 v2.0 → v2.3）<br>• x86-64/x86-32/ARM32/ARM64 调用约定详解 ⭐ 新增<br>• 函数修饰符（asmlinkage、__visible、__init、__noreturn）<br>• 调用约定 vs 二进制格式（ELF vs Mach-O）⭐ 新增<br>• Linux 内核 ABI 稳定性分析 ⭐ 新增<br>• 汇编代码交互、常见组合模式 |
 | [COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md) | **Linux 压缩内核重定位机制** |
 | [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) | 为什么需要重定位压缩内核（KASLR 分析） |
 
