@@ -251,6 +251,84 @@ add esp, 12 // 调用者清理栈（3 个参数 × 4 字节）
    - `asmlinkage` 强制使用栈传参，确保与汇编代码兼容
    - 在 x86-64 上，`asmlinkage` 通常是空宏（ABI 已定义寄存器传参）
 
+#### ARM 架构调用约定
+
+**ARM32 (AAPCS - ARM Architecture Procedure Call Standard)**
+
+| 平台 | 参数传递（整数） | 参数传递（浮点） | 返回值 | 栈清理 |
+|-----|----------------|----------------|--------|--------|
+| **ARM32 Linux** | r0, r1, r2, r3, stack | s0-s15/d0-d7 (VFP), stack | r0 (32位) / r0:r1 (64位) | Caller |
+| **ARM32 macOS** | （不适用，macOS 未使用 ARM32） | - | - | - |
+
+**ARM64 (AAPCS64 - AArch64 Procedure Call Standard)**
+
+| 平台 | 参数传递（整数） | 参数传递（浮点） | 返回值 | 栈清理 |
+|-----|----------------|----------------|--------|--------|
+| **ARM64 Linux** | x0-x7, stack | v0-v7, stack | x0 (64位) / x0:x1 (128位) | Caller |
+| **ARM64 macOS (Apple Silicon)** | x0-x7, stack | v0-v7, stack | x0 (64位) / x0:x1 (128位) | Caller |
+
+**关键特点**：
+
+1. **ARM32 vs ARM64 参数数量**：
+   - ARM32：前 **4 个**整数参数通过寄存器（r0-r3）
+   - ARM64：前 **8 个**整数参数通过寄存器（x0-x7）
+   - ARM64 提供了更多寄存器，减少栈使用
+
+2. **寄存器保存规则（ARM64）**：
+   - **Caller-saved（临时寄存器）**：x0-x18, v0-v7, v16-v31
+   - **Callee-saved（必须保存）**：x19-x28, v8-v15
+   - **特殊寄存器**：
+     - x29: 帧指针（FP, Frame Pointer）
+     - x30: 链接寄存器（LR, Link Register）存储返回地址
+     - sp: 栈指针（Stack Pointer）
+
+3. **ARM 与 x86-64 对比**：
+
+| 特性 | x86-64 (System V) | ARM64 (AAPCS64) |
+|-----|------------------|-----------------|
+| 整数参数寄存器数量 | 6 个（RDI, RSI, RDX, RCX, R8, R9） | 8 个（x0-x7） |
+| 浮点参数寄存器数量 | 8 个（XMM0-XMM7） | 8 个（v0-v7） |
+| 返回地址存储 | 栈（CALL 指令压栈） | 寄存器（x30/LR） |
+| 帧指针 | RBP（可选） | x29（推荐使用） |
+| Red Zone | 有（128 字节） | **无** |
+
+4. **平台一致性**：
+   - ✅ Linux 和 macOS 在 ARM64 上使用**相同的调用约定**（AAPCS64）
+   - ✅ 但使用**不同的二进制格式**（ELF vs Mach-O）
+
+**示例代码（ARM64）**：
+
+```c
+// C 代码
+long add(long a, long b, long c) {
+    return a + b + c;
+}
+
+// 对应的汇编（ARM64 AAPCS64）
+add:
+    add x0, x0, x1    // x0 = a + b
+    add x0, x0, x2    // x0 = (a + b) + c
+    ret               // 返回值在 x0，返回地址在 x30
+
+// 调用代码
+mov x0, #1          // 第一个参数 a = 1
+mov x1, #2          // 第二个参数 b = 2
+mov x2, #3          // 第三个参数 c = 3
+bl  add             // 调用函数（x30 = 返回地址）
+                    // 返回值在 x0 = 6
+```
+
+**参考资料**：
+- ARM32 AAPCS: [Procedure Call Standard for the ARM Architecture](https://web.eecs.umich.edu/~prabal/teaching/resources/eecs373/ARM-AAPCS-EABI-v2.08.pdf)
+- ARM64 AAPCS64: [Procedure Call Standard for the Arm® 64-bit Architecture](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst)
+- ARM Developer Documentation: [Procedure Call Standard](https://developer.arm.com/documentation/den0013/latest/Application-Binary-Interfaces/Procedure-Call-Standard)
+
+**相关资源**：
+- [Chapter 6 AAPCS Arm ABI and Runtime view | Embedded Systems Security and TrustZone](https://embeddedsecurity.io/sec-arm-abi)
+- [Understanding Procedure Call Standard for Arm Architecture | Medium](https://medium.com/@csrohit/understanding-procedure-call-standard-for-arm-architecture-part-1-ff78031842c8)
+- [AArch64 Procedure Call Standard (AAPCS64) | Medium](https://medium.com/@tunacici7/aarch64-procedure-call-standard-aapcs64-abi-calling-conventions-machine-registers-a2c762540278)
+- [The AArch64 processor, part 20: The classic calling convention](https://devblogs.microsoft.com/oldnewthing/20220823-00/?p=107041)
+
 ---
 
 ### 1.5 调用约定的规范来源
@@ -290,6 +368,428 @@ add esp, 12 // 调用者清理栈（3 个参数 × 4 字节）
 - Intel SDM：https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
 - 本地文档：`~/Desktop/64-ia-32-architectures-software-developer-vol-3a-part-1-manual.pdf`
 - Linux 内核文档：`Documentation/arch/x86/entry_64.rst` 明确引用了 Intel SDM Volume 3, Chapter 6
+
+---
+
+### 1.6 调用约定与二进制格式的区别
+
+**重要概念区分**：调用约定（Calling Convention）和二进制格式（Binary Format）是两个独立的概念。
+
+#### 概念对比
+
+| 维度 | 调用约定 | 二进制格式 |
+|-----|---------|----------|
+| **作用层面** | 函数调用时的参数传递和寄存器使用规范 | 可执行文件的存储、加载和链接格式 |
+| **定义者** | ABI 规范（如 System V ABI） | 操作系统（如 ELF, Mach-O, PE） |
+| **影响范围** | 编译器代码生成、函数接口 | 加载器、动态链接器、调试器 |
+| **跨平台性** | Linux/BSD/Mac 在 x86-64 上**相同** | Linux/BSD/Mac 使用**不同**格式 |
+
+#### Linux/BSD/macOS 的异同
+
+**相同点（调用约定层面）**：
+
+**x86-64 架构**：
+- ✅ Linux/BSD/macOS 都使用 **System V ABI**
+- ✅ 参数传递方式相同：RDI, RSI, RDX, RCX, R8, R9（前 6 个整数参数）
+- ✅ 寄存器保存规则相同（Caller-saved vs Callee-saved）
+- ✅ Red Zone 支持相同（128 字节）
+- ✅ C/Assembly 互操作方式相同
+
+**ARM64 架构**：
+- ✅ Linux/macOS 都使用 **AAPCS64** (ARM Architecture Procedure Call Standard 64)
+- ✅ 参数传递方式相同：x0-x7（前 8 个整数参数）
+- ✅ 寄存器保存规则相同（Caller-saved vs Callee-saved）
+- ✅ **无 Red Zone**（与 x86-64 不同）
+- ✅ 返回地址存储在 x30 (LR) 寄存器
+
+**不同点（二进制格式层面）**：
+
+| 操作系统 | 架构 | 二进制格式 | 动态库扩展名 | 加载器 | file 命令输出示例 |
+|---------|------|-----------|------------|--------|------------------|
+| **Linux** | x86-64 | ELF | `.so` | `ld-linux-x86-64.so.2` | `ELF 64-bit LSB executable, x86-64` |
+| **Linux** | ARM64 | ELF | `.so` | `ld-linux-aarch64.so.1` | `ELF 64-bit LSB executable, ARM aarch64` |
+| **FreeBSD** | x86-64 | ELF | `.so` | `ld-elf.so.1` | `ELF 64-bit LSB executable, x86-64` |
+| **FreeBSD** | ARM64 | ELF | `.so` | `ld-elf.so.1` | `ELF 64-bit LSB executable, ARM aarch64` |
+| **macOS** | x86-64 | **Mach-O** | `.dylib` | `dyld` | `Mach-O 64-bit executable x86_64` |
+| **macOS** | ARM64 | **Mach-O** | `.dylib` | `dyld` | `Mach-O 64-bit executable arm64` |
+
+#### ELF vs Mach-O 格式对比
+
+> 📖 **ELF (Executable and Linkable Format)**
+>
+> - **起源**：Unix System V Release 4（1986 年）
+> - **使用平台**：Linux, FreeBSD, Solaris, 多数类 Unix 系统
+> - **设计目标**：统一可执行文件、目标文件、共享库的格式
+> - **结构特点**：
+>   - ELF Header（识别信息、架构、入口点）
+>   - Program Headers（段加载信息，运行时使用）
+>   - Section Headers（节信息，链接时使用）
+>   - 支持多种段类型（`.text`, `.data`, `.bss`, `.rodata` 等）
+
+> 📖 **Mach-O (Mach Object File Format)**
+>
+> - **起源**：NeXTSTEP/Mach 微内核（1980s）
+> - **使用平台**：macOS, iOS, watchOS, tvOS
+> - **设计目标**：支持 Mach 微内核的可执行文件格式
+> - **结构特点**：
+>   - Mach Header（魔数、CPU 类型、加载命令数量）
+>   - Load Commands（加载指令，描述如何加载到内存）
+>   - Segments（段，包含多个 Sections）
+>   - **Universal Binary 支持**：一个文件包含多个架构（Fat Binary）
+
+**Universal Binary 示例**（macOS）：
+
+```bash
+❯ file /usr/bin/zip
+zip: Mach-O universal binary with 2 architectures: [x86_64:Mach-O 64-bit executable x86_64] [arm64e:Mach-O 64-bit executable arm64e]
+zip (for architecture x86_64):  Mach-O 64-bit executable x86_64
+zip (for architecture arm64e):  Mach-O 64-bit executable arm64e
+```
+
+**对比 Linux ELF**：
+
+```bash
+❯ file /usr/bin/zip
+zip: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked, ...
+```
+
+#### 关键技术细节对比
+
+| 特性 | ELF | Mach-O |
+|-----|-----|--------|
+| **魔数（Magic Number）** | `0x7F 'E' 'L' 'F'` | `0xFEEDFACE` (32-bit) / `0xFEEDFACF` (64-bit) |
+| **多架构支持** | 需要多个文件 | 支持 Universal Binary（Fat Binary） |
+| **动态链接器** | `ld-linux.so.2` (32-bit) / `ld-linux-x86-64.so.2` (64-bit) | `dyld` (dynamic linker) |
+| **共享库** | `.so` (Shared Object) | `.dylib` (Dynamic Library) |
+| **位置无关代码** | PIC (Position Independent Code) | PIC + 二级命名空间 |
+| **符号解析** | 全局命名空间 | 二级命名空间（库级隔离） |
+| **延迟绑定** | PLT/GOT (Procedure Linkage Table/Global Offset Table) | dyld stub + lazy binding |
+
+#### 为什么调用约定相同但格式不同？
+
+1. **历史原因**：
+   - ELF 源自 Unix System V（1980s）
+   - Mach-O 源自 NeXTSTEP/Mach 微内核（1980s）
+   - macOS 继承了 NeXT 的技术栈
+
+2. **设计目标不同**：
+   - ELF：通用性、简洁性（适配多种 Unix 系统）
+   - Mach-O：支持 Mach 微内核的特殊需求（消息传递、端口）
+
+3. **调用约定统一**：
+   - **x86-64**：System V ABI 由 AMD/Intel/编译器厂商共同制定
+   - **ARM64**：AAPCS64 由 ARM Holdings 制定，作为官方标准
+   - 为了源码级兼容性，主流 Unix 系统都采用相同调用约定
+   - 但二进制格式由各操作系统自行设计
+
+4. **架构过渡期**：
+   - macOS 支持两种架构：x86-64 (Intel) 和 ARM64 (Apple Silicon)
+   - Universal Binary (Fat Binary) 允许单个文件包含多个架构
+   - 不同架构使用不同的调用约定，但同一架构在不同 Unix 系统上调用约定相同
+
+#### 实际影响
+
+**对开发者的影响**：
+- ✅ **源代码级兼容**：同一份 C 代码可以在 Linux/BSD/macOS 上编译
+- ✅ **调用约定一致**：函数调用、参数传递、寄存器使用规则相同
+- ❌ **二进制不兼容**：Linux 的 ELF 文件无法直接在 macOS 上运行
+- ❌ **工具链不同**：调试工具（`readelf` vs `otool`）、链接器（`ld` vs `ld64`）
+
+**示例**：
+
+**x86-64 架构**：
+```c
+// 同一份代码在 Linux x86-64 和 macOS x86-64 上编译
+// 调用约定相同（参数都通过 RDI, RSI 传递）
+// 但生成的二进制格式不同（ELF vs Mach-O）
+
+void foo(int a, int b) {
+    // a -> RDI (在 Linux 和 macOS x86-64 上都相同)
+    // b -> RSI (在 Linux 和 macOS x86-64 上都相同)
+}
+```
+
+**ARM64 架构**：
+```c
+// 同一份代码在 Linux ARM64 和 macOS ARM64 (Apple Silicon) 上编译
+// 调用约定相同（参数都通过 x0, x1 传递）
+// 但生成的二进制格式不同（ELF vs Mach-O）
+
+void foo(long a, long b) {
+    // a -> x0 (在 Linux 和 macOS ARM64 上都相同)
+    // b -> x1 (在 Linux 和 macOS ARM64 上都相同)
+}
+```
+
+**实际文件对比**：
+```bash
+# Linux x86-64
+❯ file /bin/ls
+/bin/ls: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked
+
+# Linux ARM64
+❯ file /bin/ls
+/bin/ls: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), dynamically linked
+
+# macOS Universal Binary (包含 x86-64 和 ARM64)
+❯ file /bin/ls
+/bin/ls: Mach-O universal binary with 2 architectures: [x86_64:Mach-O 64-bit executable x86_64] [arm64e:Mach-O 64-bit executable arm64e]
+```
+
+#### 参考资料
+
+**ELF 规范**：
+- System V Application Binary Interface (gABI): https://refspecs.linuxfoundation.org/elf/gabi4+/contents.html
+- Tool Interface Standard (TIS) Executable and Linking Format Specification Version 1.2 (1995)
+- Linux Foundation Referenced Specifications: https://refspecs.linuxfoundation.org/
+
+**Mach-O 规范**：
+- Apple Developer Documentation: "Mach-O Programming Topics"
+  - https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/MachOTopics/
+- Mach-O File Format Reference (已归档)
+- `man 5 Mach-O` (macOS 系统手册)
+- LLVM 源码：`llvm/include/llvm/BinaryFormat/MachO.h`
+
+**分析工具对比**：
+
+| 任务 | Linux (ELF) | macOS (Mach-O) |
+|-----|------------|----------------|
+| 查看文件头 | `readelf -h` | `otool -h` |
+| 查看段信息 | `readelf -l` | `otool -l` |
+| 查看符号表 | `readelf -s` / `nm` | `nm` / `otool -I -v` |
+| 查看动态库依赖 | `ldd` | `otool -L` |
+| 反汇编 | `objdump -d` | `otool -tv` / `llvm-objdump` |
+| 十六进制查看 | `readelf -x .text` | `otool -s __TEXT __text -V` |
+
+**扩展阅读**：
+- "Linkers and Loaders" by John R. Levine (Morgan Kaufmann, 1999)
+- "Learning Linux Binary Analysis" by Ryan O'Neill (Packt Publishing, 2016)
+- "Mac OS X Internals: A Systems Approach" by Amit Singh (Addison-Wesley, 2006)
+
+---
+
+### 1.7 Linux 内核的 ABI 稳定性
+
+**重要概念区分**：前面章节讨论的"调用约定"（Calling Convention）与 Linux 内核的"ABI 稳定性"是两个不同层面的概念。
+
+#### 核心结论
+
+**严格来说，Linux 内核内部并不遵守一个固定不变的 ABI（应用程序二进制接口）。**
+
+这是一个经常被误解的重要概念。我们需要区分两个层面：**内核与用户空间的接口**，以及**内核内部的接口**。
+
+#### 概念层级对比
+
+| 层级 | 定义范围 | 稳定性保证 | 示例 |
+|-----|---------|-----------|------|
+| **硬件/编译器 ABI** | 调用约定、寄存器使用、指令集 | 由架构和编译器厂商定义，长期稳定 | System V ABI, AAPCS64 |
+| **用户空间 ABI** | 系统调用、`/proc`、`/sys` 等 | **严格遵守，保证稳定** | `read()`, `write()` 系统调用 |
+| **内核内部 ABI/API** | 内核函数、模块接口、数据结构 | **无稳定性保证，随时可变** | `kmalloc()`, `struct task_struct` |
+
+#### 1. 对外接口（用户空间 ABI）：严格遵守并保持稳定
+
+对于运行在内核之上的应用程序（如 bash、Chrome 浏览器等），内核提供了非常稳定的 ABI 保证。
+
+**定义与文档**：
+- 内核源码中的 `Documentation/ABI/` 目录详细记录了这些接口及其稳定程度
+- 主要分为以下等级：
+  - `stable/`：稳定接口，长期支持
+  - `testing/`：测试中，可能变化
+  - `obsolete/`：过时，计划移除
+  - `removed/`：已移除
+
+**稳定性承诺**：
+
+**稳定接口**：
+- 对于标记为 `stable/` 的接口，如**系统调用**、某些 `/proc` 和 `/sys` 文件接口，内核承诺提供**至少 2 年的向后兼容性**
+- 实际上，许多核心接口（如系统调用）是**永远不会改变**的，以确保无数应用程序能持续正常运行
+- 例如：`read(int fd, void *buf, size_t count)` 系统调用的签名和行为从未改变
+
+**变化流程**：
+- 即使是标记为过时（`obsolete/`）的接口，也会在保留足够长时间后才会被移除
+- 会有明确的文档说明移除时间和替代方案
+
+**示例**：
+
+```c
+// 用户空间程序可以安全地使用这些系统调用
+// 它们的签名和行为在所有 Linux 版本中保持一致
+
+#include <unistd.h>
+#include <fcntl.h>
+
+int fd = open("/etc/passwd", O_RDONLY);  // 系统调用 open()
+char buf[1024];
+read(fd, buf, sizeof(buf));              // 系统调用 read()
+close(fd);                               // 系统调用 close()
+
+// 这段代码可以在 Linux 2.6, 3.x, 4.x, 5.x, 6.x 上运行
+// 无需重新编译（假设 libc 兼容）
+```
+
+#### 2. 对内接口（内核内部 ABI/API）：**无稳定性保证**
+
+这是本节的重点。对于内核内部的函数、数据结构和模块接口，情况完全不同。
+
+**明确立场**：
+- 内核开发社区有一个广为人知的立场：**"没有稳定的内核内部接口"**（No stable kernel internal API）
+- 这在内核文档 `Documentation/process/stable-api-nonsense.rst` 中有明确说明
+
+**含义**：
+- 内核版本之间（甚至同一个稳定分支的补丁版本之间），**内部函数、模块的符号表、数据结构的大小和布局都可能随时发生变化**
+- 内核文档明确指出：**开发者绝不应依赖于内核内部符号的存在、不存在、位置或类型**
+- 外部内核模块（Out-of-Tree Modules）必须为每个内核版本重新编译
+
+**理由**：
+- 这种"不稳定性"是为了给内核开发者充分的自由去：
+  - 修复 bug
+  - 重构代码
+  - 提升性能
+  - 改进安全性
+- 不用担心破坏下游的私有驱动或内部工具
+
+**对稳定分支的影响**：
+- 即使是针对 bug 修复的 `-stable` 版本，如果修复一个严重问题需要改变内部接口，这种改变也是被允许的
+- 这意味着即使是 6.1.10 → 6.1.11 这样的小版本升级，内部接口也可能发生变化
+
+**示例**：
+
+```c
+// 内核模块代码（可能在内核升级后失效）
+
+#include <linux/slab.h>
+#include <linux/sched.h>
+
+// ❌ 这些内部接口可能在内核版本之间发生变化
+void *ptr = kmalloc(1024, GFP_KERNEL);  // kmalloc 签名可能变化
+
+// ❌ 内部数据结构布局可能变化
+struct task_struct *task = current;
+// 访问 task->xxx 字段可能在新版本内核中失败
+
+// ❌ 内部函数可能被重命名、移除或参数改变
+// 在 Linux 5.x 中有效的代码可能在 6.x 中无法编译
+```
+
+**对比调用约定**：
+
+```c
+// ✅ 调用约定（Calling Convention）是稳定的
+// 这段汇编代码在所有遵守 System V ABI 的系统上都有效
+
+// x86-64 System V ABI - 参数传递
+void foo(int a, int b, int c) {
+    // a -> RDI
+    // b -> RSI
+    // c -> RDX
+}
+// 这个调用约定在 Linux 2.6 到 6.x 都不会变
+
+// ❌ 但内核内部函数的存在性和签名是不稳定的
+// kmalloc(), schedule(), printk() 等函数的签名可能随时变化
+```
+
+#### 典型案例：Ubuntu 放弃内部 ABI 检查
+
+Ubuntu 内核团队的一个操作很好地印证了内核内部 ABI 的不稳定性。
+
+**背景**：
+- Ubuntu 曾在打包内核时，维护一份**内部 ABI 数据**来检查模块符号是否意外变化
+- 目的是确保内核升级不会破坏已安装的外部模块
+
+**问题**：
+- 维护这份 ABI 数据成本极高
+- 配置变化有时会导致误报（例如丢失一个本应存在的模块，导致构建失败）
+- 即使内核符号变化，也可能是合理的 bug 修复
+
+**决策**：
+- Ubuntu 最终决定**放弃在构建过程中检查内部 ABI**
+- 将兼容性检查转移到发布流程的外部工具中
+- 只关注最终的**可签名性**和**可升级性**，而非内部 ABI 细节
+
+**启示**：
+- 从侧面反映出，维护内核内部 ABI 的稳定是一件**成本极高且不被内核原生支持**的事情
+- 上游内核社区明确拒绝保证内部 ABI 稳定性
+
+#### 为什么调用约定不等于内核 ABI？
+
+这是一个常见的误解。需要明确区分：
+
+**调用约定（Calling Convention）**：
+- 定义：函数调用时的参数传递方式、寄存器使用规则
+- 层级：**编译器和硬件架构层面**
+- 稳定性：由 ABI 规范定义，长期稳定（如 System V ABI, AAPCS64）
+- 影响：所有使用相同编译器和架构的代码都遵守
+- 例子：x86-64 上的前 6 个整数参数通过 RDI, RSI, RDX, RCX, R8, R9 传递
+
+**内核内部 ABI**：
+- 定义：内核函数的存在性、签名、数据结构布局
+- 层级：**内核实现层面**
+- 稳定性：**无保证**，随时可变
+- 影响：只影响内核模块和内核内部代码
+- 例子：`kmalloc()` 函数的签名、`struct task_struct` 的字段顺序
+
+**关系图示**：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 用户空间程序（bash, Chrome 等）                              │
+│ ✅ 依赖用户空间 ABI（系统调用、/proc、/sys）                │
+│    这些接口严格稳定，长期兼容                                │
+└────────────────────────┬────────────────────────────────────┘
+                         │ 系统调用接口（稳定）
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Linux 内核                                                   │
+│                                                             │
+│ ┌─────────────────────────────────────────────────────┐   │
+│ │ 内核内部函数和数据结构                              │   │
+│ │ ❌ 内部 ABI/API 不稳定                              │   │
+│ │    kmalloc(), schedule(), struct task_struct 等    │   │
+│ │    可能在任何版本之间发生变化                       │   │
+│ └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│ ✅ 但所有代码都遵守调用约定（System V ABI / AAPCS64）      │
+│    这是编译器层面的保证，与内核 ABI 无关                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 实际影响与建议
+
+**对内核模块开发者**：
+- ❌ 不能假设外部模块在内核升级后仍然可用
+- ✅ 必须为每个目标内核版本重新编译模块
+- ✅ 使用内核提供的稳定接口（如 EXPORT_SYMBOL 导出的函数）
+- ✅ 避免直接访问内部数据结构，使用封装好的访问函数
+
+**对应用程序开发者**：
+- ✅ 可以放心使用系统调用和 `/proc`/`/sys` 接口
+- ✅ 二进制程序可以在不同内核版本上运行（只要 ABI 兼容）
+- ❌ 不要试图直接调用内核内部函数
+
+**对内核开发者**：
+- ✅ 可以自由重构内部接口，无需担心破坏外部依赖
+- ✅ 但必须保持用户空间 ABI 的稳定性
+- ✅ 变更内部接口时，需要同步更新内核树中的所有使用者
+
+#### 总结
+
+| 类型 | 范围 | 是否遵守 ABI？ | 目的 |
+|-----|------|---------------|------|
+| **硬件/编译器 ABI** | 调用约定、寄存器使用 | ✅ **严格遵守，长期稳定** | 确保编译器生成的代码互操作 |
+| **用户空间 ABI** | 系统调用、`/proc`、`/sys` 等 | ✅ **严格遵守，保证稳定** | 确保所有用户态程序正常运行 |
+| **内核内部 ABI** | 函数、模块、数据结构 | ❌ **不保证稳定，随时可变** | 解放开发者，允许内部优化和重构 |
+
+**关键要点**：
+1. Linux 内核**遵守** System V ABI / AAPCS64 调用约定（编译器层面）
+2. Linux 内核**保证**用户空间 ABI 稳定性（系统调用层面）
+3. Linux 内核**不保证**内部 ABI/API 稳定性（实现层面）
+
+**参考文档**：
+- Linux 内核文档：`Documentation/process/stable-api-nonsense.rst`
+- Linux 内核文档：`Documentation/ABI/`
+- Greg Kroah-Hartman: "The Linux Kernel Driver Interface"
+- LWN.net: "Kernel ABI stability" (https://lwn.net/Articles/657143/)
 
 ---
 
@@ -1950,10 +2450,35 @@ ABI 层（System V ABI）→ 规定如何使用这些寄存器传参
 
 ---
 
-**文档版本**：v2.0 (2026-02-15)
+**文档版本**：v2.3 (2026-02-16)
 **维护说明**：本文档基于 Linux v6.x 内核源码，定义可能随内核版本变化。
 
 **更新日志**：
+- **v2.3 (2026-02-16)**：
+  - ✅ 新增 1.7 节：Linux 内核的 ABI 稳定性
+  - ✅ 区分调用约定（编译器层面）、用户空间 ABI（系统调用层面）、内核内部 ABI（实现层面）
+  - ✅ 说明 Linux 内核对外 ABI 严格稳定，但内部 ABI 无稳定性保证
+  - ✅ 添加概念层级对比表格和关系图示
+  - ✅ 引用 Ubuntu 放弃内部 ABI 检查的典型案例
+  - ✅ 为内核模块开发者、应用程序开发者、内核开发者提供实用建议
+  - ✅ 添加内核 ABI 相关参考文档（Documentation/process/stable-api-nonsense.rst）
+- **v2.2 (2026-02-16)**：
+  - ✅ 在 1.4 节补充 ARM 架构调用约定（ARM32 AAPCS 和 ARM64 AAPCS64）
+  - ✅ 对比 ARM32 (r0-r3) vs ARM64 (x0-x7) vs x86-64 (RDI-R9) 参数传递
+  - ✅ 说明 ARM64 无 Red Zone（与 x86-64 的关键区别）
+  - ✅ 添加 ARM64 寄存器保存规则和特殊寄存器（x29/FP, x30/LR）
+  - ✅ 在 1.6 节补充 ARM 架构的二进制格式对比
+  - ✅ 更新 Linux/macOS 异同表格，涵盖 x86-64 和 ARM64 双架构
+  - ✅ 添加 ARM 相关参考资料（AAPCS, AAPCS64 官方文档）
+  - ✅ 添加 Universal Binary 的架构过渡期说明
+  - ✅ 补充 ARM64 代码示例和实际文件对比
+- **v2.1 (2026-02-16)**：
+  - ✅ 新增 1.6 节：调用约定与二进制格式的区别
+  - ✅ 详细对比 ELF vs Mach-O 文件格式
+  - ✅ 说明 Linux/FreeBSD/macOS 调用约定相同但二进制格式不同
+  - ✅ 添加 Universal Binary (Fat Binary) 示例
+  - ✅ 添加 ELF 和 Mach-O 规范参考资料
+  - ✅ 添加分析工具对比（`readelf` vs `otool`）
 - **v2.0 (2026-02-15)**：
   - ✅ 添加权威规范引述（ABI、GCC、Agner Fog）
   - ✅ 下载所有参考文档到本地（`reference-docs/`）
