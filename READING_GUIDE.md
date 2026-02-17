@@ -52,6 +52,7 @@
 |------|---------|------|
 | **为什么需要虚拟内存？** | [WHY_VIRTUAL_MEMORY.md](WHY_VIRTUAL_MEMORY.md) | ⭐ 入门 |
 | **Linux 内存管理完整指南** | [LINUX_MEMORY_MANAGEMENT_EVOLUTION.md](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md) | ⭐⭐⭐⭐ 核心 |
+| **TLB 是什么？为什么要刷新？** | [X86_64_TLB_MANAGEMENT.md](X86_64_TLB_MANAGEMENT.md) | ⭐⭐⭐ 深入 |
 | **GDT 是什么？** | [X86_MEMORY_MANAGEMENT_THEORY.md](X86_MEMORY_MANAGEMENT_THEORY.md) | ⭐⭐⭐ 深入 |
 | **多级页表如何设计？** | [LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md) | ⭐⭐⭐ 深入 |
 | **Buddy 系统与 Slab 分配器** | [BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md) | ⭐⭐⭐ 深入 |
@@ -90,6 +91,8 @@
 | **Exception 是否可被屏蔽？** | [EXCEPTION_MASKABILITY_ANALYSIS.md](EXCEPTION_MASKABILITY_ANALYSIS.md) | ⭐⭐ 进阶 |
 | **异常硬件触发机制详解** | [X86_EXCEPTION_HARDWARE_TRIGGER.md](X86_EXCEPTION_HARDWARE_TRIGGER.md) | ⭐⭐⭐ 深入 |
 | **IDT 表如何演进？** | [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md) | ⭐⭐⭐ 深入 |
+| **TSS 和 IST 是什么？** | [X86_64_TSS_AND_IST.md](X86_64_TSS_AND_IST.md) | ⭐⭐⭐ 深入 |
+| **为什么 Double Fault 需要独立栈？** | [X86_64_TSS_AND_IST.md#5-为什么需要-ist](X86_64_TSS_AND_IST.md#5-为什么需要-ist) | ⭐⭐⭐ 深入 |
 | **为什么只有 INT3/INTO/INT 0x80 是 DPL=3？** | [LINUX_KERNEL_IDT_EVOLUTION.md#idt-中的用户态可触发门dpl3-门详解](LINUX_KERNEL_IDT_EVOLUTION.md#idt-中的用户态可触发门dpl3-门详解) | ⭐⭐ 进阶 |
 | **INT 0x80 vs SYSCALL 性能对比** | [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md) | ⭐⭐⭐ 深入 |
 | **entry_SYSCALL_64 汇编分析** | [LINUX_KERNEL_SYSCALL_INIT.md#3-entry_syscall_64-入口点详解](LINUX_KERNEL_SYSCALL_INIT.md#3-entry_syscall_64-入口点详解) | ⭐⭐⭐⭐ 核心 |
@@ -121,17 +124,23 @@
    ├─ 5 个演进阶段
    └─ DPL=3 门详解（INT3/INTO/INT 0x80）
    ↓
-5. LINUX_KERNEL_SYSCALL_INIT.md（系统调用详解）
+5. X86_64_TSS_AND_IST.md（TSS 与 IST 机制）
+   ├─ TSS 历史演变（任务切换→栈管理器）
+   ├─ IST 工作原理（独立栈机制）
+   ├─ Double Fault/NMI 处理
+   └─ TSS 初始化时机
+   ↓
+6. LINUX_KERNEL_SYSCALL_INIT.md（系统调用详解）
    ├─ INT 0x80 机制
    ├─ SYSCALL/SYSENTER 机制
    └─ 性能对比
    ↓
-6. X86_INTERRUPT_CONTROLLER_EVOLUTION.md（中断控制器演进）
+7. X86_INTERRUPT_CONTROLLER_EVOLUTION.md（中断控制器演进）
    ├─ 8259 PIC 架构
    ├─ APIC 架构（LAPIC + IOAPIC）
    └─ 演进过程
    ↓
-7. PIC_APIC_COEXISTENCE.md（PIC 与 APIC 共存）⭐ 新增
+8. PIC_APIC_COEXISTENCE.md（PIC 与 APIC 共存）⭐ 新增
    ├─ 为什么需要共存
    ├─ 共存期间的中断路由
    └─ 禁用 PIC 的过程
@@ -350,7 +359,7 @@
 
 **适合人群**：想深入理解内核中断处理和系统调用机制
 
-**预计时间**：1 周
+**预计时间**：1-2 周
 
 **前置知识**：
 - 熟悉 x86-64 汇编
@@ -369,7 +378,15 @@
 │  └─ DPL=3 门详解
 └─ 验证：查看内核源码 arch/x86/kernel/idt.c
 
-第 4-5 天：系统调用机制
+第 4 天：TSS 与 IST 机制
+├─ X86_64_TSS_AND_IST.md（3小时）
+│  ├─ TSS 历史演变
+│  ├─ IST 独立栈机制
+│  ├─ Double Fault/NMI 处理
+│  └─ TSS 初始化时机
+└─ 验证：查看 arch/x86/kernel/cpu/common.c 中的 cpu_init()
+
+第 5-6 天：系统调用机制
 ├─ LINUX_KERNEL_SYSCALL_INIT.md（6小时）
 │  ├─ trap_init() 流程
 │  ├─ syscall_init() MSR 配置
@@ -377,12 +394,12 @@
 │  └─ 32位兼容机制
 └─ 动手：编写简单的系统调用程序
 
-第 6 天：中断控制器
+第 7 天：中断控制器
 └─ X86_INTERRUPT_CONTROLLER_EVOLUTION.md（3小时）
    ├─ 8259 PIC vs APIC
    └─ MSI/MSI-X
 
-第 7 天：运行时中断处理
+第 8 天：运行时中断处理
 └─ LINUX_INTERRUPT_GUIDE.md（3小时）
    ├─ Top Half / Bottom Half
    ├─ softirq / tasklet / workqueue
@@ -391,6 +408,8 @@
 
 **学习成果**：
 - ✅ 掌握 IDT 表的完整演进过程
+- ✅ 理解 TSS/IST 机制及其在异常处理中的关键作用
+- ✅ 了解 Double Fault/NMI 等关键异常为什么需要独立栈
 - ✅ 理解 INT 0x80 vs SYSCALL 的差异和性能对比
 - ✅ 能够阅读和分析 entry_SYSCALL_64 汇编代码
 - ✅ 了解中断处理的完整链路
@@ -584,6 +603,7 @@
 | **GRUB** | [GRUB_KERNEL_LOADING.md](GRUB_KERNEL_LOADING.md), [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md), [GRUB_CORE_IMG_STRUCTURE.md](GRUB_CORE_IMG_STRUCTURE.md), [SEABIOS_GRUB_ABI_COMPLIANCE_ANALYSIS.md](SEABIOS_GRUB_ABI_COMPLIANCE_ANALYSIS.md) ⭐ 新增 |
 | **I-cache** | [SOLUTION_ICACHE_MYSTERY.md](SOLUTION_ICACHE_MYSTERY.md) |
 | **IDT** | [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md), [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md) |
+| **IST（中断栈表）** | [X86_64_TSS_AND_IST.md](X86_64_TSS_AND_IST.md) |
 | **Identity Mapping** | [X86_IDENTITY_MAPPING.md](X86_IDENTITY_MAPPING.md) |
 | **Initramfs** | [INITRAMFS_ANALYSIS.md](INITRAMFS_ANALYSIS.md), [ALPINE_INIT_PROCESS_ANALYSIS.md](ALPINE_INIT_PROCESS_ANALYSIS.md) |
 | **INT 0x80** | [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md), [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md) |
@@ -610,6 +630,8 @@
 | **Slab 分配器** | [SLAB_ALLOCATOR_EXPLAINED.md](SLAB_ALLOCATOR_EXPLAINED.md), [BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md) |
 | **系统调用** | [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md) |
 | **SYSCALL 指令** | [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md) |
+| **TLB（地址转换缓冲）** | [X86_64_TLB_MANAGEMENT.md](X86_64_TLB_MANAGEMENT.md) |
+| **TSS（任务状态段）** | [X86_64_TSS_AND_IST.md](X86_64_TSS_AND_IST.md) |
 | **UEFI** | [UEFI_VS_BIOS_BOOT.md](UEFI_VS_BIOS_BOOT.md), [UEFI_BOOT_FLOW_SUMMARY.md](UEFI_BOOT_FLOW_SUMMARY.md) |
 | **虚拟内存** | [WHY_VIRTUAL_MEMORY.md](WHY_VIRTUAL_MEMORY.md) |
 | **vmlinuz** | [VMLINUZ_STRUCTURE.md](VMLINUZ_STRUCTURE.md) |

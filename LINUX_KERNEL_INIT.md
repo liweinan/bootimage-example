@@ -1115,6 +1115,7 @@ void __init idt_setup_early_handler(void)
 - **[LINUX_MEMORY_MANAGEMENT_EVOLUTION.md](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - 内存管理演化篇 - 从 BIOS 到内核的完整过渡（BIOS → GRUB → 压缩内核 → 主内核）、GDT 和页表的四阶段演化
 - **[LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md)** - 内存管理实现篇 - GDT 代码详解、页表代码详解、内存管理子系统、实战调试方法
 - **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)** - IDT 表的演进流程详解 - 两个 IDT 表（bringup_idt_table、idt_table）、5 个演进阶段、GDT/IDT 对比、IST 机制、中断状态管理
+- **[X86_64_TSS_AND_IST.md](X86_64_TSS_AND_IST.md)** - TSS 与 IST 机制详解 - TSS 历史演变、IST 工作原理、为什么需要独立栈、Double Fault/NMI/Machine Check 处理、TSS 初始化时机（cpu_init）
 - **[X86_POSITION_INDEPENDENT_CODE.md](X86_POSITION_INDEPENDENT_CODE.md)** - 位置无关代码完整分析 - `__pi_` 前缀的含义、位置无关代码编译机制（-fPIC、objcopy --prefix-symbols）、RIP 相对寻址、`rip_rel_ptr()` 宏、`SYM_PIC_ALIAS` 宏的实现原理
 
 ---

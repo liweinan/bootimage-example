@@ -56,6 +56,12 @@ asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_
 __native_tlb_flush_global(this_cpu_read(cpu_tlbstate.cr4));
 ```
 
+> 💡 **深入理解 TLB 刷新的必要性**：`__native_tlb_flush_global()` 为什么要在这里调用？TLB 是什么？如何刷新？详见 **[x86-64 TLB 管理与页表切换详解](X86_64_TLB_MANAGEMENT.md)**
+> - TLB 基础知识与工作原理
+> - 启动过程中的页表切换
+> - 为什么必须清除 trampoline 页表的 TLB 遗留
+> - 四种 TLB 刷新机制对比
+
 ### 1.2 核心困惑
 
 你可能会问：
@@ -1060,13 +1066,18 @@ $ grep -r "__no_sanitize_address" --include="*.c" arch/x86/ | head -5
 
 11. [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)
     - IDT 表的演进流程详解
-    - 为什么需要两个独立的 IDT 表
+    - 为什么需要两个独立的 IDT 表（KASAN 和 TSS/IST 两个独立约束）
 
-12. [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)
+12. [X86_64_TSS_AND_IST.md](X86_64_TSS_AND_IST.md)
+    - TSS 与 IST 机制详解
+    - TSS/IST 依赖问题（另一个独立于 KASAN 的约束）
+    - 为什么早期 IDT 不能使用 IST
+
+13. [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)
     - Linux 内核启动与初始化
     - x86_64_start_kernel() 详解
 
-13. [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md)
+14. [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md)
     - 函数修饰符与调用约定
     - `__init`, `__head` 等宏的详细说明
 

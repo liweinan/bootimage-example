@@ -27,6 +27,7 @@
 
 **相关文档**：
 - [x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现](X86_INTERRUPT_EXCEPTION_TRAP.md) - 基础概念（Interrupt/Exception/Trap 区别、Exception 分类、优先级、IDT 门类型）
+- [x86-64 任务状态段（TSS）与中断栈表（IST）详解](X86_64_TSS_AND_IST.md) - **TSS/IST 机制详解、为什么需要独立栈、初始化时机、与 IDT 的集成** ⭐ 强烈推荐
 - [Linux 内核启动与初始化](LINUX_KERNEL_INIT.md) - 主启动流程
 - [系统调用初始化](LINUX_KERNEL_SYSCALL_INIT.md) - **trap_init()、syscall_init() 详解、INT 0x80 vs SYSCALL/SYSENTER 性能对比、entry_SYSCALL_64 入口分析、32位兼容机制**
 - [Linux 中断处理](LINUX_INTERRUPT_GUIDE.md) - 运行时中断处理
@@ -212,7 +213,16 @@ static const struct idt_data def_idts[] = {
 
 ##### 如果强行用一个 idt_table 会怎样？
 
-**场景 1：不禁用 KASAN，直接在早期使用 idt.c**
+**为什么需要两个独立的 IDT 表？有两个独立的原因：**
+
+1. **KASAN 插桩问题**：`idt.c` 中的代码被 KASAN 插桩，在 `kasan_early_init()` 之前不能调用
+2. **TSS/IST 依赖问题**：`idt_table` 中的某些异常处理程序需要 IST（中断栈表），但 TSS 在很晚才初始化
+
+这两个问题是**独立的**——即使解决了一个，另一个仍然存在。
+
+---
+
+**场景 1：不禁用 KASAN，直接在早期使用 idt.c → KASAN 崩溃**
 
 ```c
 // ❌ 错误的做法：在 startup_64_setup_gdt_idt() 中直接调用 idt.c 函数
@@ -234,7 +244,13 @@ void __head startup_64_setup_gdt_idt(void)
 }
 ```
 
-**场景 2：禁用 KASAN，但触发需要 IST 的异常**
+**问题**：KASAN 未初始化导致崩溃。
+
+---
+
+**场景 2：禁用 KASAN，但在 TSS 初始化前加载 idt_table → TSS/IST 崩溃**
+
+即使我们通过禁用 KASAN 解决了场景 1 的问题，仍然无法在早期使用 `idt_table`：
 
 ```c
 // arch/x86/kernel/Makefile 中添加：
@@ -242,26 +258,78 @@ void __head startup_64_setup_gdt_idt(void)
 
 void __head startup_64_setup_gdt_idt(void)
 {
-    // 填充 idt_table，包括 #DF 向量（需要 IST）
+    // 现在 KASAN 已禁用，可以安全调用 idt.c 的代码了
+    // 但是...
+
+    // 填充 idt_table，包括 #DF、#NMI、#MCE 等需要 IST 的向量
     idt_setup_from_table(idt_table, def_idts, ...);
     load_idt(&idt_descr);
 
-    // 如果此时发生 Double Fault：
+    // ✅ 正常执行流程没问题
+
+    // ❌ 但如果此时发生 Double Fault：
     // 1. CPU 查找 IDT[8] (#DF 向量)
-    // 2. 门描述符指示需要切换到 IST[IST_INDEX_DF]
-    // 3. 但 TSS 还没初始化！
-    // 4. TSS.IST[IST_INDEX_DF] 是无效地址
-    // 5. CPU 尝试切换栈 → Triple Fault 💥
+    // 2. 门描述符中指示需要切换到 IST[IST_INDEX_DF]
+    // 3. 但 TSS 还没初始化！（TSS 在 setup_arch() 中才初始化）
+    // 4. TSS.IST[IST_INDEX_DF] 是无效地址（可能是 0 或垃圾值）
+    // 5. CPU 尝试切换到无效栈地址 → Triple Fault 💥
 }
 ```
 
+**核心问题**：
+- `idt_table` 配合 `def_idts` 时，某些向量（#DF、#NMI、#MCE、#DB、#MC）需要 IST
+- IST 机制需要 TSS 已经正确初始化
+- 但 TSS 初始化发生在 `setup_arch()` → `cpu_init()`，远晚于 `startup_64_setup_gdt_idt()`
+- 早期阶段如果触发这些异常 → Triple Fault
+
+> 💡 **深入理解 IST/TSS 机制**：详见 [x86-64 任务状态段（TSS）与中断栈表（IST）详解](X86_64_TSS_AND_IST.md)
+> - TSS 结构与初始化
+> - IST 工作原理（为什么需要独立栈）
+> - 危险场景：未初始化 TSS 时使用 IST
+
+**为什么 bringup_idt_table 没问题？**
+- `bringup_idt_table` 中的所有向量**都不使用 IST**
+- IST 字段都是 0，表示使用当前栈（RSP）
+- 不依赖 TSS，即使 TSS 未初始化也能正常工作
+
+---
+
+**场景 3：即使解决了 KASAN 和 TSS 问题，仍有耦合问题**
+
+即使技术上可行，强行使用一个表也会带来设计问题：
+
+```c
+// 假设我们禁用了 KASAN，并且修改了 def_idts 让早期向量不用 IST
+void __head startup_64_setup_gdt_idt(void)
+{
+    // 早期只加载不需要 IST 的向量
+    idt_setup_from_table(idt_table, early_idts_no_ist, ...);
+    load_idt(&idt_descr);
+}
+
+void __init idt_setup_early_traps(void)
+{
+    // 运行时重新加载，这次包括需要 IST 的向量
+    idt_setup_from_table(idt_table, def_idts, ...);
+    load_idt(&idt_descr);
+}
+```
+
+**问题**：
+- 早期代码和运行时代码**强耦合**：需要协调哪些向量用 IST
+- 失去了 `idt.c` 的 KASAN 保护：不利于调试
+- 违背了**最小可信计算基（Minimal TCB）**原则：早期代码应该极简独立
+
 ##### 方案对比总结
 
-| 方案 | 优点 | 缺点 | 内核选择 |
-|------|------|------|---------|
-| **当前设计**（两个独立表） | ✅ 早期/运行时完全隔离<br>✅ 早期代码极简（71 行）<br>✅ 运行时代码有完整 KASAN 保护<br>✅ 无 TSS 依赖问题<br>✅ 符合最小 TCB 原则 | 需要维护两个表定义<br>（但表定义都很简单） | ✅ **采用** |
-| **方案 A**（禁用 `idt.c` 的 KASAN） | 可以只用一个表 | ❌ 运行时失去 KASAN 保护<br>❌ 早期代码和运行时代码耦合<br>❌ IST 依赖 TSS 未解决<br>❌ 违背分离原则 | ❌ 不采用 |
-| **方案 B**（直接用 `idt_table`，不禁用 KASAN） | 只有一个表 | ❌ **根本无法启动**<br>❌ KASAN 未初始化 → crash<br>❌ 触发 Triple Fault | ❌ 不可行 |
+| 方案 | KASAN 问题 | TSS/IST 问题 | 其他问题 | 内核选择 |
+|------|-----------|-------------|---------|---------|
+| **当前设计**（两个独立表） | ✅ 早期禁用 KASAN<br>✅ 运行时有完整 KASAN 保护 | ✅ 早期不用 IST<br>✅ 运行时用 IST | ✅ 早期/运行时完全隔离<br>✅ 早期代码极简（71 行）<br>✅ 符合最小 TCB 原则 | ✅ **采用** |
+| **场景 1**（直接用 `idt_table`，不禁用 KASAN） | ❌ **KASAN 未初始化**<br>❌ 访问 shadow memory 崩溃 | N/A（已崩溃） | ❌ 根本无法启动<br>❌ Triple Fault | ❌ 不可行 |
+| **场景 2**（禁用 KASAN，早期加载 `idt_table`） | ✅ KASAN 已禁用 | ❌ **TSS 未初始化**<br>❌ IST 切换到无效栈<br>❌ 发生异常时 Triple Fault | ❌ 运行时失去 KASAN 保护 | ❌ 不可行 |
+| **场景 3**（禁用 KASAN，早期不用 IST） | ✅ KASAN 已禁用 | ✅ 早期不用 IST | ❌ 早期/运行时强耦合<br>❌ 运行时失去 KASAN 保护<br>❌ 违背分离原则<br>❌ 维护复杂 | ❌ 不采用 |
+
+**结论**：只有当前的双表设计能同时解决两个独立问题，并且保持代码清晰和安全性。
 
 ##### 类比理解
 
@@ -446,6 +514,7 @@ static gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
        - 所有 CPU 异常向量（0-31）→ early_idt_handler_array
        - 作用：处理启动早期的异常（#PF, #DE, #GP 等）
        - 限制：尚无 IST（中断栈），尚无硬件 IRQ 门，尚无 INT 0x80
+```
 
 > 📖 **深入理解 idt_setup_early_handler() 的每一行代码**：
 >
@@ -494,6 +563,8 @@ init_mem_mapping();
 
 > **详细的内存管理演化分析**（包含完整的内核源码追踪、时间线图、状态对比表），请参见：
 > [Linux 内存管理演化 - 4.0 从临时页表到完整内存管理](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md#40-从临时页表到完整内存管理主内核的内存初始化全过程)
+
+---
 
 ```
 阶段 2: setup_arch() → idt_setup_early_traps()

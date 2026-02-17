@@ -167,6 +167,7 @@
 |------|------|
 | [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md) | Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue） |
 | [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md) | **Linux 内核 IDT 表的演进流程详解**<br>• 两个 IDT 表、5 个演进阶段<br>• **IDT 中的用户态可触发门（DPL=3）详解：INT3/INTO/INT 0x80 完整对比** |
+| [X86_64_TSS_AND_IST.md](X86_64_TSS_AND_IST.md) | **x86-64 任务状态段（TSS）与中断栈表（IST）详解**<br>• TSS 历史演变（硬件任务切换→栈管理器）<br>• IST 机制工作原理与必要性<br>• Double Fault/NMI/Machine Check 的 IST 使用<br>• TSS 初始化时机与启动约束<br>• 未初始化 TSS 时使用 IST 的危险场景 |
 | [IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md) | **idt_setup_early_handler() 函数详细分析** ⭐ 新增<br>• 数据结构详解：`idt_table`、`idt_descr`、`gate_desc`、`desc_ptr`<br>• `early_idt_handler_array` 的汇编实现（.rept 宏、32 个处理程序桩）<br>• 逐行代码分析：为什么是 32 个向量、每次循环做了什么<br>• `set_intr_gate()` 的完整工作流程（init_idt_data → idt_setup_from_table → write_idt_entry）<br>• `load_idt()` 的底层实现（lidt 指令、IDTR 寄存器更新、原子切换）<br>• `early_idt_handler_common` 公共处理程序（栈帧布局、调用 do_early_exception）<br>• EXCEPTION_ERRCODE_MASK 详解（哪些异常自动压入错误码）<br>• 完整的执行流程图和内存变化对比 |
 | [KASAN_INSTRUMENTATION_AND_INIT_ORDER.md](KASAN_INSTRUMENTATION_AND_INIT_ORDER.md) | **KASAN 插桩机制与初始化顺序深度分析** ⭐ 新增<br>• 编译时插桩 vs 运行时初始化的本质区别<br>• 为什么必须先 kasan_early_init() 后 idt_setup_early_handler()<br>• `__asan_loadXX`/`__asan_storeXX` 函数工作原理<br>• 如果 KASAN 未初始化会发生什么（递归 Page Fault → Triple Fault）<br>• 内核源代码证据（head64.c 明确注释）<br>• 为什么不让 KASAN 自动跳过检查（性能、Chicken-and-Egg 问题）<br>• `__head` 和 `KASAN_SANITIZE` 的作用<br>• 影子内存（Shadow Memory）机制详解 |
 | [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md) | **Linux 系统调用初始化详解**<br>• trap_init/syscall_init<br>• INT 0x80 vs SYSCALL/SYSENTER 性能对比<br>• entry_SYSCALL_64 入口分析 |
@@ -213,6 +214,7 @@
 | [LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md](LINUX_MEMORY_MANAGEMENT_CODE_GUIDE.md) | **x86-64 多级页表设计详解（实现篇）**<br>• 页表建立过程与时间线（代码级实现）<br>• 阶段 2-3 分页目的与 x86-64 硬件要求<br>• 多级页表设计原理与内存开销对比（512GB vs 68KB）<br>• MMU 硬件页表遍历伪代码（walk_virtual_address）<br>• 书籍目录类比与动态管理机制 |
 | [SLAB_ALLOCATOR_EXPLAINED.md](SLAB_ALLOCATOR_EXPLAINED.md) | **Slab 分配器原理与实践**<br>• Slab 解决的问题（传统页分配器的不足）<br>• 三层架构（Cache → Slab → Object）<br>• 核心优势（性能 5-10 倍、内存利用率提升、缓存友好性）<br>• 实战使用（创建自定义缓存、监控与调试）<br>• 现代变体（SLAB/SLUB/SLOB 对比） |
 | [BUDDY_ALLOCATOR_GUIDE.md](BUDDY_ALLOCATOR_GUIDE.md) | **伙伴系统与 Slab 分配器详解（源码级）**<br>• 伙伴系统原理、算法与实现<br>• Slab/SLUB 分配器源码分析与 per-CPU 缓存<br>• 从 memblock 到 buddy 的转换流程 |
+| [X86_64_TLB_MANAGEMENT.md](X86_64_TLB_MANAGEMENT.md) | **x86-64 TLB 管理与页表切换详解**<br>• TLB 基础知识（ITLB/DTLB、Global 页、PCID）<br>• 四种 TLB 刷新机制（CR3、CR4.PGE、INVLPG、INVPCID）<br>• 启动过程中的页表切换（为什么需要 __native_tlb_flush_global）<br>• 运行时 TLB 管理（进程切换、KPTI、TLB Shootdown）<br>• 性能分析与优化（大页、PCID、批量刷新） |
 
 ### 子文档（技术细节）
 
