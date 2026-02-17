@@ -13,18 +13,146 @@
 
 ## 目录
 
-1. [函数概览](#1-函数概览)
-2. [数据结构详解](#2-数据结构详解)
-3. [逐行代码分析](#3-逐行代码分析)
-4. [early_idt_handler_array 的实现](#4-early_idt_handler_array-的实现)
-5. [set_intr_gate() 的工作流程](#5-set_intr_gate-的工作流程)
-6. [load_idt() 的底层实现](#6-load_idt-的底层实现)
-7. [完整的执行流程](#7-完整的执行流程)
-8. [为什么是 32 个向量？](#8-为什么是-32-个向量)
+1. [执行顺序总览](#1-执行顺序总览)
+2. [阶段 1：编译时准备](#2-阶段-1编译时准备)
+3. [阶段 2：运行时写入 idt_table](#3-阶段-2运行时写入-idt_table)
+4. [阶段 3：加载 IDT 到 CPU](#4-阶段-3加载-idt-到-cpu)
+5. [阶段 4：运行时使用](#5-阶段-4运行时使用)
+6. [完整代码调用链](#6-完整代码调用链)
+7. [为什么是 32 个向量？](#7-为什么是-32-个向量)
 
 ---
 
-## 1. 函数概览
+## 1. 执行顺序总览
+
+### 1.1 时间线概览
+
+**关键纠正**：很多文档容易混淆"写入 idt_table"和"加载 IDT"，这是两个完全不同的操作！
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  阶段 1：编译时准备（内核编译阶段）                              │
+├─────────────────────────────────────────────────────────────────┤
+│  ① early_idt_handler_array[32] 由汇编代码 .rept 生成            │
+│     位置：arch/x86/kernel/head_64.S                              │
+│     结果：32 个函数入口（地址在链接时确定）                       │
+│                                                                  │
+│  ② idt_table[256] 定义为全局数组                                │
+│     位置：arch/x86/kernel/idt.c:173                              │
+│     结果：分配 4096 字节（BSS 段，初始全为 0）                    │
+│                                                                  │
+│  ③ idt_descr 定义并初始化                                       │
+│     位置：arch/x86/kernel/idt.c:175-178                          │
+│     结果：.address = &idt_table, .size = 4095                   │
+└─────────────────────────────────────────────────────────────────┘
+                        ↓  内核启动
+┌─────────────────────────────────────────────────────────────────┐
+│  阶段 2：运行时写入 idt_table（idt_setup_early_handler 执行）    │
+├─────────────────────────────────────────────────────────────────┤
+│  调用时机：x86_64_start_kernel() → idt_setup_early_handler()    │
+│                                                                  │
+│  ④ for (i = 0; i < 32; i++)                                     │
+│       set_intr_gate(i, early_idt_handler_array[i])              │
+│         │                                                        │
+│         └─→ init_idt_data(&data, i, addr)                       │
+│              └─ 创建临时结构：vector=i, addr=..., type=0xE      │
+│         │                                                        │
+│         └─→ idt_setup_from_table(idt_table, &data, 1, false)    │
+│              └─→ idt_init_desc(&desc, &data)                    │
+│                   └─ 构建 16 字节的 gate_desc                    │
+│              │                                                   │
+│              └─→ write_idt_entry(idt_table, i, &desc)           │
+│                   └─ idt_table[i] = desc  ← 关键！写入内存！     │
+│                                                                  │
+│  结果：idt_table[0..31] 现在包含 32 个完整的门描述符            │
+└─────────────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  阶段 3：加载 IDT 到 CPU（仍在 idt_setup_early_handler 中）      │
+├─────────────────────────────────────────────────────────────────┤
+│  ⑤ load_idt(&idt_descr)                                         │
+│       │                                                          │
+│       └─→ asm volatile("lidt %0"::"m" (idt_descr.size))         │
+│            │                                                     │
+│            └─ CPU 执行 lidt 指令：                               │
+│                IDTR.base  = idt_descr.address = &idt_table      │
+│                IDTR.limit = idt_descr.size = 4095               │
+│                                                                  │
+│  结果：CPU 的 IDTR 寄存器现在指向 idt_table                      │
+│  注意：这一步不修改 idt_table，只是告诉 CPU 在哪里找它！         │
+└─────────────────────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  阶段 4：运行时使用（异常/中断发生时）                           │
+├─────────────────────────────────────────────────────────────────┤
+│  ⑥ CPU 触发异常（如 #PF，向量 14）                              │
+│       │                                                          │
+│       ├─ 读取 IDTR.base（= &idt_table）                         │
+│       ├─ 计算地址：IDTR.base + 14 × 16                          │
+│       ├─ 读取 idt_table[14]（16 字节）                          │
+│       ├─ 提取处理程序地址：offset_high | offset_middle | low    │
+│       └─ 跳转到该地址（early_idt_handler_array[14]）            │
+│                                                                  │
+│  结果：CPU 执行异常处理代码                                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 1.2 关键概念澄清
+
+| 操作 | 谁执行 | 对什么操作 | 结果 |
+|------|-------|----------|------|
+| **写入** idt_table | `write_idt_entry()` | idt_table[i] | 内存中的 idt_table 被填充 |
+| **加载** IDT | `lidt` 指令 | IDTR 寄存器 | CPU 知道 idt_table 在哪里 |
+| **读取** idt_table | CPU 硬件 | idt_table[向量号] | 获取处理程序地址 |
+
+**常见误解**：
+- ❌ `load_idt()` 写入 idt_table
+- ✅ `write_idt_entry()` 写入 idt_table
+- ✅ `load_idt()` 只是告诉 CPU idt_table 的位置
+
+### 1.3 函数源代码
+
+**`idt_setup_early_handler()` 源代码**（`arch/x86/kernel/idt.c:317-331`）：
+
+```c
+void __init idt_setup_early_handler(void)
+{
+	int i;
+
+	// 步骤 1：写入 idt_table（阶段 2）
+	for (i = 0; i < NUM_EXCEPTION_VECTORS; i++)
+		set_intr_gate(i, early_idt_handler_array[i]);  // ← 写入操作
+#ifdef CONFIG_X86_32
+	for ( ; i < NR_VECTORS; i++)
+		set_intr_gate(i, early_ignore_irq);
+#endif
+
+	// 步骤 2：加载到 IDTR（阶段 3）
+	load_idt(&idt_descr);  // ← 加载操作，不是写入！
+}
+```
+
+### 1.4 调用时机
+
+```c
+// arch/x86/kernel/head64.c:273
+asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_data)
+{
+    kasan_early_init();
+    __native_tlb_flush_global(...);
+
+    idt_setup_early_handler();  // ← 在这里调用（早期内核初始化）
+
+    tdx_early_init();
+    // ...
+}
+```
+
+---
+
+现在让我们按执行顺序详细展开每个阶段：
+
+## 2. 阶段 1：编译时准备
 
 ### 1.1 函数签名与位置
 
@@ -67,186 +195,7 @@ asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_
 }
 ```
 
-### 1.3 函数的核心作用
-
-1. **切换 IDT 表**：从临时的 `bringup_idt_table` 切换到正式的 `idt_table`
-2. **填充异常处理程序**：为前 32 个 CPU 异常向量设置统一的早期处理函数
-3. **加载新 IDT**：通过 `lidt` 指令使新的 IDT 生效
-
-### 1.4 调用链概览（如何连接到 idt_table）
-
-**关键问题**：`idt_setup_early_handler()` 中的 `set_intr_gate()` 如何将数据写入 `idt_table`？
-
-**完整调用链**：
-
-```
-idt_setup_early_handler()
-    │
-    ├─ 步骤 1：填充 IDT 表
-    │     │
-    │     └─ for (i = 0; i < 32; i++)
-    │           set_intr_gate(i, early_idt_handler_array[i])
-    │             │
-    │             ├─ 创建临时的 idt_data 结构
-    │             │    └─ init_idt_data(&data, i, addr)
-    │             │         └─ data.vector = i
-    │             │         └─ data.addr = early_idt_handler_array[i]
-    │             │         └─ data.bits.type = GATE_INTERRUPT (0xE)
-    │             │         └─ data.bits.ist = 0
-    │             │         └─ data.bits.dpl = 0
-    │             │         └─ data.bits.p = 1
-    │             │
-    │             └─ idt_setup_from_table(idt_table, &data, 1, false)
-    │                   │
-    │                   ├─ idt_init_desc(&desc, &data)
-    │                   │    └─ 将 idt_data 转换为 16 字节的 gate_desc
-    │                   │         └─ desc.offset_low = addr[15:0]
-    │                   │         └─ desc.offset_middle = addr[31:16]
-    │                   │         └─ desc.offset_high = addr[63:32]
-    │                   │         └─ desc.segment = __KERNEL_CS
-    │                   │         └─ desc.bits = data.bits
-    │                   │
-    │                   └─ write_idt_entry(idt_table, i, &desc)
-    │                        └─ idt_table[i] = desc  ← 写入全局 idt_table！
-    │
-    └─ 步骤 2：加载 IDT 表
-          │
-          └─ load_idt(&idt_descr)
-                │
-                └─ lidt指令：将 idt_descr 中的地址和大小加载到 IDTR
-                     └─ IDTR.base = idt_descr.address = &idt_table  ← 指向 idt_table！
-                     └─ IDTR.limit = idt_descr.size = 4095
-```
-
-**关键连接点**：
-
-1. **`idt_table` 是全局静态数组**（arch/x86/kernel/idt.c:173）
-   - 存储 256 个 16 字节的门描述符
-   - 初始为空（BSS 段，全 0）
-
-2. **`idt_descr` 结构指向 `idt_table`**（arch/x86/kernel/idt.c:175-178）
-   - `idt_descr.address = (unsigned long) idt_table`
-   - `idt_descr.size = 4095`（4096 - 1）
-
-3. **`set_intr_gate()` 通过多层调用最终写入 `idt_table`**
-   - `set_intr_gate()` → `idt_setup_from_table()` → `write_idt_entry()` → `idt_table[i] = desc`
-
-4. **`load_idt()` 将 `idt_table` 的地址加载到 IDTR**
-   - CPU 的 IDTR 寄存器现在指向 `idt_table`
-   - 后续所有中断/异常都会查找 `idt_table`
-
-**为什么需要这么多层？**
-
-- **类型安全**：idt_data（高层抽象）→ gate_desc（底层硬件格式）
-- **灵活性**：可以批量初始化（传入数组）
-- **可维护性**：将复杂的位操作封装在函数中
-
----
-
-## 2. 数据结构详解
-
-### 2.0 核心数据结构关系概览
-
-`idt_setup_early_handler()` 涉及三个核心数据结构，它们的关系如下：
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  1. early_idt_handler_array[32]  (源：处理程序地址数组)         │
-│     ├─ 位置：arch/x86/kernel/head_64.S                          │
-│     ├─ 类型：汇编代码生成的 32 个函数入口地址                    │
-│     ├─ 作用：提供异常处理程序的地址                              │
-│     └─ 示例：early_idt_handler_array[0] = 0xffffffff81002a00    │
-│                                                                  │
-│                         ↓  (通过 set_intr_gate 写入)             │
-│                                                                  │
-│  2. idt_table[256]  (中：IDT 门描述符数组)                       │
-│     ├─ 位置：arch/x86/kernel/idt.c:173                          │
-│     ├─ 类型：gate_desc 数组（256 个 16 字节条目）                │
-│     ├─ 大小：4096 字节（1 页）                                   │
-│     ├─ 作用：存储 CPU 使用的 IDT 表                              │
-│     └─ 示例：idt_table[0] = {                                   │
-│               .offset_low = 0x2a00,                              │
-│               .offset_middle = 0x8100,                           │
-│               .offset_high = 0xffffffff,                         │
-│               .segment = 0x0010,  (__KERNEL_CS)                  │
-│               .bits = {.type=0xE, .ist=0, .dpl=0, .p=1}          │
-│             }                                                    │
-│                                                                  │
-│                         ↓  (地址存储在)                          │
-│                                                                  │
-│  3. idt_descr  (终：指向 idt_table 的描述符)                     │
-│     ├─ 位置：arch/x86/kernel/idt.c:175-178                      │
-│     ├─ 类型：struct desc_ptr（10 字节）                         │
-│     ├─ 作用：传给 lidt 指令，加载到 IDTR 寄存器                  │
-│     └─ 内容：{                                                   │
-│           .size = 4095,              (idt_table 大小 - 1)        │
-│           .address = &idt_table      (idt_table 的地址)          │
-│         }                                                        │
-│                                                                  │
-│                         ↓  (通过 load_idt(&idt_descr))           │
-│                                                                  │
-│                      IDTR 寄存器                                 │
-│                   (CPU 硬件寄存器)                               │
-│         ├─ IDTR.limit = 4095                                    │
-│         └─ IDTR.base = &idt_table                               │
-│                                                                  │
-│                         ↓  (CPU 查找异常处理程序)                │
-│                                                                  │
-│         当异常发生时，CPU 从 idt_table[向量号] 读取              │
-│         处理程序地址并跳转                                        │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**三者的数据流动**：
-
-```
-步骤 1（编译时）：
-    early_idt_handler_array[0..31] 由汇编代码生成
-    → 32 个统一的异常处理桩（stub）
-
-步骤 2（运行时初始化）：
-    for (i = 0; i < 32; i++)
-        set_intr_gate(i, early_idt_handler_array[i])
-    → 将地址写入 idt_table[0..31]
-    → 构建完整的 16 字节门描述符
-
-步骤 3（加载到 CPU）：
-    load_idt(&idt_descr)
-    → lidt 指令将 idt_descr 的内容加载到 IDTR
-    → CPU 现在知道 IDT 表在内存中的位置
-
-步骤 4（运行时使用）：
-    当 CPU 触发异常（如 #PF）：
-    1. 读取 IDTR.base（= &idt_table）
-    2. 计算地址：IDTR.base + 向量号 × 16
-    3. 读取 idt_table[向量号]（16 字节）
-    4. 提取处理程序地址（offset_high | offset_middle | offset_low）
-    5. 跳转到该地址（来自 early_idt_handler_array）
-```
-
-**关键要点**：
-
-| 变量 | 存储的是什么 | 作用 |
-|------|-------------|------|
-| `early_idt_handler_array` | **处理程序的代码/地址** | 提供实际执行的代码 |
-| `idt_table` | **门描述符**（包含上述地址） | CPU 查找的 IDT 表 |
-| `idt_descr` | **idt_table 的元数据**（地址+大小） | 告诉 CPU 在哪里找 IDT 表 |
-
-**为什么需要 idt_descr？**
-
-直接问题：为什么不直接 `lidt idt_table`？
-
-答案：`lidt` 指令需要知道两个信息：
-1. IDT 表在内存中的**地址**
-2. IDT 表的**大小**（limit）
-
-`idt_descr` 就是封装这两个信息的结构体，符合 x86 硬件的要求。
-
----
-
-现在让我们详细展开每个数据结构：
-
-### 2.1 idt_table - 运行时 IDT 表（详细定义）
+### 2.1 early_idt_handler_array - 异常处理程序数组（编译时生成）
 
 **源代码**（`arch/x86/kernel/idt.c:173`）：
 
