@@ -243,6 +243,17 @@ DECLARE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page);
 | **0xE** | **Interrupt Gate** | **IDT** | **16B** | ✅ 广泛使用 |
 | **0xF** | **Trap Gate** | **IDT** | **16B** | ✅ 广泛使用 |
 
+**Interrupt Gate vs Trap Gate 的关键区别**（Intel SDM Vol. 3A, Section 6.12.1.2）：
+
+| 门类型 | Type 值 | IF 标志处理 | 说明 |
+|--------|---------|------------|------|
+| **Interrupt Gate** | 0xE | **自动清除** | CPU 自动执行 `CLI`，禁用中断嵌套，防止处理程序被打断 |
+| **Trap Gate** | 0xF | **不修改** | 允许中断嵌套，用于异常处理（如 #PF, #GP） |
+
+> *"The only difference between an interrupt gate and a trap gate is the way the processor handles the IF flag in the EFLAGS register. When accessing an exception- or interrupt-handling procedure through an interrupt gate, the processor clears the IF flag to prevent other interrupts from interfering with the current interrupt handler. [...] Accessing a handler procedure through a trap gate does not affect the IF flag."*
+>
+> — Intel SDM Vol. 3A, Section 6.12.1.2 "Flag Usage By Exception- or Interrupt-Handler Procedure"
+
 **共同特征**：
 1. **都是 16 字节**（在 x86-64 模式下）
 2. **都包含目标代码地址**（offset_low + offset_middle + offset_high）

@@ -712,9 +712,15 @@ process_op(struct disk_op_s *op)
 
 | 值   | 类型                | 说明 |
 |------|---------------------|------|
-| 0xE  | Interrupt Gate（64位）| 禁用中断的门 |
-| 0xF  | Trap Gate（64位）     | 不禁用中断的门 |
+| 0xE  | Interrupt Gate（64位）| 自动清除 IF 标志，禁用中断（防止嵌套） |
+| 0xF  | Trap Gate（64位）     | 不修改 IF 标志，允许中断嵌套 |
 | 0x5  | Task Gate（已废弃）   | x86-32，x86-64 不支持 |
+
+**关键区别**（Intel SDM Vol. 3A, Section 6.12.1.2 "Flag Usage By Exception- or Interrupt-Handler Procedure"）：
+- **Interrupt Gate (0xE)**：CPU 在跳转到处理程序时自动执行 `CLI`（清除 EFLAGS.IF），禁用中断
+  - 用于硬件中断处理（避免嵌套中断导致栈溢出）
+- **Trap Gate (0xF)**：CPU 不修改 IF 标志，允许中断嵌套
+  - 用于异常处理（如 #PF Page Fault，允许在处理缺页时响应中断）
 
 **Linux 内核中的结构定义：**
 

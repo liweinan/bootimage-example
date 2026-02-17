@@ -156,9 +156,14 @@ Intel SDM 定义的 64 位模式下的门描述符格式：
 | 0xC | 1100b | Call Gate（64 位模式下**不支持**） | - |
 | 0x5 | 0101b | Task Gate（64 位模式下**不支持**） | - |
 
-**关键区别**：
+**关键区别**（Intel SDM Volume 3A, Section 6.12.1.2）：
 - **Interrupt Gate**（0xE）：CPU 在跳转时自动执行 `CLI`（清除 EFLAGS.IF）
+  > *"When accessing an exception- or interrupt-handling procedure through an interrupt gate, the processor clears the IF flag to prevent other interrupts from interfering with the current interrupt handler."*
+  > — Intel SDM Vol. 3A, Section 6.12.1.2 "Flag Usage By Exception- or Interrupt-Handler Procedure"
+
 - **Trap Gate**（0xF）：CPU 不修改 IF 标志，允许中断嵌套
+  > *"Accessing a handler procedure through a trap gate does not affect the IF flag."*
+  > — Intel SDM Vol. 3A, Section 6.12.1.2 "Flag Usage By Exception- or Interrupt-Handler Procedure"
 
 #### 2.4.4 DPL (Descriptor Privilege Level)
 
