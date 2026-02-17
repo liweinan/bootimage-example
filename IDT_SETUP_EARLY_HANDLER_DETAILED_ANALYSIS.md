@@ -517,6 +517,105 @@ idt_setup_from_table(gate_desc *idt, const struct idt_data *t, int size, bool sy
 1. 调用 `idt_init_desc()` 构建门描述符
 2. 调用 `write_idt_entry()` 写入 idt_table
 
+**实际写入的数据**：
+
+每次调用 `idt_setup_from_table()` 会向 `idt_table[i]` 写入 **16 字节**的门描述符数据：
+
+```
+idt_table 内存布局（每个条目 16 字节）：
+
+偏移   字段                大小    内容示例（向量 14, #PF）
+-----  -----------------  ------  ----------------------------------
++0     offset_low          2 字节  0x2a80 （处理程序地址低 16 位）
++2     segment             2 字节  0x0010 （__KERNEL_CS）
++4     bits (IST/type/DPL) 2 字节  0x8E00 （详见下方位字段分解）
++6     offset_middle       2 字节  0x8100 （处理程序地址中 16 位）
++8     offset_high         4 字节  0xffffffff （处理程序地址高 32 位）
++12    reserved            4 字节  0x00000000 （必须为 0）
+
+总计：16 字节
+```
+
+**bits 字段位分解**（偏移 +4 的 2 字节 = 0x8E00）：
+
+```
+bits 的实际值: 0x8E00 (小端序存储)
+
+二进制表示: 1000 1110 0000 0000
+            ││││ ││││ │││└─┴─ IST[2:0]  = 000 (不使用 IST)
+            ││││ ││││ ││└──── zero[4:3] = 00  (必须为 0)
+            ││││ ││││ │└───── zero[2:0] = 000 (必须为 0)
+            ││││ │││└─┴────── type[4:0] = 01110 (0xE, Interrupt Gate)
+            ││││ ││└───────── DPL[1:0]  = 00 (Ring 0)
+            ││││ │└────────── P          = 1  (Present)
+            ││││ └─────────── (高字节的高 7 位未使用)
+            │││└─────────────
+            ││└──────────────
+            │└───────────────
+            └────────────────
+
+关键值：
+- type = 0xE (14): Interrupt Gate（中断门）
+- DPL  = 0:       Ring 0 特权级（内核态）
+- P    = 1:       Present（有效）
+- IST  = 0:       不使用 IST（普通内核栈）
+```
+
+**完整的 16 字节十六进制数据示例**：
+
+假设 `early_idt_handler_array[14]` 的地址是 `0xffffffff81002a80`：
+
+```
+idt_table[14] 的 16 字节内容（小端序）：
+
+地址偏移  +0  +1  +2  +3  +4  +5  +6  +7  +8  +9  +A  +B  +C  +D  +E  +F
+数据     80  2A  10  00  00  8E  00  81  FF  FF  FF  FF  00  00  00  00
+         └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘ └─────┬─────┘ └─────┬─────┘
+         offset  segment  bits   offset    offset_high   reserved
+          _low             (IST)  _middle
+                          (type)
+                          (DPL)
+                           (P)
+
+字段解释：
+[+0..+1] 0x2A80       = offset_low    (地址 [15:0])
+[+2..+3] 0x0010       = segment       (__KERNEL_CS)
+[+4..+5] 0x8E00       = bits          (IST=0, type=0xE, DPL=0, P=1)
+[+6..+7] 0x8100       = offset_middle (地址 [31:16])
+[+8..+B] 0xFFFFFFFF   = offset_high   (地址 [63:32])
+[+C..+F] 0x00000000   = reserved      (必须为 0)
+
+完整地址重组：
+0xFFFFFFFF (高32位) | 0x8100 (中16位) | 0x2A80 (低16位)
+= 0xFFFFFFFF81002A80 ← 这就是 early_idt_handler_array[14] 的地址
+```
+
+**多个向量的实际数据对比**：
+
+```
+向量 0 (#DE): idt_table[0] = 16 字节
+  处理程序地址: 0xffffffff81002a00
+  80 2A 10 00 00 8E 00 81 FF FF FF FF 00 00 00 00
+
+向量 1 (#DB): idt_table[1] = 16 字节
+  处理程序地址: 0xffffffff81002a0c (偏移 +12 字节)
+  0C 2A 10 00 00 8E 0C 81 FF FF FF FF 00 00 00 00
+
+向量 14 (#PF): idt_table[14] = 16 字节
+  处理程序地址: 0xffffffff81002a80
+  80 2A 10 00 00 8E 00 81 FF FF FF FF 00 00 00 00
+
+向量 31: idt_table[31] = 16 字节
+  处理程序地址: 0xffffffff81002b40
+  40 2B 10 00 00 8E 40 81 FF FF FF FF 00 00 00 00
+
+所有向量的共同点：
+- segment 都是 0x0010 (__KERNEL_CS)
+- bits 都是 0x8E00 (Interrupt Gate, DPL=0, P=1)
+- reserved 都是 0x00000000
+- 只有 offset 字段不同（指向不同的处理程序）
+```
+
 ### 3.5 idt_init_desc() - 构建门描述符
 
 **源代码位置**：`arch/x86/kernel/idt.c:64-73`
