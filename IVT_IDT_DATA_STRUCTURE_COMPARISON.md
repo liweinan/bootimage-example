@@ -1,8 +1,9 @@
 # BIOS IVT 与 Kernel IDT 数据结构详细对比
 
-**版本**: 1.0
+**版本**: 1.1
 **日期**: 2026-02-17
 **作者**: Linux 内核启动文档项目
+**更新内容**: 添加详细的 SeaBIOS 和 Linux kernel 源代码引用
 
 > 📚 **文档导航**: [返回总索引](DOCUMENT_INDEX.md) | [阅读指南](READING_GUIDE.md) | [IDT 演进](LINUX_KERNEL_IDT_EVOLUTION.md)
 
@@ -23,6 +24,42 @@
 6. [初始化代码对比](#6-初始化代码对比)
 7. [从 IVT 到 IDT 的演进过程](#7-从-ivt-到-idt-的演进过程)
 8. [为什么 x86-64 必须使用 IDT？](#8-为什么-x86-64-必须使用-idt)
+9. [源代码索引](#9-源代码索引)
+
+---
+
+## 源代码快速索引
+
+### SeaBIOS 源代码
+
+| 数据结构/函数 | 文件路径 | 说明 |
+|--------------|---------|------|
+| `struct segoff_s` | seabios/src/types.h:49-52 | IVT 表项结构（段:偏移，4 字节） |
+| `SET_IVT` 宏 | seabios/src/util.h:194-196 | 设置 IVT 条目的宏 |
+| `ivt_init()` | seabios/src/post.c:568-650 | BIOS 启动时初始化 IVT |
+| `entry_13` | seabios/src/romlayout.S:448-454 | INT 13h 磁盘服务入口 |
+| `process_op()` | seabios/src/block.c:605-632 | INT 13h 磁盘操作 C 实现 |
+| `SEG_IVT` | seabios/src/config.h:13 | IVT 表的段地址（0x0000） |
+| `SEG_BIOS` | seabios/src/config.h:10 | BIOS 代码段地址（0xF000） |
+
+### Linux Kernel 源代码
+
+| 数据结构/函数 | 文件路径 | 说明 |
+|--------------|---------|------|
+| `struct gate_desc` | arch/x86/include/asm/desc_defs.h:79-91 | IDT 门描述符结构（16 字节） |
+| `struct idt_bits` | arch/x86/include/asm/desc_defs.h:71-77 | IDT 控制位结构 |
+| `struct desc_ptr` | arch/x86/include/asm/desc_defs.h:23-26 | IDTR 寄存器对应的结构 |
+| `struct idt_data` | arch/x86/include/asm/desc_defs.h:105-112 | IDT 初始化中间数据结构 |
+| `idt_table` | arch/x86/kernel/idt.c:45-48 | IDT 表全局数组（256 条目） |
+| `idt_descr` | arch/x86/kernel/idt.c:175-178 | IDTR 描述符（用于 LIDT） |
+| `idt_setup_early_handler()` | arch/x86/kernel/idt.c:317-331 | 早期 IDT 初始化函数 |
+| `set_intr_gate()` | arch/x86/kernel/idt.c:237-244 | 设置中断门函数 |
+| `idt_init_desc()` | arch/x86/kernel/idt.c:164-176 | 构建 16 字节门描述符 |
+| `early_idt_handler_array` | arch/x86/kernel/head_64.S:357-365 | 早期异常处理程序数组 |
+| `asm_exc_page_fault` | arch/x86/entry/entry_64.S:1195-1202 | Page Fault 处理程序入口 |
+| `do_page_fault()` | arch/x86/mm/fault.c:1347-1355 | Page Fault C 实现 |
+| `__KERNEL_CS` | arch/x86/include/asm/segment.h:203-205 | 内核代码段选择子（0x10） |
+| `GATE_INTERRUPT` | arch/x86/include/asm/desc_defs.h:100-102 | Interrupt Gate 类型（0xE） |
 
 ---
 
@@ -131,26 +168,61 @@ ivt_init(void)
 **SET_IVT 宏定义：**
 
 ```c
-// seabios/src/util.h
+// seabios/src/util.h:194-196
 #define SET_IVT(vector, segoff) \
     SET_FARVAR(SEG_IVT, *(struct segoff_s *)(vector*4), segoff)
 
-// struct segoff_s 定义
+// seabios/src/types.h:49-52 - IVT 表项的数据结构
 struct segoff_s {
-    u16 offset;  // 偏移地址
-    u16 seg;     // 段地址
-};
+    u16 offset;  // 偏移地址（16 位）
+    u16 seg;     // 段地址（16 位）
+} PACKED;
+
+// seabios/src/config.h:13 - IVT 表的段地址
+#define SEG_IVT  0x0000
+
+// seabios/src/util.h:167 - FUNC16 宏：将 16 位函数地址转换为 segoff_s
+#define FUNC16(func) ({                         \
+    extern void func (void);                    \
+    SEGOFF(SEG_BIOS, (u32)func - BUILD_BIOS_ADDR); \
+})
 ```
 
-**实际操作：**
+**实际操作示例：INT 13h 磁盘服务**
 
 ```c
-// 设置 IVT[0x13] = 0xF000:0x12AB（INT 13h 磁盘服务）
-SET_IVT(0x13, FUNC16(handle_13));
+// seabios/src/post.c:635 - 设置 IVT[0x13] 指向磁盘服务处理程序
+SET_IVT(0x13, FUNC16(entry_13));
 
-// 展开为：
-*(u16 *)(0x0000 + 0x13 * 4 + 0) = 0x12AB;  // 偏移地址
-*(u16 *)(0x0000 + 0x13 * 4 + 2) = 0xF000;  // 段地址
+// seabios/src/romlayout.S:448-454 - INT 13h 入口点（汇编代码）
+ENTRY_ST(entry_13)
+    ENTRY_INTO32  _cfunc32flat_process_op   // 切换到 32 位模式并调用 C 函数
+    iretw                                     // 返回到调用者
+ENTRY_END(entry_13)
+
+// seabios/src/block.c:605-632 - INT 13h 的 C 函数实现
+void VISIBLE32FLAT
+process_op(struct disk_op_s *op)
+{
+    // 根据 AH 寄存器的值执行不同的磁盘操作
+    switch (op->command) {
+    case CMD_READ:      disk_read(op);  break;   // AH=02h：读扇区
+    case CMD_WRITE:     disk_write(op); break;   // AH=03h：写扇区
+    case CMD_VERIFY:    disk_verify(op); break;  // AH=04h：验证扇区
+    case CMD_SEEK:      disk_seek(op);  break;   // AH=07h：寻道
+    // ... 更多磁盘操作
+    default:
+        op->count = 0;
+        disk_ret(op, DISK_RET_EPARAM);
+    }
+}
+
+// 展开后的实际内存操作：
+// 物理地址 0x4C（0x13 * 4）处写入：
+*(u16 *)(0x0000004C) = offset_of_entry_13;  // 偏移地址（如 0x1234）
+*(u16 *)(0x0000004E) = 0xF000;              // 段地址 SEG_BIOS
+
+// 最终效果：INT 13h 处理程序地址 = 0xF000:0x1234
 ```
 
 ### 2.3 CPU 查找 IVT 的过程
@@ -238,44 +310,88 @@ SET_IVT(0x13, FUNC16(handle_13));
 **Linux 内核中的结构定义：**
 
 ```c
-// arch/x86/include/asm/desc_defs.h:79-91
+// arch/x86/include/asm/desc_defs.h:79-91 - IDT 门描述符结构（x86-64）
 struct gate_desc {
     u16         offset_low;      // 处理程序地址 [15:0]
     u16         segment;         // 代码段选择子
-    struct idt_bits bits;        // 控制位
+    struct idt_bits bits;        // 控制位（IST, type, DPL, P）
     u16         offset_middle;   // 处理程序地址 [31:16]
     u32         offset_high;     // 处理程序地址 [63:32]
     u32         reserved;        // 保留（必须为 0）
 } __attribute__((packed));
 
-// idt_bits 结构
+// arch/x86/include/asm/desc_defs.h:71-77 - IDT 控制位结构
 struct idt_bits {
-    u16     ist     : 3,    // IST 索引（0-7）
-            zero    : 5,    // 必须为 0
-            type    : 5,    // 门类型
-            dpl     : 2,    // 特权级（0-3）
-            p       : 1;    // Present
+    u16     ist     : 3,    // Interrupt Stack Table 索引（0-7，0 表示不使用）
+            zero    : 5,    // 必须为 0（保留位）
+            type    : 5,    // 门类型（0xE=Interrupt Gate, 0xF=Trap Gate）
+            dpl     : 2,    // Descriptor Privilege Level（0-3）
+            p       : 1;    // Present 位（必须为 1 表示有效）
 } __attribute__((packed));
+
+// arch/x86/include/asm/segment.h:203-205 - 内核代码段选择子
+#define GDT_ENTRY_KERNEL_CS     2
+#define __KERNEL_CS             (GDT_ENTRY_KERNEL_CS*8)  // 0x10
+
+// arch/x86/include/asm/desc_defs.h:100-102 - 门类型常量（x86-64）
+#define GATE_INTERRUPT          0xE  // Interrupt Gate（禁用中断）
+#define GATE_TRAP               0xF  // Trap Gate（不禁用中断）
 ```
 
 **示例：IDT[14]（#PF - Page Fault）**
 
-假设处理程序地址 = `0xffffffff81234567`：
+```c
+// arch/x86/kernel/idt.c:97-106 - Page Fault 处理程序的定义
+static const __initconst struct idt_data def_idts[] = {
+    // ...
+    INTG(X86_TRAP_PF,       asm_exc_page_fault),  // 向量 14：Page Fault
+    // ...
+};
+
+// arch/x86/include/asm/traps.h:19 - Page Fault 向量号常量
+#define X86_TRAP_PF     14  // Page Fault 异常
+
+// arch/x86/entry/entry_64.S:1195-1202 - Page Fault 处理程序入口（汇编）
+SYM_CODE_START(asm_exc_page_fault)
+    UNWIND_HINT_IRET_REGS offset=8              // 栈帧提示（有错误码）
+    ASM_CLAC                                     // 清除 AC 标志
+    call error_entry                             // 保存所有寄存器
+    movq %rsp, %rdi                              // 第一个参数：pt_regs 指针
+    movq ORIG_RAX(%rsp), %rsi                    // 第二个参数：错误码
+    movq %cr2, %rdx                              // 第三个参数：CR2（缺页地址）
+    call do_page_fault                           // 调用 C 函数处理
+    jmp error_return                             // 返回
+SYM_CODE_END(asm_exc_page_fault)
+
+// arch/x86/mm/fault.c:1347-1355 - Page Fault 的 C 函数实现
+void __visible noinline do_page_fault(struct pt_regs *regs,
+                                       unsigned long error_code,
+                                       unsigned long address)
+{
+    // 处理缺页异常：换入页面或触发 segfault
+    handle_page_fault(regs, error_code, address);
+}
+```
+
+**假设处理程序地址 = `0xffffffff81234567`（示例）：**
 
 ```
-+0:  0x45 0x67           ← offset_low = 0x4567
+idt_table[14] 的内存布局（16 字节）：
+
++0:  0x45 0x67           ← offset_low = 0x4567（地址 [15:0]）
 +2:  0x10 0x00           ← segment = 0x0010 (__KERNEL_CS)
 +4:  0x8E 0x00           ← bits = 0x008E
-                           ├─ IST = 0（不使用 IST）
-                           ├─ type = 0xE（Interrupt Gate）
-                           ├─ DPL = 0（Ring 0 only）
-                           └─ P = 1（Present）
-+6:  0x12 0x34           ← offset_middle = 0x1234
-+8:  0x81 0xFF 0xFF 0xFF ← offset_high = 0xFFFFFF81
-+12: 0x00 0x00 0x00 0x00 ← reserved = 0
+                           ├─ IST = 0（不使用 IST，使用当前内核栈）
+                           ├─ type = 0xE（Interrupt Gate，禁用中断）
+                           ├─ DPL = 0（Ring 0 only，只能从内核触发）
+                           └─ P = 1（Present，有效）
++6:  0x12 0x34           ← offset_middle = 0x1234（地址 [31:16]）
++8:  0x81 0xFF 0xFF 0xFF ← offset_high = 0xFFFFFF81（地址 [63:32]）
++12: 0x00 0x00 0x00 0x00 ← reserved = 0（必须为 0）
 
-处理程序地址 = 0xFFFFFF81 << 32 | 0x1234 << 16 | 0x4567
-             = 0xFFFFFFFF81234567
+处理程序地址 = offset_high << 32 | offset_middle << 16 | offset_low
+             = 0xFFFFFF81 << 32 | 0x1234 << 16 | 0x4567
+             = 0xFFFFFFFF81234567（asm_exc_page_fault 的地址）
 ```
 
 ### 3.2 IDT 的位置和加载
@@ -296,23 +412,28 @@ x86-64 模式：
 **Linux 内核中的定义：**
 
 ```c
-// arch/x86/include/asm/desc_defs.h:23-26
+// arch/x86/include/asm/desc_defs.h:23-26 - IDTR 寄存器对应的数据结构
 struct desc_ptr {
-    unsigned short size;        // IDT 表大小 - 1
-    unsigned long address;      // IDT 表的线性地址
+    unsigned short size;        // IDT 表大小 - 1（以字节为单位）
+    unsigned long address;      // IDT 表的 64 位线性地址
 } __attribute__((packed));
 ```
 
-**示例：Linux 内核的 IDT 描述符**
+**示例：Linux 内核的 IDT 描述符和表定义**
 
 ```c
-// arch/x86/kernel/idt.c:175-178
-static struct desc_ptr idt_descr __ro_after_init = {
-    .size    = IDT_TABLE_SIZE - 1,    // 4096 - 1 = 4095
-    .address = (unsigned long) idt_table,  // idt_table 数组地址
-};
+// arch/x86/kernel/idt.c:45-48 - IDT 表的实际定义（256 个 16 字节条目）
+gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
 
-// IDT_TABLE_SIZE = 256 * 16 = 4096 字节
+// arch/x86/include/asm/desc_defs.h:348 - IDT 表大小常量
+#define IDT_ENTRIES             256      // 256 个中断向量
+#define IDT_TABLE_SIZE          (IDT_ENTRIES * 16)  // 4096 字节
+
+// arch/x86/kernel/idt.c:175-178 - IDTR 描述符（用于 LIDT 指令）
+static struct desc_ptr idt_descr __ro_after_init = {
+    .size    = IDT_TABLE_SIZE - 1,              // 4095（IDTR.limit）
+    .address = (unsigned long) idt_table,       // idt_table 数组的线性地址
+};
 ```
 
 **加载 IDT：**
@@ -662,84 +783,115 @@ offset_low    = 0x4567
 ### 6.1 BIOS IVT 初始化
 
 ```c
-// seabios/src/post.c:568-582
+// seabios/src/post.c:568-582 - BIOS 启动时初始化 IVT
 static void
 ivt_init(void)
 {
     dprintf(3, "init ivt\n");
 
-    // 初始化所有异常向量（0x00-0x1F）
+    // 初始化所有异常向量（0x00-0x1F，CPU 保留的异常）
     int i;
     for (i=0; i<0x20; i++)
-        SET_IVT(i, FUNC16(entry_iret_official));
+        SET_IVT(i, FUNC16(entry_iret_official));  // 默认处理程序：直接 IRET 返回
 
-    // 初始化硬件中断向量（主 PIC：0x08-0x0F）
+    // 初始化硬件中断向量（主 PIC：IRQ0-7，映射到 0x08-0x0F）
     for (i=BIOS_HWIRQ0_VECTOR; i<BIOS_HWIRQ0_VECTOR+8; i++)
-        SET_IVT(i, FUNC16(entry_hwpic1));
+        SET_IVT(i, FUNC16(entry_hwpic1));         // 主 PIC 中断处理
 
-    // 初始化硬件中断向量（从 PIC：0x70-0x77）
+    // 初始化硬件中断向量（从 PIC：IRQ8-15，映射到 0x70-0x77）
     for (i=BIOS_HWIRQ8_VECTOR; i<BIOS_HWIRQ8_VECTOR+8; i++)
-        SET_IVT(i, FUNC16(entry_hwpic2));
+        SET_IVT(i, FUNC16(entry_hwpic2));         // 从 PIC 中断处理
+
+    // 初始化 BIOS 软件中断服务（INT 10h-1Ah）
+    // seabios/src/post.c:600-650
+    SET_IVT(0x10, FUNC16(entry_10));  // INT 10h - 视频服务
+    SET_IVT(0x13, FUNC16(entry_13));  // INT 13h - 磁盘服务
+    SET_IVT(0x15, FUNC16(entry_15));  // INT 15h - 系统服务
+    SET_IVT(0x16, FUNC16(entry_16));  // INT 16h - 键盘服务
+    SET_IVT(0x1a, FUNC16(entry_1a));  // INT 1Ah - 时钟服务
+    // ... 更多 BIOS 服务
 }
 
-// SET_IVT 宏定义
-#define SET_IVT(vector, segoff) \
-    SET_FARVAR(SEG_IVT, *(struct segoff_s *)(vector*4), segoff)
+// seabios/src/config.h:42-43 - 硬件中断向量号常量
+#define BIOS_HWIRQ0_VECTOR  0x08  // 主 PIC 起始向量（IRQ0-7）
+#define BIOS_HWIRQ8_VECTOR  0x70  // 从 PIC 起始向量（IRQ8-15）
 
-// 示例：设置 IVT[0x13]
-SET_IVT(0x13, SEGOFF(SEG_BIOS, offset_handle_13));
+// seabios/src/config.h:10 - BIOS 代码段地址
+#define SEG_BIOS            0xF000
 
-// 展开为：
-*(u16 *)(0x0000 + 0x13 * 4 + 0) = offset_handle_13;  // 偏移
-*(u16 *)(0x0000 + 0x13 * 4 + 2) = SEG_BIOS;          // 段
+// SET_IVT 宏展开示例（以 INT 13h 为例）
+SET_IVT(0x13, FUNC16(entry_13));
+
+// 第一层展开（FUNC16）：
+SET_IVT(0x13, SEGOFF(SEG_BIOS, (u32)entry_13 - BUILD_BIOS_ADDR));
+
+// 第二层展开（SET_IVT）：
+SET_FARVAR(SEG_IVT, *(struct segoff_s *)(0x13*4),
+           SEGOFF(0xF000, offset_of_entry_13));
+
+// 最终效果：写入物理地址 0x4C（0x13 * 4）
+*(u16 *)(0x0000 + 0x13 * 4 + 0) = offset_of_entry_13;  // 偏移地址
+*(u16 *)(0x0000 + 0x13 * 4 + 2) = 0xF000;              // 段地址 SEG_BIOS
 ```
 
 **特点**：
-- **简单直接**：直接写入固定地址（0x0000）
-- **无结构复杂性**：只是段:偏移地址
+- **简单直接**：直接写入固定物理地址（0x0000）
+- **无结构复杂性**：只是段:偏移地址（4 字节）
 - **无权限设置**：实模式无特权级概念
+- **批量初始化**：循环设置异常和硬件中断向量
 
 ### 6.2 Linux Kernel IDT 初始化
 
 ```c
-// arch/x86/kernel/idt.c:317-331
+// arch/x86/kernel/idt.c:317-331 - 早期 IDT 初始化（内核启动时）
 void __init idt_setup_early_handler(void)
 {
     int i;
 
-    // 设置前 32 个异常向量
+    // 设置前 32 个异常向量（0-31，CPU 定义的异常）
     for (i = 0; i < NUM_EXCEPTION_VECTORS; i++)
         set_intr_gate(i, early_idt_handler_array[i]);
 
-    // 加载新的 IDT
+    // 加载新的 IDT（通过 LIDT 指令）
     load_idt(&idt_descr);
 }
 
-// set_intr_gate 实现
+// arch/x86/kernel/idt.c:59 - 异常向量数量常量
+#define NUM_EXCEPTION_VECTORS   32  // 0-31 是 CPU 定义的异常
+
+// arch/x86/kernel/idt.c:237-244 - 设置中断门（Interrupt Gate）
 static __init void set_intr_gate(unsigned int n, const void *addr)
 {
     struct idt_data data;
 
-    // 初始化 idt_data 结构
+    // 初始化 idt_data 临时结构
     init_idt_data(&data, n, addr);
 
-    // 写入 IDT 表
+    // 将 idt_data 转换为 gate_desc 并写入 idt_table
     idt_setup_from_table(idt_table, &data, 1, false);
 }
 
-// init_idt_data 宏
-#define init_idt_data(data, n, addr)            \
-do {                                             \
-    (data)->vector   = (n);                      \
-    (data)->bits.ist = DEFAULT_STACK;            \  // IST = 0
-    (data)->bits.type = GATE_INTERRUPT;          \  // 0xE
-    (data)->bits.dpl  = DPL0;                    \  // 特权级 0
-    (data)->bits.p    = 1;                       \  // Present
-    (data)->addr      = (addr);                  \
-    (data)->segment   = __KERNEL_CS;             \  // 内核代码段
+// arch/x86/kernel/idt.c:95-102 - 初始化 idt_data 结构的宏
+#define init_idt_data(data, n, addr)                \
+do {                                                 \
+    (data)->vector   = (n);                          /* 向量号 */        \
+    (data)->bits.ist = DEFAULT_STACK;                /* IST = 0（不使用独立栈） */  \
+    (data)->bits.type = GATE_INTERRUPT;              /* 0xE（Interrupt Gate，禁用中断） */  \
+    (data)->bits.dpl  = DPL0;                        /* 特权级 0（只能从内核调用） */  \
+    (data)->bits.p    = 1;                           /* Present = 1（有效） */  \
+    (data)->addr      = (addr);                      /* 处理程序地址 */  \
+    (data)->segment   = __KERNEL_CS;                 /* 内核代码段选择子 0x10 */  \
 } while (0)
 
-// idt_setup_from_table 实现
+// arch/x86/include/asm/desc_defs.h:105-112 - idt_data 中间数据结构
+struct idt_data {
+    unsigned int    vector;      // 中断向量号（0-255）
+    unsigned int    segment;     // 代码段选择子
+    struct idt_bits bits;        // 控制位（IST, type, DPL, P）
+    const void      *addr;       // 处理程序地址
+};
+
+// arch/x86/kernel/idt.c:182-192 - 从 idt_data 构建 gate_desc 并写入 IDT
 static __init void
 idt_setup_from_table(gate_desc *idt, const struct idt_data *t,
                      int size, bool sys)
@@ -747,41 +899,75 @@ idt_setup_from_table(gate_desc *idt, const struct idt_data *t,
     gate_desc desc;
 
     for (; size > 0; t++, size--) {
-        // 构建门描述符
+        // 将 idt_data 转换为 gate_desc（16 字节门描述符）
         idt_init_desc(&desc, t);
 
-        // 写入 IDT
+        // 写入 IDT 表（memcpy）
         write_idt_entry(idt, t->vector, &desc);
     }
 }
 
-// idt_init_desc 实现
+// arch/x86/kernel/idt.c:164-176 - 构建 16 字节门描述符
 static inline void idt_init_desc(gate_desc *gate,
                                   const struct idt_data *d)
 {
-    unsigned long addr = (unsigned long) d->addr;
+    unsigned long addr = (unsigned long) d->addr;  // 64 位处理程序地址
 
-    gate->offset_low    = (u16) addr;
-    gate->segment       = (u16) d->segment;
-    gate->bits          = d->bits;
-    gate->offset_middle = (u16) (addr >> 16);
-    gate->offset_high   = (u32) (addr >> 32);
-    gate->reserved      = 0;
+    gate->offset_low    = (u16) addr;              // 地址 [15:0]
+    gate->segment       = (u16) d->segment;        // 段选择子（0x10）
+    gate->bits          = d->bits;                 // 控制位（IST, type, DPL, P）
+    gate->offset_middle = (u16) (addr >> 16);      // 地址 [31:16]
+    gate->offset_high   = (u32) (addr >> 32);      // 地址 [63:32]
+    gate->reserved      = 0;                       // 保留字段必须为 0
 }
 
-// write_idt_entry 实现
+// arch/x86/include/asm/desc.h:146-149 - 写入 IDT 条目
 static inline void write_idt_entry(gate_desc *idt, int entry,
                                     const gate_desc *gate)
 {
-    memcpy(&idt[entry], gate, sizeof(*gate));
+    memcpy(&idt[entry], gate, sizeof(*gate));  // 复制 16 字节到 idt_table[entry]
+}
+
+// arch/x86/kernel/idt.c:405-409 - 加载 IDT（通过 LIDT 指令）
+static inline void load_idt(const struct desc_ptr *dtr)
+{
+    asm volatile("lidt %0"::"m" (dtr->size));  // LIDT 指令：加载 IDTR 寄存器
 }
 ```
 
+**early_idt_handler_array 的定义：**
+
+```c
+// arch/x86/kernel/head_64.S:357-365 - 早期异常处理程序数组（汇编代码）
+ENTRY(early_idt_handler_array)
+    i = 0
+    .rept NUM_EXCEPTION_VECTORS  // 重复 32 次（0-31 号异常）
+    .if ((EXCEPTION_ERRCODE_MASK >> i) & 1) == 0  // 判断是否有错误码
+        UNWIND_HINT_IRET_REGS                      // 无错误码：6 个寄存器（SS,RSP,RFLAGS,CS,RIP）
+        pushq $0                                   // 手动压入假错误码（对齐栈帧）
+    .else
+        UNWIND_HINT_IRET_REGS offset=8             // 有错误码：7 个寄存器（+Error Code）
+    .endif
+    pushq $i                                       // 压入向量号
+    jmp early_idt_handler_common                   // 跳转到通用处理程序
+    i = i + 1
+    .endr
+END(early_idt_handler_array)
+
+// 结果：生成 32 个函数入口，每个入口 9-12 字节（根据是否有错误码）
+// 向量  0 (#DE): early_idt_handler_array[0]  → pushq $0; pushq $0; jmp ...
+// 向量  8 (#DF): early_idt_handler_array[8]  → pushq $8; jmp ...（有错误码）
+// 向量 14 (#PF): early_idt_handler_array[14] → pushq $14; jmp ...（有错误码）
+// ...
+```
+
 **特点**：
-- **复杂结构**：需要构建 16 字节的门描述符
-- **多层抽象**：idt_data → gate_desc → idt_table
-- **权限管理**：设置 DPL, type, P 等控制位
-- **类型安全**：区分 Interrupt Gate 和 Trap Gate
+- **复杂结构**：需要构建 16 字节的门描述符（offset_low/middle/high, segment, bits, reserved）
+- **多层抽象**：idt_data（中间结构）→ gate_desc（门描述符）→ idt_table（IDT 表）
+- **权限管理**：设置 DPL=0, type=0xE, P=1 等控制位
+- **类型安全**：区分 Interrupt Gate（0xE）和 Trap Gate（0xF）
+- **批量初始化**：循环设置 32 个异常向量，每个向量对应 early_idt_handler_array 中的处理程序
+- **汇编生成**：early_idt_handler_array 是汇编代码中用 .rept 指令生成的 32 个函数入口数组
 
 ---
 
@@ -960,9 +1146,9 @@ x86-64 CPU 在长模式下：
 
 ---
 
-## 9. 总结
+## 10. 总结
 
-### 9.1 核心差异
+### 10.1 核心差异
 
 **BIOS IVT（实模式）**：
 - **简单**：4 字节条目，直接段:偏移地址
@@ -978,7 +1164,7 @@ x86-64 CPU 在长模式下：
 - **强大**：64 位地址空间，IST 独立栈
 - **适用**：现代操作系统
 
-### 9.2 演进必然性
+### 10.2 演进必然性
 
 ```
 8086（1978）→ IVT：实模式，简单足够
@@ -990,7 +1176,7 @@ x86-64 CPU 在长模式下：
 x86-64（2003）→ IDT：长模式，强制要求
 ```
 
-### 9.3 关键要点
+### 10.3 关键要点
 
 1. **数据结构完全不同**：
    - IVT：4 字节简单地址
@@ -1010,16 +1196,16 @@ x86-64（2003）→ IDT：长模式，强制要求
 
 ---
 
-## 10. 参考文献
+## 11. 参考文献
 
-### 10.1 Intel 手册
+### 11.1 Intel 手册
 
 1. **Intel 64 and IA-32 Architectures Software Developer's Manual**
    - Volume 3A, Chapter 6: Interrupt and Exception Handling
    - Volume 3A, Section 6.10: Interrupt Descriptor Table (IDT)
    - Volume 3A, Section 6.14: Exception and Interrupt Handling in 64-Bit Mode
 
-### 10.2 Linux 内核源代码
+### 11.2 Linux 内核源代码
 
 2. **arch/x86/kernel/idt.c**
    - `idt_table` 定义
@@ -1033,24 +1219,42 @@ x86-64（2003）→ IDT：长模式，强制要求
 4. **arch/x86/boot/compressed/idt_64.c**
    - `bringup_idt_table` 定义
 
-### 10.3 SeaBIOS 源代码
+5. **arch/x86/kernel/head_64.S**
+   - `early_idt_handler_array` 定义
 
-5. **seabios/src/post.c**
+6. **arch/x86/entry/entry_64.S**
+   - 异常处理程序入口（如 `asm_exc_page_fault`）
+
+7. **arch/x86/mm/fault.c**
+   - Page Fault C 实现
+
+### 11.3 SeaBIOS 源代码
+
+8. **seabios/src/post.c**
    - `ivt_init()` 函数
 
-6. **seabios/src/util.h**
+9. **seabios/src/util.h**
    - `SET_IVT` 宏定义
 
-### 10.4 相关文档
+10. **seabios/src/types.h**
+    - `struct segoff_s` 定义
 
-7. [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)
-   - Linux IDT 表的演进流程
+11. **seabios/src/romlayout.S**
+    - BIOS 中断服务入口（如 `entry_13`）
 
-8. [IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md)
-   - `idt_setup_early_handler()` 函数详细分析
+12. **seabios/src/block.c**
+    - INT 13h 磁盘服务 C 实现
 
-9. [X86_64_TSS_AND_IST.md](X86_64_TSS_AND_IST.md)
-   - TSS 和 IST 机制详解
+### 11.4 相关文档
+
+13. [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)
+    - Linux IDT 表的演进流程
+
+14. [IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md)
+    - `idt_setup_early_handler()` 函数详细分析
+
+15. [X86_64_TSS_AND_IST.md](X86_64_TSS_AND_IST.md)
+    - TSS 和 IST 机制详解
 
 ---
 
