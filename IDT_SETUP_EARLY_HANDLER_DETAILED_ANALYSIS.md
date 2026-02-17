@@ -375,6 +375,9 @@ struct gate_desc {
 } __attribute__((packed));
 ```
 
+> 📖 **Intel SDM 规范符合性验证**：`gate_desc` 结构是否完全符合 Intel SDM 64 位门描述符规范？
+> 逐字节对比分析请参见：[LINUX_KERNEL_IDT_INTEL_SDM_COMPLIANCE.md](./LINUX_KERNEL_IDT_INTEL_SDM_COMPLIANCE.md)
+
 **idt_bits 结构**：
 
 ```c
