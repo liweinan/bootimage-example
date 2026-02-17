@@ -1,15 +1,21 @@
 # idt_setup_early_handler() 函数详细分析
 
-**版本**: 1.3
+**版本**: 2.0
 **日期**: 2026-02-17
 **作者**: Linux 内核启动文档项目
 **更新内容**:
+- v2.0: 文档模块化重构，将详细内容拆分到独立文档（减少 40% 篇幅）
+  - 完整向量表 → [IDT_COMPLETE_VECTOR_TABLE.md](./IDT_COMPLETE_VECTOR_TABLE.md)
+  - 数据结构详解 → [IDT_DATA_STRUCTURES_RELATIONSHIP.md](./IDT_DATA_STRUCTURES_RELATIONSHIP.md)
+  - 异常处理流程 → [IDT_EXCEPTION_HANDLING_DETAILS.md](./IDT_EXCEPTION_HANDLING_DETAILS.md)
 - v1.3: 完成全文重组，所有章节按执行顺序组织（编译→写入→加载→使用），消除重复内容
 - v1.2: 添加执行顺序总览和关键概念澄清（1.0 节），明确区分写入 vs 加载操作
 - v1.1: 添加核心数据结构关系概览（2.0 节），优化三个核心变量的关系说明
 - v1.0: 初始版本
 
-> 📚 **文档导航**: [返回总索引](DOCUMENT_INDEX.md) | [IDT 演进](LINUX_KERNEL_IDT_EVOLUTION.md) | [内核启动](LINUX_KERNEL_INIT.md)
+> 📚 **文档导航**:
+> - [返回总索引](DOCUMENT_INDEX.md) | [IDT 演进](LINUX_KERNEL_IDT_EVOLUTION.md) | [内核启动](LINUX_KERNEL_INIT.md)
+> - **配套详细文档**: [完整向量表](./IDT_COMPLETE_VECTOR_TABLE.md) | [数据结构详解](./IDT_DATA_STRUCTURES_RELATIONSHIP.md) | [异常处理流程](./IDT_EXCEPTION_HANDLING_DETAILS.md)
 
 ---
 
@@ -432,146 +438,20 @@ x86 硬件规定：IDTR.limit = 表的**最大可访问偏移量** = 字节数 -
 - 编译时可写（用于初始化）
 - 运行时初始化完成后设置为只读（安全加固）
 
-### 2.4 idt_descr 和 idt_table 的关系详解
+### 2.4 idt_descr 和 idt_table 的关系
 
-#### 核心关系：指针 vs 数据
+**核心关系**：
+- `idt_descr`（10 字节）：存储 idt_table 的地址和大小（元信息）
+- `idt_table`（4096 字节）：存储 256 个门描述符（实际数据）
+- `lidt` 指令读取 idt_descr，将其内容加载到 IDTR 寄存器
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  idt_descr（10 字节的"元信息"）                                  │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ struct desc_ptr {                                         │   │
-│  │     unsigned short size;     // 4095                     │   │
-│  │     unsigned long address;   // &idt_table               │   │
-│  │ };                                                        │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│  作用：告诉 CPU "IDT 表在哪里，有多大"                           │
-│  类比：图书馆的地址和规模信息                                     │
-└─────────────────────────────────────────────────────────────────┘
-                           │
-                           │ .address 字段指向
-                           ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  idt_table[256]（4096 字节的"实际数据"）                         │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ [0]   = gate_desc { offset, segment, bits, ... }  (16B) │   │
-│  │ [1]   = gate_desc { offset, segment, bits, ... }  (16B) │   │
-│  │ [2]   = gate_desc { offset, segment, bits, ... }  (16B) │   │
-│  │ ...                                                       │   │
-│  │ [255] = gate_desc { offset, segment, bits, ... }  (16B) │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│  作用：存储 256 个中断/异常的实际处理程序信息                     │
-│  类比：图书馆里的实际书架和书籍                                   │
-└─────────────────────────────────────────────────────────────────┘
-```
+**为什么需要两个结构？**
+- x86 `lidt` 指令要求 10 字节操作数（2 字节 limit + 8 字节 base）
+- idt_descr 作为中间层，指向实际的 idt_table
+- 允许灵活切换不同的 IDT 表（如虚拟化场景）
 
-#### 详细对比
-
-| 对比项 | idt_table | idt_descr |
-|--------|----------|-----------|
-| **数据类型** | `gate_desc[256]` | `struct desc_ptr` |
-| **大小** | 4096 字节 (256 × 16) | 10 字节 (2 + 8) |
-| **作用** | 存储 256 个门描述符（实际数据） | 存储 idt_table 的地址和大小（元信息） |
-| **内容** | 256 个异常/中断处理程序的详细信息 | `.size = 4095`, `.address = &idt_table` |
-| **被谁使用** | CPU 硬件（通过 IDTR 访问） | `lidt` 指令（用于加载 IDTR） |
-| **可修改性** | 运行时可写入（后期设为只读） | 编译时初始化（后期设为只读） |
-| **类比** | 图书馆的书架和书籍 | 图书馆的地址和规模 |
-
-#### 内存布局示例
-
-假设 `idt_table` 的地址是 `0xffffffff82000000`：
-
-```
-内存地址                    内容
------------------------------------------------------------------
-idt_descr 所在位置（假设 0xffffffff81fff000）:
-  +0x00  0x0F 0xFF           ← size = 4095 (2 字节)
-  +0x02  0x00 0x00 0x20 0x82 ← address = 0xffffffff82000000 (8 字节)
-         0xFF 0xFF 0xFF 0xFF
-
------------------------------------------------------------------
-
-idt_table 所在位置（0xffffffff82000000）:
-  +0x0000  [16 字节]  ← idt_table[0]   (向量 0: #DE)
-  +0x0010  [16 字节]  ← idt_table[1]   (向量 1: #DB)
-  +0x0020  [16 字节]  ← idt_table[2]   (向量 2: #NMI)
-  ...
-  +0x0E00  [16 字节]  ← idt_table[14]  (向量 14: #PF)
-  ...
-  +0x0FF0  [16 字节]  ← idt_table[255] (向量 255: SPURIOUS_APIC)
-```
-
-#### 使用流程
-
-```
-1. 编译时：
-   idt_descr.address = &idt_table;  // 指向 idt_table
-   idt_descr.size = 4095;            // idt_table 的大小 - 1
-
-2. 运行时写入：
-   write_idt_entry(idt_table, 14, &desc);  // 直接写入 idt_table[14]
-
-3. 加载到 CPU：
-   load_idt(&idt_descr);  // 将 idt_descr 的内容加载到 IDTR
-
-   CPU 执行：lidt (idt_descr)
-   结果：
-     IDTR.limit = idt_descr.size = 4095
-     IDTR.base  = idt_descr.address = &idt_table
-
-4. CPU 使用：
-   异常发生 → CPU 读取 IDTR.base → 找到 idt_table → 读取对应条目
-```
-
-#### 为什么需要 idt_descr？
-
-**不能直接加载 idt_table 的原因**：
-
-1. **x86 指令限制**：
-   - `lidt` 指令要求一个 10 字节的内存操作数
-   - 格式：2 字节 limit + 8 字节 base address
-   - 不能直接传递 idt_table 数组
-
-2. **分离关注点**：
-   - `idt_table` = 数据（可以被修改、替换）
-   - `idt_descr` = 元信息（指向数据的位置）
-   - 允许在不同场景下使用不同的 IDT 表
-
-3. **CPU 硬件设计**：
-   - IDTR 寄存器本身就是 10 字节（2 字节 limit + 8 字节 base）
-   - `lidt` 指令就是为了填充 IDTR 而设计的
-
-#### 完整关系图
-
-```
-编译阶段完成的准备：
-
-┌─────────────────────────────────────────────────────────┐
-│ early_idt_handler_array[32]                              │
-│ ├─ [0] = 向量 0 的汇编桩（地址如 0xffffffff81002a00）    │
-│ ├─ [1] = 向量 1 的汇编桩                                 │
-│ └─ [31] = 向量 31 的汇编桩                               │
-└─────────────────────────────────────────────────────────┘
-                     ↓ 运行时写入
-┌─────────────────────────────────────────────────────────┐
-│ idt_table[256] ⟸ 实际数据（4096 字节）                   │
-│ ├─ [0..255] = 全部为 0（BSS 段，等待填充）               │
-└─────────────────────────────────────────────────────────┘
-                     ↑ .address 指向
-┌─────────────────────────────────────────────────────────┐
-│ idt_descr ⟸ 元信息（10 字节）                            │
-│ ├─ .size = 4095                                          │
-│ └─ .address = &idt_table                                 │
-└─────────────────────────────────────────────────────────┘
-                     ↓ lidt 指令读取
-┌─────────────────────────────────────────────────────────┐
-│ IDTR 寄存器（CPU 硬件，10 字节）                          │
-│ ├─ .limit = 4095（从 idt_descr.size 复制）               │
-│ └─ .base = &idt_table（从 idt_descr.address 复制）       │
-└─────────────────────────────────────────────────────────┘
-```
+> 📖 **详细说明**：完整的数据结构关系图、内存布局示例、使用流程和十六进制数据格式请参见：
+> [IDT_DATA_STRUCTURES_RELATIONSHIP.md](./IDT_DATA_STRUCTURES_RELATIONSHIP.md)
 
 ---
 
@@ -700,104 +580,16 @@ idt_setup_from_table(gate_desc *idt, const struct idt_data *t, int size, bool sy
 1. 调用 `idt_init_desc()` 构建门描述符
 2. 调用 `write_idt_entry()` 写入 idt_table
 
-**实际写入的数据**：
+**写入的数据格式**：
 
-每次调用 `idt_setup_from_table()` 会向 `idt_table[i]` 写入 **16 字节**的门描述符数据：
+每个门描述符占 **16 字节**，包含：
+- offset_low/middle/high（8 字节总计）：处理程序地址的三部分
+- segment（2 字节）：代码段选择子（__KERNEL_CS = 0x0010）
+- bits（2 字节）：IST、type、DPL、P 等标志位（early stage 为 0x8E00）
+- reserved（4 字节）：必须为 0
 
-```
-idt_table 内存布局（每个条目 16 字节）：
-
-偏移   字段                大小    内容示例（向量 14, #PF）
------  -----------------  ------  ----------------------------------
-+0     offset_low          2 字节  0x2a80 （处理程序地址低 16 位）
-+2     segment             2 字节  0x0010 （__KERNEL_CS）
-+4     bits (IST/type/DPL) 2 字节  0x8E00 （详见下方位字段分解）
-+6     offset_middle       2 字节  0x8100 （处理程序地址中 16 位）
-+8     offset_high         4 字节  0xffffffff （处理程序地址高 32 位）
-+12    reserved            4 字节  0x00000000 （必须为 0）
-
-总计：16 字节
-```
-
-**bits 字段位分解**（偏移 +4 的 2 字节 = 0x8E00）：
-
-```
-bits 的实际值: 0x8E00 (小端序存储)
-
-二进制表示: 1000 1110 0000 0000
-            ││││ ││││ │││└─┴─ IST[2:0]  = 000 (不使用 IST)
-            ││││ ││││ ││└──── zero[4:3] = 00  (必须为 0)
-            ││││ ││││ │└───── zero[2:0] = 000 (必须为 0)
-            ││││ │││└─┴────── type[4:0] = 01110 (0xE, Interrupt Gate)
-            ││││ ││└───────── DPL[1:0]  = 00 (Ring 0)
-            ││││ │└────────── P          = 1  (Present)
-            ││││ └─────────── (高字节的高 7 位未使用)
-            │││└─────────────
-            ││└──────────────
-            │└───────────────
-            └────────────────
-
-关键值：
-- type = 0xE (14): Interrupt Gate（中断门）
-- DPL  = 0:       Ring 0 特权级（内核态）
-- P    = 1:       Present（有效）
-- IST  = 0:       不使用 IST（普通内核栈）
-```
-
-**完整的 16 字节十六进制数据示例**：
-
-假设 `early_idt_handler_array[14]` 的地址是 `0xffffffff81002a80`：
-
-```
-idt_table[14] 的 16 字节内容（小端序）：
-
-地址偏移  +0  +1  +2  +3  +4  +5  +6  +7  +8  +9  +A  +B  +C  +D  +E  +F
-数据     80  2A  10  00  00  8E  00  81  FF  FF  FF  FF  00  00  00  00
-         └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘ └─────┬─────┘ └─────┬─────┘
-         offset  segment  bits   offset    offset_high   reserved
-          _low             (IST)  _middle
-                          (type)
-                          (DPL)
-                           (P)
-
-字段解释：
-[+0..+1] 0x2A80       = offset_low    (地址 [15:0])
-[+2..+3] 0x0010       = segment       (__KERNEL_CS)
-[+4..+5] 0x8E00       = bits          (IST=0, type=0xE, DPL=0, P=1)
-[+6..+7] 0x8100       = offset_middle (地址 [31:16])
-[+8..+B] 0xFFFFFFFF   = offset_high   (地址 [63:32])
-[+C..+F] 0x00000000   = reserved      (必须为 0)
-
-完整地址重组：
-0xFFFFFFFF (高32位) | 0x8100 (中16位) | 0x2A80 (低16位)
-= 0xFFFFFFFF81002A80 ← 这就是 early_idt_handler_array[14] 的地址
-```
-
-**多个向量的实际数据对比**：
-
-```
-向量 0 (#DE): idt_table[0] = 16 字节
-  处理程序地址: 0xffffffff81002a00
-  80 2A 10 00 00 8E 00 81 FF FF FF FF 00 00 00 00
-
-向量 1 (#DB): idt_table[1] = 16 字节
-  处理程序地址: 0xffffffff81002a0c (偏移 +12 字节)
-  0C 2A 10 00 00 8E 0C 81 FF FF FF FF 00 00 00 00
-
-向量 14 (#PF): idt_table[14] = 16 字节
-  处理程序地址: 0xffffffff81002a80
-  80 2A 10 00 00 8E 00 81 FF FF FF FF 00 00 00 00
-
-向量 31: idt_table[31] = 16 字节
-  处理程序地址: 0xffffffff81002b40
-  40 2B 10 00 00 8E 40 81 FF FF FF FF 00 00 00 00
-
-所有向量的共同点：
-- segment 都是 0x0010 (__KERNEL_CS)
-- bits 都是 0x8E00 (Interrupt Gate, DPL=0, P=1)
-- reserved 都是 0x00000000
-- 只有 offset 字段不同（指向不同的处理程序）
-```
+> 📖 **十六进制数据详解**：完整的 16 字节内存布局、bits 字段位分解、多个向量的数据对比请参见：
+> [IDT_DATA_STRUCTURES_RELATIONSHIP.md](./IDT_DATA_STRUCTURES_RELATIONSHIP.md)
 
 ### 3.5 idt_init_desc() - 构建门描述符
 
@@ -906,327 +698,20 @@ write_idt_entry(idt_table, i, &desc)  ← 写入 idt_table[i]
 idt_table[i] = desc  ← 内存写入完成
 ```
 
-### 3.9 完整的 IDT 表内容清单（256 个向量）
+### 3.9 完整的 IDT 表内容（256 个向量）
 
-**重要说明**：`idt_setup_early_handler()` 只是 IDT 初始化的**第一步**，后续还有多个阶段会继续填充和覆盖 idt_table 的内容。
+**关键概念**：`idt_setup_early_handler()` 只是第一步，填充了向量 0-31。完整的 256 向量 IDT 表需要多个阶段逐步填充：
 
-#### 初始化阶段时间线
+1. **阶段 1** (早期)：向量 0-31 → `early_idt_handler_array`
+2. **阶段 2-4** (trap_init)：覆盖向量 0-31 → 具名处理程序（如 `asm_exc_page_fault`）
+3. **阶段 5** (后期)：向量 32-255 → IRQ、APIC、系统向量
 
-```
-阶段 0：编译后状态
-  idt_table[0..255] = 全部为 0（BSS 段）
+**为什么要填充两次？**
+- 第一次（emergency handlers）：简单桩代码，无需 TSS/IST 支持
+- 第二次（production handlers）：完整功能处理程序，使用 IST 专用栈
 
-阶段 1：idt_setup_early_handler() [最早期，x86_64_start_kernel]
-  └─ 填充向量 0-31 → early_idt_handler_array[0..31]
-
-阶段 2：idt_setup_early_traps() [trap_init() 开始]
-  └─ 覆盖部分向量：#DB(1), #BP(3), #PF(14, 仅 x86-32), #VE(20)
-
-阶段 3：idt_setup_early_pf() [仅 x86-64]
-  └─ 覆盖向量 14 (#PF) → asm_exc_page_fault
-
-阶段 4：idt_setup_traps() [trap_init() 中期]
-  └─ 覆盖所有异常向量（0-31）+ INT 0x80
-
-阶段 5：idt_setup_apic_and_irq_gates() [trap_init() 完成]
-  └─ 填充向量 32-255（IRQ、APIC、系统向量）
-```
-
-#### ❓ 为什么前 32 个向量要填充两次？
-
-**阶段 1 vs 阶段 4 的关键区别**：
-
-| 对比项 | 阶段 1：idt_setup_early_handler() | 阶段 4：idt_setup_traps() |
-|--------|----------------------------------|--------------------------|
-| **调用时机** | 极早期（x86_64_start_kernel） | trap_init()（cpu_init() 之后） |
-| **处理程序** | early_idt_handler_array[] | 各异常专用处理程序（asm_exc_*） |
-| **处理方式** | 所有异常 → early_idt_handler_common | 每个异常有独立处理程序 |
-| **IST 支持** | ❌ 不支持（TSS 未初始化） | ✅ 支持（#DF, #NMI, #MC 等使用 IST） |
-| **功能** | 临时应急，仅支持基本异常处理 | 完整功能，支持复杂异常处理 |
-| **主要目的** | 处理 #PF 用于早期页表建立 | 正式的生产环境异常处理 |
-
-**为什么需要两次？**
-
-1. **阶段 1：临时应急（"保命"）**
-   - **时间点**：内核刚启动，很多子系统还未初始化
-   - **限制条件**：
-     - TSS（Task State Segment）未建立 → 无法使用 IST
-     - Per-CPU 数据结构未准备好
-     - 只能使用默认内核栈
-   - **关键需求**：必须能处理 #PF（缺页异常）
-     - 早期页表是动态建立的
-     - 访问未映射的内存 → #PF → early_make_pgtable() 建立映射
-   - **处理程序特点**：
-     ```c
-     // 所有异常都跳转到这里
-     early_idt_handler_common:
-         保存寄存器
-         调用 do_early_exception(regs, trapnr)
-         恢复寄存器
-         iret
-
-     do_early_exception():
-         if (trapnr == #PF)
-             early_make_pgtable()  // 动态建立页表
-         else
-             early_fixup_exception() // 或 panic
-     ```
-
-2. **阶段 4：正式上岗（"完整功能"）**
-   - **时间点**：cpu_init() 完成后，TSS、IST 都已设置好
-   - **完整功能**：
-     - 可以使用 IST（Interrupt Stack Table）
-     - 每个异常有专门的处理程序
-     - 支持复杂的错误恢复、信号传递、调试等
-   - **关键改进**：
-     ```c
-     // 每个异常有独立入口
-     asm_exc_page_fault:      // #PF 专用处理
-         PUSH_AND_CLEAR_REGS
-         call exc_page_fault   // C 函数
-             handle_page_fault()
-             do_user_addr_fault()
-             ...复杂的页错误处理...
-         POP_REGS
-         iret
-
-     asm_exc_double_fault:    // #DF 使用 IST3
-         使用独立的 IST 栈（防止栈溢出导致的双重错误）
-         call exc_double_fault
-             panic("Double Fault")
-
-     asm_exc_nmi:             // #NMI 使用 IST2
-         使用独立的 IST 栈（防止被中断打断）
-         call exc_nmi
-             ...NMI 处理...
-     ```
-
-**渐进式初始化的必要性**：
-
-```
-内核启动早期状态：
-  ✅ 基本 C 运行环境（栈、BSS 段）
-  ✅ early_idt_handler_array 汇编代码
-  ❌ TSS 未初始化
-  ❌ IST 不可用
-  ❌ Per-CPU 数据未准备
-  ❌ 异常处理子系统未初始化
-
-         ↓ idt_setup_early_handler()
-         ↓ 使用简单处理程序
-         ↓
-         ↓ 内核继续初始化...
-         ↓ cpu_init() 设置 TSS/IST
-         ↓ 各种子系统初始化
-         ↓
-         ↓ idt_setup_traps()
-         ↓ 切换到完整处理程序
-
-trap_init() 完成后：
-  ✅ TSS 已初始化
-  ✅ IST 栈已设置
-  ✅ Per-CPU 数据已准备
-  ✅ 异常处理子系统已就绪
-  ✅ 可以使用复杂的异常处理逻辑
-```
-
-**代码证据**：
-
-```c
-// arch/x86/kernel/head64.c
-void __init x86_64_start_kernel(char *real_mode_data)
-{
-    // 极早期：只有基本环境
-    kasan_early_init();
-    __native_tlb_flush_global(...);
-
-    idt_setup_early_handler();  // ← 阶段 1：临时应急
-
-    // 此时 TSS 还未初始化，不能使用 IST！
-    tdx_early_init();
-    copy_bootdata(__va(real_mode_data));
-    // ... 继续初始化 ...
-}
-
-// arch/x86/kernel/traps.c
-void __init trap_init(void)
-{
-    // 此时已经过了 cpu_init()，TSS/IST 已设置好
-
-    idt_setup_traps();  // ← 阶段 4：正式上岗
-
-    // 替换所有异常向量，使用完整功能处理程序
-    // 现在可以安全地使用 IST 了
-
-    idt_setup_apic_and_irq_gates();
-    // ...
-}
-```
-
-**总结**：这是典型的"先有鸡还是先有蛋"问题的解决方案——渐进式初始化：
-1. 先用简单的处理程序"保命"（处理必需的 #PF）
-2. 等环境准备好后，换上完整功能的处理程序
-
-#### 完整向量表（按初始化阶段分组）
-
-**向量 0-31：CPU 异常（最终由 idt_setup_traps 设置）**
-
-| 向量 | 助记符 | 异常名称 | 处理程序 | 门类型 | IST | DPL |
-|------|-------|---------|---------|--------|-----|-----|
-| 0 | #DE | Divide Error | `asm_exc_divide_error` | INT | 0 | 0 |
-| 1 | #DB | Debug | `asm_exc_debug` | INT | IST1 | 0 |
-| 2 | #NMI | NMI | `asm_exc_nmi` | INT | IST2 | 0 |
-| 3 | #BP | Breakpoint | `asm_exc_int3` | INT | 0 | **3** |
-| 4 | #OF | Overflow | `asm_exc_overflow` | INT | 0 | **3** |
-| 5 | #BR | Bound Range | `asm_exc_bounds` | INT | 0 | 0 |
-| 6 | #UD | Invalid Opcode | `asm_exc_invalid_op` | INT | 0 | 0 |
-| 7 | #NM | Device Not Available | `asm_exc_device_not_available` | INT | 0 | 0 |
-| 8 | #DF | Double Fault | `asm_exc_double_fault` (64位) / TSS (32位) | INT/TASK | IST3 | 0 |
-| 9 | - | Coprocessor Overrun | `asm_exc_coproc_segment_overrun` | INT | 0 | 0 |
-| 10 | #TS | Invalid TSS | `asm_exc_invalid_tss` | INT | 0 | 0 |
-| 11 | #NP | Segment Not Present | `asm_exc_segment_not_present` | INT | 0 | 0 |
-| 12 | #SS | Stack Fault | `asm_exc_stack_segment` | INT | 0 | 0 |
-| 13 | #GP | General Protection | `asm_exc_general_protection` | INT | 0 | 0 |
-| 14 | #PF | Page Fault | `asm_exc_page_fault` | INT | 0 | 0 |
-| 15 | - | Spurious | `asm_exc_spurious_interrupt_bug` | INT | 0 | 0 |
-| 16 | #MF | x87 FPU Error | `asm_exc_coprocessor_error` | INT | 0 | 0 |
-| 17 | #AC | Alignment Check | `asm_exc_alignment_check` | INT | 0 | 0 |
-| 18 | #MC | Machine Check | `asm_exc_machine_check` | INT | IST4 | 0 |
-| 19 | #XF | SIMD Exception | `asm_exc_simd_coprocessor_error` | INT | 0 | 0 |
-| 20 | #VE | Virtualization | `asm_exc_virtualization_exception` | INT | 0 | 0 |
-| 21 | #CP | Control Protection | `asm_exc_control_protection` | INT | 0 | 0 |
-| 22-28 | - | Reserved | (未使用) | - | - | - |
-| 29 | #VC | VMM Communication | `asm_exc_vmm_communication` | INT | IST5 | 0 |
-| 30 | - | Reserved | (未使用) | - | - | - |
-| 31 | - | Reserved | (未使用) | - | - | - |
-
-**向量 32-127：设备中断（由 idt_setup_apic_and_irq_gates 设置）**
-
-| 向量范围 | 用途 | 处理程序 | 说明 |
-|---------|------|---------|------|
-| 32 (0x20) | IRQ 0 起始 | `irq_entries_start + 0` | 8259A PIC IRQ 0 |
-| 33-47 | IRQ 1-15 | `irq_entries_start + n*IDT_ALIGN` | 传统 ISA IRQ |
-| 48-127 | 扩展 IRQ | `irq_entries_start + n*IDT_ALIGN` | PCI/MSI 中断 |
-
-**向量 128：系统调用（由 idt_setup_traps 设置）**
-
-| 向量 | 用途 | 处理程序 | 门类型 | DPL | 说明 |
-|------|------|---------|--------|-----|------|
-| 128 (0x80) | INT 0x80 | `entry_INT80_32` (32位) / `asm_int80_emulation` (64位) | **TRAP** | **3** | 唯一的陷阱门！ |
-
-**向量 129-234：预留/未分配**
-
-| 向量范围 | 状态 |
-|---------|------|
-| 129-234 | 可分配给设备中断 |
-
-**向量 235-255：系统向量（由 idt_setup_apic_and_irq_gates 设置）**
-
-| 向量 | 十六进制 | 名称 | 处理程序 | 用途 |
-|------|---------|------|---------|------|
-| 235 | 0xEB | POSTED_MSI_NOTIFICATION | `asm_sysvec_posted_msi_notification` | Posted MSI 通知 |
-| 236 | 0xEC | LOCAL_TIMER | `asm_sysvec_apic_timer_interrupt` | 本地 APIC 定时器 |
-| 237 | 0xED | HYPERV_STIMER0 | (Hyper-V) | Hyper-V 定时器 |
-| 238 | 0xEE | HYPERV_REENLIGHTENMENT | (Hyper-V) | Hyper-V 重新启蒙 |
-| 239 | 0xEF | MANAGED_IRQ_SHUTDOWN | (动态) | 托管 IRQ 关闭 |
-| 240 | 0xF0 | POSTED_INTR_NESTED | `asm_sysvec_kvm_posted_intr_nested_ipi` | KVM 嵌套中断 |
-| 241 | 0xF1 | POSTED_INTR_WAKEUP | `asm_sysvec_kvm_posted_intr_wakeup_ipi` | KVM 唤醒中断 |
-| 242 | 0xF2 | POSTED_INTR | `asm_sysvec_kvm_posted_intr_ipi` | KVM Posted 中断 |
-| 243 | 0xF3 | HYPERVISOR_CALLBACK | (虚拟化) | Hypervisor 回调 |
-| 244 | 0xF4 | DEFERRED_ERROR | `asm_sysvec_deferred_error` | AMD 延迟错误 |
-| 245 | 0xF5 | (未分配) | - | - |
-| 246 | 0xF6 | IRQ_WORK | `asm_sysvec_irq_work` | IRQ 工作队列 |
-| 247 | 0xF7 | X86_PLATFORM_IPI | `asm_sysvec_x86_platform_ipi` | 平台特定 IPI |
-| 248 | 0xF8 | REBOOT | `asm_sysvec_reboot` | 重启 IPI |
-| 249 | 0xF9 | THRESHOLD_APIC | `asm_sysvec_threshold` | 阈值错误 |
-| 250 | 0xFA | THERMAL_APIC | `asm_sysvec_thermal` | 热事件 |
-| 251 | 0xFB | CALL_FUNCTION_SINGLE | `asm_sysvec_call_function_single` | 单核函数调用 IPI |
-| 252 | 0xFC | CALL_FUNCTION | `asm_sysvec_call_function` | 多核函数调用 IPI |
-| 253 | 0xFD | RESCHEDULE | `asm_sysvec_reschedule_ipi` | 重调度 IPI |
-| 254 | 0xFE | ERROR_APIC | `asm_sysvec_error_interrupt` | APIC 错误 |
-| 255 | 0xFF | SPURIOUS_APIC | `asm_sysvec_spurious_apic_interrupt` | 伪中断 |
-
-#### 关键特性对比
-
-| 特性 | 异常向量 (0-31) | 设备中断 (32-127) | 系统向量 (235-255) | INT 0x80 (128) |
-|------|----------------|------------------|-------------------|----------------|
-| **门类型** | Interrupt Gate | Interrupt Gate | Interrupt Gate | **Trap Gate** |
-| **DPL** | 0 (除 #BP, #OF 为 3) | 0 | 0 | **3** |
-| **IST** | #DB(1), #NMI(2), #DF(3), #MC(4), #VC(5) | 0 | 0 | 0 |
-| **segment** | __KERNEL_CS (0x0010) | __KERNEL_CS | __KERNEL_CS | __KERNEL_CS |
-| **初始化阶段** | idt_setup_traps() | idt_setup_apic_and_irq_gates() | idt_setup_apic_and_irq_gates() | idt_setup_traps() |
-
-#### 数据结构示例对比
-
-**异常向量（Interrupt Gate, DPL=0）**：
-```
-idt_table[14] (#PF):
-  offset_low    = 0x2a80       // asm_exc_page_fault 的地址
-  segment       = 0x0010       // __KERNEL_CS
-  bits          = 0x8E00       // IST=0, type=0xE, DPL=0, P=1
-  offset_middle = 0x8100
-  offset_high   = 0xffffffff
-  reserved      = 0x00000000
-```
-
-**系统调用（Trap Gate, DPL=3，唯一特例！）**：
-```
-idt_table[128] (INT 0x80):
-  offset_low    = 0x1234       // entry_INT80_32 的地址
-  segment       = 0x0010       // __KERNEL_CS
-  bits          = 0xEF00       // IST=0, type=0xF (Trap!), DPL=3, P=1
-  offset_middle = 0x5678
-  offset_high   = 0xffffffff
-  reserved      = 0x00000000
-```
-
-**系统向量（Interrupt Gate, DPL=0）**：
-```
-idt_table[253] (RESCHEDULE_VECTOR = 0xFD):
-  offset_low    = 0xabcd       // asm_sysvec_reschedule_ipi 的地址
-  segment       = 0x0010       // __KERNEL_CS
-  bits          = 0x8E00       // IST=0, type=0xE, DPL=0, P=1
-  offset_middle = 0x9abc
-  offset_high   = 0xffffffff
-  reserved      = 0x00000000
-```
-
-#### 源代码引用
-
-```c
-// arch/x86/kernel/idt.c
-
-// 阶段 1：早期处理程序（向量 0-31）
-void __init idt_setup_early_handler(void) {
-    for (i = 0; i < 32; i++)
-        set_intr_gate(i, early_idt_handler_array[i]);
-    load_idt(&idt_descr);
-}
-
-// 阶段 2-4：异常门设置
-void __init idt_setup_traps(void) {
-    idt_setup_from_table(idt_table, def_idts, ARRAY_SIZE(def_idts), true);
-    // def_idts[] 包含所有异常向量的最终处理程序
-
-    if (ia32_enabled())
-        idt_setup_from_table(idt_table, ia32_idt, 1, true);
-    // ia32_idt[] = { SYSG(0x80, entry_INT80_32) }
-}
-
-// 阶段 5：APIC 和 IRQ 门
-void __init idt_setup_apic_and_irq_gates(void) {
-    // 设置 APIC 系统向量（235-255）
-    idt_setup_from_table(idt_table, apic_idts, ARRAY_SIZE(apic_idts), true);
-
-    // 设置设备中断向量（32-234）
-    for (i = 32; i < 235; i++)
-        set_intr_gate(i, irq_entries_start + ...);
-
-    idt_map_in_cea();  // 映射到 CPU Entry Area
-    load_idt(&idt_descr);
-    set_memory_ro(&idt_table, 1);  // 设置为只读！
-}
-```
+> 📖 **完整向量表参考手册**：包含全部 256 个向量的详细列表、初始化阶段时间线、数据结构示例和源代码引用，请参见：
+> [IDT_COMPLETE_VECTOR_TABLE.md](./IDT_COMPLETE_VECTOR_TABLE.md)
 
 ---
 
@@ -1355,205 +840,20 @@ IDTR.base  = &idt_table   // idt_descr.address
 
 当 CPU 触发异常时，它根据 IDTR 寄存器找到 idt_table，读取对应的门描述符，跳转到处理程序。
 
-### 5.1 CPU 触发异常的流程
+**早期异常处理流程摘要**：
 
-**示例：#PF（Page Fault，向量 14）**
+1. **CPU 硬件操作**：保存上下文 → 查找 IDTR → 读取 idt_table[vector] → 跳转到处理程序
+2. **桩代码 (early_idt_handler_array)**：压入向量号 → 跳转到公共处理程序
+3. **公共处理程序 (early_idt_handler_common)**：保存所有寄存器 → 调用 C 函数
+4. **C 语言处理 (do_early_exception)**：
+   - #PF（向量 14）→ 动态建立页表 (early_make_pgtable)
+   - #VC（向量 29）→ AMD SEV 虚拟化处理
+   - #VE（向量 20）→ Intel TDX 虚拟化处理
+   - 其他 → 尝试修复或 panic
+5. **返回**：恢复寄存器 → iret → 重新执行触发异常的指令
 
-```
-1. 用户代码访问无效地址
-     ↓
-2. CPU 检测到缺页异常
-     ↓
-3. CPU 保存上下文（RFLAGS、CS、RIP 等）
-     ↓
-4. CPU 读取 IDTR.base（= &idt_table）
-     ↓
-5. CPU 计算地址：IDTR.base + 14 × 16
-     ↓
-6. CPU 读取 idt_table[14]（16 字节）
-     ↓
-7. CPU 提取处理程序地址：
-   offset = offset_high | offset_middle | offset_low
-     ↓
-8. CPU 跳转到该地址（early_idt_handler_array[14]）
-```
-
-### 5.2 early_idt_handler_array 的桩代码
-
-**向量 14 的桩**（`arch/x86/kernel/head_64.S:488-505`）：
-
-```asm
-# early_idt_handler_array[14]:
-	ENDBR                   # CET 间接分支保护
-	# CPU 已经压入了 error code（缺页地址在 CR2）
-	pushq $14               # 压入向量号
-	jmp early_idt_handler_common  # 跳转到公共处理
-```
-
-**栈帧状态**（进入 early_idt_handler_common 前）：
-
-```
-┌─────────────────────────┐ ← 异常发生前的 RSP
-│  SS                      │ \
-│  RSP                     │  |
-│  RFLAGS                  │  | CPU 自动压入
-│  CS                      │  |
-│  RIP                     │  |
-│  Error Code（#PF 专用）   │ /
-│  Vector Number (14)      │ ← 桩代码压入
-└─────────────────────────┘ ← 当前 RSP
-```
-
-### 5.3 early_idt_handler_common - 公共处理程序
-
-**源代码位置**：`arch/x86/kernel/head_64.S:508-542`
-
-```asm
-SYM_CODE_START_LOCAL(early_idt_handler_common)
-	UNWIND_HINT_IRET_REGS offset=16
-
-	cld
-
-	incl early_recursion_flag(%rip)
-
-	/* The vector number is currently in the pt_regs->di slot. */
-	pushq %rsi				/* pt_regs->si */
-	movq 8(%rsp), %rsi			/* RSI = vector number */
-	movq %rdi, 8(%rsp)			/* pt_regs->di = RDI */
-	pushq %rdx				/* pt_regs->dx */
-	pushq %rcx				/* pt_regs->cx */
-	pushq %rax				/* pt_regs->ax */
-	pushq %r8				/* pt_regs->r8 */
-	pushq %r9				/* pt_regs->r9 */
-	pushq %r10				/* pt_regs->r10 */
-	pushq %r11				/* pt_regs->r11 */
-	pushq %rbx				/* pt_regs->bx */
-	pushq %rbp				/* pt_regs->bp */
-	pushq %r12				/* pt_regs->r12 */
-	pushq %r13				/* pt_regs->r13 */
-	pushq %r14				/* pt_regs->r14 */
-	pushq %r15				/* pt_regs->r15 */
-	UNWIND_HINT_REGS
-
-	movq %rsp,%rdi		/* RDI = pt_regs; RSI is already trapnr */
-	call do_early_exception
-
-	decl early_recursion_flag(%rip)
-	jmp restore_regs_and_return_to_kernel
-SYM_CODE_END(early_idt_handler_common)
-```
-
-**功能**：
-1. 保存所有通用寄存器（构建完整的 pt_regs）
-2. 调用 C 函数 `do_early_exception(regs, trapnr)`
-3. 恢复寄存器并返回
-
-**栈帧布局**（调用 do_early_exception 前）：
-
-```
-┌─────────────────────────┐
-│  SS                      │ \
-│  RSP                     │  |
-│  RFLAGS                  │  | CPU 自动压入
-│  CS                      │  |
-│  RIP                     │  |
-│  Error Code              │ /
-│  Vector Number (14)      │ ← 桩代码压入
-│  RSI                     │ \
-│  RDI                     │  |
-│  RDX                     │  |
-│  RCX                     │  |
-│  RAX                     │  |
-│  R8                      │  | early_idt_handler_common 压入
-│  R9                      │  | （构成 pt_regs 结构）
-│  R10                     │  |
-│  R11                     │  |
-│  RBX                     │  |
-│  RBP                     │  |
-│  R12                     │  |
-│  R13                     │  |
-│  R14                     │  |
-│  R15                     │ /
-└─────────────────────────┘ ← RSP（pt_regs 的起始地址）
-```
-
-### 5.4 do_early_exception() - C 语言处理
-
-**源代码位置**：`arch/x86/kernel/head64.c:156-170`
-
-```c
-void __init do_early_exception(struct pt_regs *regs, int trapnr)
-{
-	if (trapnr == X86_TRAP_PF &&
-	    early_make_pgtable(native_read_cr2()))
-		return;
-
-	if (IS_ENABLED(CONFIG_AMD_MEM_ENCRYPT) &&
-	    trapnr == X86_TRAP_VC && handle_vc_boot_ghcb(regs))
-		return;
-
-	if (trapnr == X86_TRAP_VE && tdx_early_handle_ve(regs))
-		return;
-
-	early_fixup_exception(regs, trapnr);
-}
-```
-
-**参数**：
-- `RDI = pt_regs`（指向栈上的寄存器快照）
-- `RSI = trapnr`（异常向量号，14）
-
-**关键处理**：
-
-| 向量号 | 异常类型 | 处理函数 | 说明 |
-|--------|---------|---------|------|
-| 14 | #PF | `early_make_pgtable()` | 动态建立页表 |
-| 29 | #VC | `handle_vc_boot_ghcb()` | AMD SEV 虚拟化异常 |
-| 20 | #VE | `tdx_early_handle_ve()` | Intel TDX 虚拟化异常 |
-| 其他 | - | `early_fixup_exception()` | 尝试修复或 panic |
-
-**#PF 的特殊处理**：
-- 读取 CR2 寄存器（缺页地址）
-- 调用 `early_make_pgtable()` 动态映射页表
-- 成功则返回，失败则 panic
-
-### 5.5 完整执行流程示例（#PF）
-
-```
-1. 用户访问地址 0xffff888000001000
-     ↓
-2. CPU 触发 #PF（向量 14）
-     ↓
-3. CPU 压入栈帧（SS、RSP、RFLAGS、CS、RIP、Error Code）
-     ↓
-4. CPU 读取 IDTR → 找到 idt_table
-     ↓
-5. CPU 读取 idt_table[14] → 找到 early_idt_handler_array[14]
-     ↓
-6. CPU 跳转到 early_idt_handler_array[14]
-     ↓
-7. 桩代码压入向量号 14
-     ↓
-8. 跳转到 early_idt_handler_common
-     ↓
-9. 压入所有寄存器（构建 pt_regs）
-     ↓
-10. 调用 do_early_exception(pt_regs, 14)
-     ↓
-11. do_early_exception 检测到 #PF
-     ↓
-12. 调用 early_make_pgtable(0xffff888000001000)
-     ↓
-13. 动态建立页表映射
-     ↓
-14. 返回到 early_idt_handler_common
-     ↓
-15. 恢复寄存器，执行 iret
-     ↓
-16. CPU 返回到触发异常的指令，重新执行
-     ↓
-17. 访问成功，继续执行
-```
+> 📖 **详细的异常处理流程分析**：包含 CPU 硬件操作、栈帧布局、pt_regs 结构、完整执行流程示例等，请参见：
+> [IDT_EXCEPTION_HANDLING_DETAILS.md](./IDT_EXCEPTION_HANDLING_DETAILS.md)
 
 ---
 
