@@ -70,9 +70,79 @@ asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_
 2. **填充异常处理程序**：为前 32 个 CPU 异常向量设置统一的早期处理函数
 3. **加载新 IDT**：通过 `lidt` 指令使新的 IDT 生效
 
+### 1.4 调用链概览（如何连接到 idt_table）
+
+**关键问题**：`idt_setup_early_handler()` 中的 `set_intr_gate()` 如何将数据写入 `idt_table`？
+
+**完整调用链**：
+
+```
+idt_setup_early_handler()
+    │
+    ├─ 步骤 1：填充 IDT 表
+    │     │
+    │     └─ for (i = 0; i < 32; i++)
+    │           set_intr_gate(i, early_idt_handler_array[i])
+    │             │
+    │             ├─ 创建临时的 idt_data 结构
+    │             │    └─ init_idt_data(&data, i, addr)
+    │             │         └─ data.vector = i
+    │             │         └─ data.addr = early_idt_handler_array[i]
+    │             │         └─ data.bits.type = GATE_INTERRUPT (0xE)
+    │             │         └─ data.bits.ist = 0
+    │             │         └─ data.bits.dpl = 0
+    │             │         └─ data.bits.p = 1
+    │             │
+    │             └─ idt_setup_from_table(idt_table, &data, 1, false)
+    │                   │
+    │                   ├─ idt_init_desc(&desc, &data)
+    │                   │    └─ 将 idt_data 转换为 16 字节的 gate_desc
+    │                   │         └─ desc.offset_low = addr[15:0]
+    │                   │         └─ desc.offset_middle = addr[31:16]
+    │                   │         └─ desc.offset_high = addr[63:32]
+    │                   │         └─ desc.segment = __KERNEL_CS
+    │                   │         └─ desc.bits = data.bits
+    │                   │
+    │                   └─ write_idt_entry(idt_table, i, &desc)
+    │                        └─ idt_table[i] = desc  ← 写入全局 idt_table！
+    │
+    └─ 步骤 2：加载 IDT 表
+          │
+          └─ load_idt(&idt_descr)
+                │
+                └─ lidt指令：将 idt_descr 中的地址和大小加载到 IDTR
+                     └─ IDTR.base = idt_descr.address = &idt_table  ← 指向 idt_table！
+                     └─ IDTR.limit = idt_descr.size = 4095
+```
+
+**关键连接点**：
+
+1. **`idt_table` 是全局静态数组**（arch/x86/kernel/idt.c:173）
+   - 存储 256 个 16 字节的门描述符
+   - 初始为空（BSS 段，全 0）
+
+2. **`idt_descr` 结构指向 `idt_table`**（arch/x86/kernel/idt.c:175-178）
+   - `idt_descr.address = (unsigned long) idt_table`
+   - `idt_descr.size = 4095`（4096 - 1）
+
+3. **`set_intr_gate()` 通过多层调用最终写入 `idt_table`**
+   - `set_intr_gate()` → `idt_setup_from_table()` → `write_idt_entry()` → `idt_table[i] = desc`
+
+4. **`load_idt()` 将 `idt_table` 的地址加载到 IDTR**
+   - CPU 的 IDTR 寄存器现在指向 `idt_table`
+   - 后续所有中断/异常都会查找 `idt_table`
+
+**为什么需要这么多层？**
+
+- **类型安全**：idt_data（高层抽象）→ gate_desc（底层硬件格式）
+- **灵活性**：可以批量初始化（传入数组）
+- **可维护性**：将复杂的位操作封装在函数中
+
 ---
 
 ## 2. 数据结构详解
+
+**注意**：现在你应该理解为什么这一节要详细介绍 `idt_table`、`idt_descr` 等结构——它们是上述调用链中的核心数据！
 
 ### 2.1 idt_table - 运行时 IDT 表
 
