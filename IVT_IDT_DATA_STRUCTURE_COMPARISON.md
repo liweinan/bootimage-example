@@ -1,9 +1,18 @@
 # BIOS IVT 与 Kernel IDT 数据结构详细对比
 
-**版本**: 1.5
+**版本**: 1.6
 **日期**: 2026-02-18
 **作者**: Linux 内核启动文档项目
 **更新内容**:
+- v1.6: 添加 `segoff` 和 `segoff_s` 关系深度解析（6.1.1 节）
+  - 详细解释命名关系：`segoff_s` 是类型，`segoff` 是字段
+  - Union 设计的巧妙之处：同一内存的两种视图
+  - 内存布局图示（小端序，4 字节）
+  - 两种等价访问方式的代码示例
+  - 为什么需要 union：5 大优点对比表
+  - 对比不使用 union 的问题
+  - 实际使用场景（构造、写入、读取 IVT）
+  - 类比理解：双面手表（正面刻度 vs 背面数字）
 - v1.5: 修正 SeaBIOS 源代码位置错误
   - `struct segoff_s` 位置：types.h:25-33（修正：原错误为 49-52）
   - `SET_IVT` 宏位置：biosvar.h:21-22（修正：原错误为 util.h:194-196）
@@ -43,6 +52,7 @@
 4. [数据结构详细对比](#4-数据结构详细对比)
 5. [硬件处理机制对比](#5-硬件处理机制对比)
 6. [初始化代码对比](#6-初始化代码对比)
+   - 6.1.1 [深入理解：segoff 和 segoff_s 的关系](#611-深入理解segoff-和-segoff_s-的关系)
 7. [从 IVT 到 IDT 的演进过程](#7-从-ivt-到-idt-的演进过程)
 8. [为什么 x86-64 必须使用 IDT？](#8-为什么-x86-64-必须使用-idt)
 9. [源代码索引](#9-源代码索引)
@@ -469,6 +479,122 @@ struct rmode_IVT {
         SEGOFF(SEG_BIOS, (u32)func - BUILD_BIOS_ADDR);  \
     })
 ```
+
+#### 6.1.1 深入理解：`segoff` 和 `segoff_s` 的关系
+
+**关键概念澄清**：
+
+| 名称 | 类型 | 说明 |
+|------|------|------|
+| **`segoff_s`** | 结构体类型名 | `struct segoff_s`，`_s` 后缀表示 struct |
+| **`segoff`** | u32 字段名 | `struct segoff_s` 内部的 union 字段 |
+
+**Union 设计的巧妙之处**：
+
+`struct segoff_s` 使用 **union**，使得**同一块 4 字节内存可以用两种方式访问**：
+
+```
+┌─────────────────────────────────────────────────────────┐
+│           内存布局（4 字节，小端序）                      │
+├─────────────────────────────────────────────────────────┤
+│  字节偏移:  +0    +1    +2    +3                        │
+│  内存内容:  FE    E3    00    F0                        │
+│                                                          │
+│  视图 1 (分字段访问):                                    │
+│    offset = 0xE3FE  ← 字节 0-1                          │
+│    seg    = 0xF000  ← 字节 2-3                          │
+│                                                          │
+│  视图 2 (整体访问):                                      │
+│    segoff = 0xF000E3FE  ← 字节 0-3 作为 u32             │
+└─────────────────────────────────────────────────────────┘
+```
+
+**两种等价的访问方式**：
+
+```c
+struct segoff_s addr;
+
+// 方式 1：分字段设置
+addr.offset = 0xE3FE;
+addr.seg    = 0xF000;
+// 此时 addr.segoff 自动等于 0xF000E3FE（通过 union 同步）
+
+// 方式 2：整体设置
+addr.segoff = 0xF000E3FE;
+// 此时 addr.offset 自动等于 0xE3FE（通过 union 同步）
+// 此时 addr.seg    自动等于 0xF000（通过 union 同步）
+```
+
+**为什么需要 union？**
+
+| 优点 | 说明 | 代码示例 |
+|------|------|---------|
+| **灵活访问** | 按需选择访问方式 | `addr.seg = 0xF000` 或 `addr.segoff = 0xF000E3FE` |
+| **节省内存** | 两种方式共享同一块内存 | 只占 4 字节（不是 8 字节） |
+| **自动同步** | 编译器自动同步两种视图 | 修改 `offset` 会自动更新 `segoff` |
+| **方便传参** | 可以整体传递 32 位值 | `write_ivt(addr.segoff)` 更高效 |
+| **类型安全** | 编译器检查类型 | 避免手动位操作出错 |
+
+**对比：如果不使用 union**
+
+```c
+// 不使用 union（需要手动同步，容易出错）
+struct segoff_bad {
+    u16 offset;
+    u16 seg;
+    u32 segoff;  // ❌ 需要手动同步
+};
+
+// 使用时的问题：
+addr.offset = 0xE3FE;
+addr.seg    = 0xF000;
+addr.segoff = (addr.seg << 16) | addr.offset;  // ❌ 需要手动计算
+
+// 而使用 union（自动同步）：
+struct segoff_s addr;
+addr.offset = 0xE3FE;
+addr.seg    = 0xF000;
+// addr.segoff 自动等于 0xF000E3FE ✅ 无需手动计算
+```
+
+**实际使用场景**：
+
+```c
+// 场景 1：构造 IVT 表项（使用 SEGOFF 宏）
+struct segoff_s handler = SEGOFF(0xF000, 0xE3FE);
+// 内部执行：
+//   handler.seg    = 0xF000;
+//   handler.offset = 0xE3FE;
+//   handler.segoff = 0xF000E3FE (自动生成)
+
+// 场景 2：写入 IVT（两种等价方式）
+// 方式 A：分字段写入
+*(u16 *)(0x0000 + vector * 4 + 0) = handler.offset;
+*(u16 *)(0x0000 + vector * 4 + 2) = handler.seg;
+
+// 方式 B：整体写入（更高效，只需一次内存写入）
+*(u32 *)(0x0000 + vector * 4) = handler.segoff;
+
+// 场景 3：读取 IVT 表项
+u32 ivt_entry = *(u32 *)(0x0000 + vector * 4);
+struct segoff_s addr;
+addr.segoff = ivt_entry;
+// 现在可以直接访问：
+printf("seg:offset = %04X:%04X\n", addr.seg, addr.offset);
+```
+
+**类比理解：双面手表**
+
+可以把 `struct segoff_s` 想象成一个**双面手表**：
+
+- **正面刻度**（分字段视图）：
+  - 时针 = `seg`（高 16 位）
+  - 分针 = `offset`（低 16 位）
+
+- **背面数字**（整体视图）：
+  - 数字显示 = `segoff`（32 位整数）
+
+**两面共享同一个机芯（内存）**，转动一面，另一面自动同步！
 
 **实际操作示例：INT 13h 磁盘服务**
 
