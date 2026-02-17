@@ -1,11 +1,27 @@
 # Linux 内核 IDT 结构与 Intel SDM 规范符合性分析
 
-**版本**: 1.0
+**版本**: 1.1
 **日期**: 2026-02-18
 **作者**: Linux 内核启动文档项目
 
+**更新日志**:
+- v1.1 (2026-02-18):
+  - 补充 Intel SDM 具体章节、图表、页码引用
+  - 增强 idt_data → gate_desc 转换过程（5.2 节）：添加详细的 6 步骤分解
+  - 新增内核完整调用链说明（5.4.1 节）
+  - 新增代码示例（5.4.2 节）：以向量 14 为例的完整流程
+  - 添加快速导航链接
+  - 扩展 Intel SDM 参考文献（7.2 节）：补充关键章节和下载地址
+- v1.0 (2026-02-18): 初始版本
+
 > 📚 **文档导航**:
 > - [返回总索引](DOCUMENT_INDEX.md) | [IDT 详细分析](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md) | [数据结构关系](IDT_DATA_STRUCTURES_RELATIONSHIP.md)
+
+> 🎯 **快速导航**:
+> - 想了解 Intel SDM 规范？→ [第 2 节](#2-intel-sdm-64-位门描述符规范)
+> - 想看 idt_data 如何转换为 gate_desc？→ [第 5.2 节](#52-转换流程idt_data--gate_desc)
+> - 想看完整的内核调用链？→ [第 5.4 节](#54-内核中的完整调用链)
+> - 想看符合性验证结论？→ [第 6 节](#6-符合性验证结论)
 
 ---
 
@@ -50,9 +66,16 @@
 ### 2.1 规范来源
 
 **Intel® 64 and IA-32 Architectures Software Developer's Manual**
-**Volume 3A: System Programming Guide, Part 1**
-**Chapter 6: Interrupt and Exception Handling**
-**Section 6.14.1: 64-Bit Mode IDT**
+- **Volume**: 3A - System Programming Guide, Part 1
+- **Chapter**: 6 - Interrupt and Exception Handling
+- **Section**: 6.14.1 - 64-Bit Mode IDT (IDT Descriptors in IA-32e Mode)
+- **关键图表**:
+  - **Figure 6-7**: 64-Bit IDT Gate Descriptors (门描述符结构图)
+  - **Table 6-1**: Interrupt and Exception Classes (异常分类表)
+- **页码参考**: 第 6-14 至 6-18 页（视 SDM 版本可能略有差异）
+
+> 💡 **手册获取**: 可从 Intel 官网下载最新版本的 SDM：
+> https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
 
 ### 2.2 64 位门描述符格式（Intel SDM 原文）
 
@@ -444,7 +467,9 @@ struct idt_data {
 
 ### 5.2 转换流程：idt_data → gate_desc
 
-**源代码**（`arch/x86/kernel/idt.c:64-73`）：
+#### 5.2.1 核心转换函数
+
+**源代码位置**: `arch/x86/kernel/idt.c:64-73`
 
 ```c
 static inline void idt_init_desc(gate_desc *gate, const struct idt_data *d)
@@ -458,6 +483,103 @@ static inline void idt_init_desc(gate_desc *gate, const struct idt_data *d)
 	gate->offset_high	= (u32) (addr >> 32);    // 提取 [63:32]
 	gate->reserved		= 0;                     // 强制为 0
 }
+```
+
+#### 5.2.2 详细转换步骤
+
+**以向量 14 (#PF) 为例**：
+
+假设处理程序地址：`0xffffffff81002a80`
+
+**步骤 1：提取地址低 16 位**
+```c
+unsigned long addr = 0xffffffff81002a80;
+gate->offset_low = (u16) addr;
+// 计算过程：
+// addr & 0xFFFF = 0x2a80
+// 结果：offset_low = 0x2a80
+```
+
+**步骤 2：复制段选择子**
+```c
+gate->segment = (u16) d->segment;
+// __KERNEL_CS = 0x0010 (定义在 arch/x86/include/asm/segment.h)
+// 结果：segment = 0x0010
+```
+
+**步骤 3：复制控制位（结构体赋值）**
+```c
+gate->bits = d->bits;
+// idt_bits 是一个 16 位的位域结构，直接赋值会复制所有位
+// d->bits = { ist=0, zero=0, type=0xE, dpl=0, p=1 }
+// 内存表示：0x8E00
+// 结果：bits = 0x8E00
+```
+
+**步骤 4：提取地址中间 16 位**
+```c
+gate->offset_middle = (u16) (addr >> 16);
+// 计算过程：
+// 0xffffffff81002a80 >> 16 = 0xffffffff8100
+// (u16) 截取低 16 位 = 0x8100
+// 结果：offset_middle = 0x8100
+```
+
+**步骤 5：提取地址高 32 位**
+```c
+gate->offset_high = (u32) (addr >> 32);
+// 计算过程：
+// 0xffffffff81002a80 >> 32 = 0xffffffff
+// (u32) 截取低 32 位 = 0xffffffff
+// 结果：offset_high = 0xffffffff
+```
+
+**步骤 6：清零保留字段**
+```c
+gate->reserved = 0;
+// Intel SDM 规定：bits 127:96 必须为 0
+// 结果：reserved = 0x00000000
+```
+
+#### 5.2.3 转换结果验证
+
+**输入 (idt_data)**：
+```c
+struct idt_data data = {
+    .vector  = 14,                          // 向量号（未写入 gate_desc）
+    .segment = 0x0010,                      // __KERNEL_CS
+    .bits    = { ist=0, type=0xE, dpl=0, p=1 },  // 0x8E00
+    .addr    = (void*)0xffffffff81002a80,   // 处理程序地址
+};
+```
+
+**输出 (gate_desc)**：
+```c
+struct gate_desc gate = {
+    .offset_low    = 0x2a80,        // addr [15:0]
+    .segment       = 0x0010,        // __KERNEL_CS
+    .bits          = 0x8E00,        // IST=0, Type=0xE, DPL=0, P=1
+    .offset_middle = 0x8100,        // addr [31:16]
+    .offset_high   = 0xffffffff,    // addr [63:32]
+    .reserved      = 0x00000000,    // Intel SDM required
+};
+```
+
+**十六进制内存布局（小端序）**：
+```
+Offset:  +0    +1    +2    +3    +4    +5    +6    +7    +8    +9    +A    +B    +C    +D    +E    +F
+Data:    80 2a 10 00 00 8e 00 81 ff ff ff ff 00 00 00 00
+         └──┬──┘└──┬──┘└──┬──┘└──┬──┘└─────┬─────┘└─────┬─────┘
+         Low  Seg  Bits  Mid    High32      Reserved
+```
+
+**CPU 读取时的地址重组**：
+```c
+uint64_t handler_addr = ((uint64_t)gate.offset_high << 32) |
+                        ((uint64_t)gate.offset_middle << 16) |
+                        gate.offset_low;
+// = (0xffffffff << 32) | (0x8100 << 16) | 0x2a80
+// = 0xffffffff81002a80  ✅ 完全一致！
 ```
 
 **数据流图**：
@@ -494,23 +616,69 @@ idt_data（软件抽象）               gate_desc（硬件格式）
 - **`gate_desc`** = 实际建筑（符合物理规律和规范）
 - **`idt_init_desc()`** = 施工队（将图纸转换为实际建筑）
 
-### 5.4 使用流程示例
+### 5.4 内核中的完整调用链
 
-**完整调用链**：
+#### 5.4.1 函数调用序列
+
+```
+x86_64_start_kernel()                          // arch/x86/kernel/head64.c:273
+    ↓
+idt_setup_early_handler()                      // arch/x86/kernel/idt.c:317
+    ↓
+    for (i = 0; i < 32; i++)
+        set_intr_gate(i, early_idt_handler_array[i])  // arch/x86/kernel/idt.c:206
+            ↓
+            init_idt_data(&data, i, addr)      // arch/x86/include/asm/desc.h
+            │   // 填充 idt_data 结构
+            │   data.vector  = i
+            │   data.segment = __KERNEL_CS
+            │   data.bits.type = GATE_INTERRUPT (0xE)
+            │   data.bits.p    = 1
+            │   data.addr      = addr
+            ↓
+            idt_setup_from_table(idt_table, &data, 1, false)  // arch/x86/kernel/idt.c:193
+                ↓
+                idt_init_desc(&desc, &data)    // arch/x86/kernel/idt.c:64
+                │   // ⭐ 关键转换：idt_data → gate_desc
+                │   gate->offset_low    = (u16) addr
+                │   gate->segment       = (u16) segment
+                │   gate->bits          = bits
+                │   gate->offset_middle = (u16) (addr >> 16)
+                │   gate->offset_high   = (u32) (addr >> 32)
+                │   gate->reserved      = 0
+                ↓
+                write_idt_entry(idt_table, vector, &desc)  // arch/x86/include/asm/desc.h:177
+                    │   // 写入 idt_table
+                    │   memcpy(&idt_table[vector], &desc, sizeof(desc))
+                    ↓
+                    idt_table[vector] = desc  // 16 字节写入内存
+```
+
+#### 5.4.2 代码示例（以向量 14 为例）
+
 ```c
-// 步骤 1：创建软件抽象（idt_data）
+// ========== 步骤 1：创建软件抽象（idt_data） ==========
+// 文件：arch/x86/kernel/idt.c:206-213
+
 struct idt_data data;
+
+// init_idt_data() 是内联函数（arch/x86/include/asm/desc.h）
 init_idt_data(&data, 14, early_idt_handler_array[14]);
-// 结果：
+
+// 执行后的 data 内容：
 // data.vector  = 14
 // data.segment = __KERNEL_CS (0x0010)
-// data.bits    = { ist=0, type=0xE, dpl=0, p=1 }
-// data.addr    = 0xffffffff81002a80
+// data.bits    = { ist=0, zero=0, type=0xE, dpl=0, p=1 }  // 0x8E00
+// data.addr    = 0xffffffff81002a80  // 假设地址
 
-// 步骤 2：转换为硬件格式（gate_desc）
-gate_desc desc;
-idt_init_desc(&desc, &data);
-// 结果：
+// ========== 步骤 2：转换为硬件格式（gate_desc） ==========
+// 文件：arch/x86/kernel/idt.c:193-204
+
+gate_desc desc;  // 在栈上分配
+
+idt_init_desc(&desc, &data);  // ⭐ 关键转换
+
+// 执行后的 desc 内容：
 // desc.offset_low    = 0x2a80
 // desc.segment       = 0x0010
 // desc.bits          = 0x8E00
@@ -518,18 +686,58 @@ idt_init_desc(&desc, &data);
 // desc.offset_high   = 0xffffffff
 // desc.reserved      = 0x00000000
 
-// 步骤 3：写入 idt_table（CPU 可见）
-write_idt_entry(idt_table, 14, &desc);
-// 结果：
-// idt_table[14] = desc（16 字节直接拷贝）
+// ========== 步骤 3：写入 idt_table（CPU 可见） ==========
+// 文件：arch/x86/include/asm/desc.h:177-180
 
-// 步骤 4：CPU 读取
-// 当 #PF 异常发生时：
-// 1. CPU 读取 IDTR.base + 14 * 16 = &idt_table[14]
-// 2. CPU 提取 offset = (offset_high << 32) | (offset_middle << 16) | offset_low
-//                    = 0xffffffff81002a80
-// 3. CPU 跳转到该地址执行
+write_idt_entry(idt_table, 14, &desc);
+
+// 等价于：
+// memcpy(&idt_table[14], &desc, 16);
+// 或：
+// idt_table[14] = desc;  // 16 字节结构体赋值
+
+// idt_table[14] 的内存内容（十六进制）：
+// 80 2a 10 00 00 8e 00 81 ff ff ff ff 00 00 00 00
+
+// ========== 步骤 4：CPU 硬件读取 ==========
+// 当 #PF 异常发生时（CPU 硬件自动执行）：
+
+// 1. CPU 读取 IDTR 寄存器
+//    IDTR.base  = &idt_table
+//    IDTR.limit = 4095
+
+// 2. CPU 计算门描述符地址
+//    gate_addr = IDTR.base + (vector * 16)
+//              = &idt_table + (14 * 16)
+//              = &idt_table[14]
+
+// 3. CPU 读取 16 字节的 gate_desc
+//    gate = *(gate_desc*)gate_addr
+
+// 4. CPU 提取处理程序地址（64 位）
+//    handler_addr = (gate.offset_high << 32) |
+//                   (gate.offset_middle << 16) |
+//                   gate.offset_low
+//                 = (0xffffffff << 32) | (0x8100 << 16) | 0x2a80
+//                 = 0xffffffff81002a80
+
+// 5. CPU 检查权限和标志位
+//    if (gate.bits.p != 1) → #GP(vector)  // Present 必须为 1
+//    if (CPL > gate.bits.dpl) → #GP(vector)  // 权限检查
+//    if (gate.bits.type == 0xE) → CLI  // Interrupt Gate：禁用中断
+
+// 6. CPU 跳转到处理程序
+//    RIP = handler_addr  // 0xffffffff81002a80
+//    CS  = gate.segment  // 0x0010 (__KERNEL_CS)
 ```
+
+#### 5.4.3 关键数据结构对比
+
+| 阶段 | 数据结构 | 大小 | 地址字段 | 用途 | CPU 可见？ |
+|------|---------|------|---------|------|-----------|
+| **参数传递** | `idt_data` | 不固定（约 24 字节） | `void *addr` (8B) | 函数参数 | ❌ |
+| **转换中间** | `gate_desc` (栈) | 16 字节 | 拆分为 3 个字段 | 临时变量 | ❌ |
+| **最终存储** | `idt_table[i]` | 16 字节 | 拆分为 3 个字段 | IDT 表项 | ✅ |
 
 ---
 
@@ -674,10 +882,33 @@ struct gate_desc {
 
 ### 7.2 Intel 官方文档
 
+**主要参考手册**：
+
 - **Intel® 64 and IA-32 Architectures Software Developer's Manual**
-  Volume 3A: System Programming Guide, Part 1
-  Chapter 6: Interrupt and Exception Handling
-  Section 6.14.1: 64-Bit Mode IDT
+  - **Volume 3A**: System Programming Guide, Part 1
+  - **Chapter 6**: Interrupt and Exception Handling
+    - **Section 6.1**: Interrupt and Exception Overview (第 6-1 页)
+    - **Section 6.10**: Interrupt Descriptor Table (IDT) (第 6-11 页)
+    - **Section 6.11**: IDT Descriptors (第 6-12 页)
+    - **Section 6.14**: Exception and Interrupt Handling in 64-bit Mode (第 6-14 页)
+    - **Section 6.14.1**: 64-Bit Mode IDT (第 6-14 页) ⭐ **核心章节**
+  - **关键图表**:
+    - **Figure 6-7**: 64-Bit IDT Gate Descriptors (第 6-14 页)
+    - **Table 6-1**: Protected-Mode Exceptions and Interrupts (第 6-6 页)
+    - **Table 3-2**: System-Segment and Gate-Descriptor Types (Volume 3A, 第 3-16 页)
+
+**下载地址**：
+- Intel 官方下载：https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+- 直接链接（需注册）：https://cdrdv2.intel.com/v1/dl/getContent/671200
+
+**版本说明**：
+- 本文档基于 Intel SDM **Combined Volumes: 1, 2A, 2B, 2C, 2D, 3A, 3B, 3C, 3D, and 4**
+- 版本号：Order Number 325462（最新版本可能更新）
+- 页码可能因版本不同略有差异
+
+**其他相关章节**：
+- **Volume 3A, Section 3.5**: System Descriptor Types (系统描述符类型)
+- **Volume 2A**: LIDT—Load Interrupt Descriptor Table Register (LIDT 指令)
 
 ### 7.3 Linux 内核源代码
 
