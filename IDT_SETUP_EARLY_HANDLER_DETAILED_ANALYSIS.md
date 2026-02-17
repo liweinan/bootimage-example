@@ -860,8 +860,14 @@ IDTR.base  = &idt_table   // idt_descr.address
    - 其他 → 尝试修复或 panic
 5. **返回**：恢复寄存器 → iret → 重新执行触发异常的指令
 
-> 📖 **详细的异常处理流程分析**：包含 CPU 硬件操作、栈帧布局、pt_regs 结构、完整执行流程示例等，请参见：
+> 📖 **详细的异常处理流程分析**：包含 CPU 硬件操作、栈帧布局、pt_regs 结构、do_early_exception 功能详解等，请参见：
 > [IDT_EXCEPTION_HANDLING_DETAILS.md](./IDT_EXCEPTION_HANDLING_DETAILS.md)
+
+> ⚠️ **重要**：`early_idt_handler_common` 和 `do_early_exception` 只是**临时的应急处理程序**！
+> 在 `trap_init()` 中会被 `asm_exc_*` 系列生产级处理程序完全替换。
+>
+> 📖 **处理程序演进分析**：了解从应急处理程序到生产级处理程序的三代演进，请参见：
+> [IDT_HANDLER_EVOLUTION.md](./IDT_HANDLER_EVOLUTION.md)
 
 ---
 

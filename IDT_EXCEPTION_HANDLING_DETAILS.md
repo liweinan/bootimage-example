@@ -286,6 +286,29 @@ void __init do_early_exception(struct pt_regs *regs, int trapnr)
 | `regs` | RDI | RSP | 指向栈上的 pt_regs 结构 |
 | `trapnr` | RSI | 14 | 异常向量号 |
 
+### 功能概述
+
+**do_early_exception() 是一个极简的应急异常处理程序**，只在内核启动最早期使用（从 x86_64_start_kernel 到 trap_init 之前）。
+
+#### 设计原则
+
+- ✅ **最小依赖**：不依赖任何复杂的内核子系统
+- ✅ **关键任务**：只处理启动过程中必须处理的异常
+- ❌ **功能有限**：大部分异常会导致 panic
+
+#### 生命周期
+
+```
+启动早期          do_early_exception (临时使用)
+  ↓
+trap_init        开始被 asm_exc_* 系列函数替换
+  ↓
+cpu_init 完成    完全被生产级处理程序替换
+```
+
+> 📖 **详细分析**：do_early_exception 只是三代 IDT 处理程序中的第一代（Emergency Handlers），
+> 完整的演进过程请参见：[IDT_HANDLER_EVOLUTION.md](./IDT_HANDLER_EVOLUTION.md)
+
 ### 异常处理分派
 
 | 向量号 | 异常类型 | 处理函数 | 说明 |
@@ -295,7 +318,9 @@ void __init do_early_exception(struct pt_regs *regs, int trapnr)
 | 20 | #VE (Virtualization Exception) | `tdx_early_handle_ve()` | Intel TDX 虚拟化异常 |
 | 其他 | - | `early_fixup_exception()` | 尝试修复或 panic |
 
-### #PF 的特殊处理
+### 功能详解
+
+#### 1. #PF (Page Fault) 处理
 
 ```c
 if (trapnr == X86_TRAP_PF &&
@@ -311,34 +336,152 @@ if (trapnr == X86_TRAP_PF &&
 5. 如果失败返回 0，继续执行到 `early_fixup_exception()`
 
 **early_make_pgtable() 的作用**：
+
 ```c
 // arch/x86/kernel/head64.c
 int __init early_make_pgtable(unsigned long address)
 {
-	// 1. 判断地址是否在合法范围内
-	// 2. 分配新的页表页
-	// 3. 填充 PGD、P4D、PUD、PMD、PTE
-	// 4. 建立虚拟地址到物理地址的映射
+	// 1. 判断地址是否在合法范围内（内核地址空间）
+	// 2. 从 _brk_end 分配新的页表页（不调用 kmalloc）
+	// 3. 逐级检查和填充 PGD、P4D、PUD、PMD
+	// 4. 建立 2MB 大页映射（使用 PSE 标志）
 	// 5. 返回 1（成功）或 0（失败）
 }
 ```
 
-### early_fixup_exception() 的作用
+**功能限制**：
+- ✅ 只能处理内核空间缺页（地址 >= __START_KERNEL_map）
+- ✅ 只能建立 2MB 大页映射（不支持 4KB 小页）
+- ❌ 不处理用户空间缺页
+- ❌ 不支持按需分配（demand paging）
+- ❌ 不支持写时复制（COW）
+- ❌ 不支持 swap
+
+**典型使用场景**：
+- KASAN 影子内存访问
+- 内核代码/数据段的初始映射
+- vmalloc 区域的早期访问
+
+#### 2. #VC (VMM Communication) 处理
+
+```c
+if (IS_ENABLED(CONFIG_AMD_MEM_ENCRYPT) &&
+    trapnr == X86_TRAP_VC && handle_vc_boot_ghcb(regs))
+	return;
+```
+
+**用途**：AMD SEV-ES/SEV-SNP 虚拟化环境
+
+**背景**：
+- SEV-ES（Secure Encrypted Virtualization - Encrypted State）加密虚拟机的寄存器状态
+- Guest VM 执行某些敏感指令时会触发 #VC 异常
+- 需要通过 GHCB（Guest-Hypervisor Communication Block）与 Hypervisor 通信
+
+**处理流程**：
+1. 检查是否启用了 AMD_MEM_ENCRYPT 配置
+2. 检查是否为 #VC 异常（向量 29）
+3. 调用 `handle_vc_boot_ghcb(regs)` 处理
+4. 如果成功返回 true，异常已处理
+5. 如果失败返回 false，继续到 early_fixup_exception
+
+**典型触发场景**：
+- CPUID 指令
+- MSR 读写
+- I/O 端口访问
+- MMIO 访问
+
+#### 3. #VE (Virtualization Exception) 处理
+
+```c
+if (trapnr == X86_TRAP_VE && tdx_early_handle_ve(regs))
+	return;
+```
+
+**用途**：Intel TDX（Trust Domain Extensions）虚拟化环境
+
+**背景**：
+- TDX 提供硬件级别的虚拟机隔离
+- TD（Trust Domain）访问某些资源时会触发 #VE 异常
+- 需要通过 TDCALL 与 TDX Module 通信
+
+**处理流程**：
+1. 检查是否为 #VE 异常（向量 20）
+2. 调用 `tdx_early_handle_ve(regs)` 处理
+3. 如果成功返回 true，异常已处理
+4. 如果失败返回 false，继续到 early_fixup_exception
+
+**典型触发场景**：
+- CPUID 指令
+- I/O 端口访问
+- MSR 访问
+- HLT 指令
+
+#### 4. early_fixup_exception() - 异常表修复
 
 ```c
 // arch/x86/mm/extable.c
 void __init early_fixup_exception(struct pt_regs *regs, int trapnr)
 {
-	// 1. 在异常表 (exception table) 中查找是否有修复代码
-	// 2. 如果找到，修改 regs->ip 跳转到修复代码
+	const struct exception_table_entry *e;
+
+	// 1. 在异常表中查找当前 IP 地址
+	e = search_exception_tables(regs->ip);
+
+	// 2. 如果找到修复代码
+	if (e) {
+		regs->ip = ex_fixup_addr(e);  // 跳转到修复地址
+		return;
+	}
+
 	// 3. 如果未找到，打印错误信息并 panic
+	early_printk("PANIC: early exception %02x rip %lx:%lx error %lx cr2 %lx\n",
+	             trapnr, regs->cs, regs->ip, regs->orig_ax, read_cr2());
+	die("Early exception", regs, trapnr);
 }
 ```
 
 **异常表机制**：
-- 用于处理"预期的异常"（如访问用户空间地址）
-- 每个可能出错的指令在异常表中有对应的修复代码地址
-- 如果异常发生，自动跳转到修复代码继续执行
+- **用途**：处理"预期的异常"（如探测性访问、用户空间拷贝）
+- **结构**：编译时生成的 `exception_table_entry` 数组
+- **原理**：每个可能出错的指令记录其地址和对应的修复代码地址
+- **执行**：异常发生时，查表找到修复地址，修改 RIP 跳转执行
+
+**示例**：
+```c
+// 内核代码可能探测性访问某个地址
+asm volatile(
+	"1: movl (%[ptr]), %[val]\n"
+	"2:\n"
+	_ASM_EXTABLE(1b, 2b)  // 如果 1b 处出错，跳转到 2b
+	: [val] "=r" (val)
+	: [ptr] "r" (ptr)
+);
+// 如果访问失败，直接跳过，不会 panic
+```
+
+**与生产级处理的区别**：
+- ✅ 查异常表（两者相同）
+- ❌ 不发送信号（无进程管理）
+- ❌ 不生成详细 oops 报告
+- ❌ 找不到修复代码时直接 panic（不尝试其他恢复方式）
+
+### 功能对比总结
+
+| 功能 | do_early_exception | 生产级处理 (exc_page_fault 等) |
+|------|-------------------|-------------------------------|
+| **代码行数** | ~20 行 | ~2000+ 行 |
+| **处理异常数** | 4 类 (#PF, #VC, #VE, 其他) | 32+ 类（全部异常） |
+| **#PF 功能** | 只能建立内核页表 | 完整虚拟内存管理 |
+| **用户空间** | ❌ 不支持 | ✅ 支持 |
+| **Demand Paging** | ❌ 不支持 | ✅ 支持 |
+| **COW** | ❌ 不支持 | ✅ 支持 |
+| **Swap** | ❌ 不支持 | ✅ 支持 |
+| **信号发送** | ❌ 不支持 | ✅ 支持 (SIGSEGV, SIGILL) |
+| **异常表** | ✅ 支持（简单） | ✅ 支持（完整） |
+| **调试信息** | ❌ 最小 | ✅ 详细 oops 报告 |
+| **IST 支持** | ❌ 无 | ✅ 有（关键异常） |
+| **依赖** | 无 | 完整内核功能 |
+| **生命周期** | 临时（启动早期） | 永久（运行时） |
 
 ---
 
