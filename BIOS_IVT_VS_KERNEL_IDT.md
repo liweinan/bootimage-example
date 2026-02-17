@@ -3,6 +3,7 @@
 本文档详细对比了 BIOS 的 IVT（中断向量表）和 Linux 内核的 IDT（中断描述符表）在软件中断服务程序方面的异同，帮助理解中断机制的设计模式。
 
 > **相关文档**：
+> - 关于 **IVT 和 IDT 的数据结构详细对比**（表项结构、硬件处理机制、从实模式到长模式的演进），请参见 [BIOS IVT 与 Kernel IDT 数据结构详细对比](IVT_IDT_DATA_STRUCTURE_COMPARISON.md)
 > - 关于**中断/异常/陷阱的基础概念**（Interrupt/Exception/Trap 的 Intel SDM 定义、三者本质区别、为什么软件中断在 CPU 层面是异常），请参见 [x86 中断、异常、陷阱：Intel SDM 规范与 Linux 实现](X86_INTERRUPT_EXCEPTION_TRAP.md)
 > - 关于 **Linux IDT 表的演进流程**，请参见 [Linux 内核 IDT 表的演进流程详解](LINUX_KERNEL_IDT_EVOLUTION.md)
 > - 关于 **Linux 中断处理机制**（Top Half/Bottom Half），请参见 [Linux 内核中断处理](LINUX_INTERRUPT_GUIDE.md)
