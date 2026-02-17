@@ -1,9 +1,17 @@
 # BIOS IVT 与 Kernel IDT 数据结构详细对比
 
-**版本**: 1.4
-**日期**: 2026-02-17
+**版本**: 1.5
+**日期**: 2026-02-18
 **作者**: Linux 内核启动文档项目
 **更新内容**:
+- v1.5: 修正 SeaBIOS 源代码位置错误
+  - `struct segoff_s` 位置：types.h:25-33（修正：原错误为 49-52）
+  - `SET_IVT` 宏位置：biosvar.h:21-22（修正：原错误为 util.h:194-196）
+  - `SEG_IVT` 位置：config.h:60（修正：原错误为 13）
+  - 补充 `struct segoff_s` 的 union 设计细节
+  - 添加 `struct rmode_IVT` 结构（IVT 表结构，256 个向量）
+  - 修正 SET_IVT 宏展开示例（使用正确的 rmode_IVT 结构）
+  - 补充相关宏定义：GET_IVT, SET_FARVAR, SEGOFF
 - v1.4: 添加完整的 IDT 向量门类型列表（0-255）及内核代码引述
 - v1.3: 添加三种门描述符的详细数据结构对比（bit-level布局）、Linux 内核使用场景、IST 配置说明
 - v1.2: 添加设计哲学对比、"门"描述符深度解释、生动类比（木门 vs 金库门）
@@ -47,13 +55,17 @@
 
 | 数据结构/函数 | 文件路径 | 说明 |
 |--------------|---------|------|
-| `struct segoff_s` | seabios/src/types.h:49-52 | IVT 表项结构（段:偏移，4 字节） |
-| `SET_IVT` 宏 | seabios/src/util.h:194-196 | 设置 IVT 条目的宏 |
+| `struct segoff_s` | seabios/src/types.h:25-33 | IVT 表项结构（段:偏移，4 字节，union 设计） |
+| `struct rmode_IVT` | seabios/src/std/bda.h:13-15 | IVT 表结构（256 个 segoff_s） |
+| `SET_IVT` 宏 | seabios/src/biosvar.h:21-22 | 设置 IVT 条目的宏 |
+| `GET_IVT` 宏 | seabios/src/biosvar.h:20 | 读取 IVT 条目的宏 |
 | `ivt_init()` | seabios/src/post.c:568-650 | BIOS 启动时初始化 IVT |
 | `entry_13` | seabios/src/romlayout.S:448-454 | INT 13h 磁盘服务入口 |
 | `process_op()` | seabios/src/block.c:605-632 | INT 13h 磁盘操作 C 实现 |
-| `SEG_IVT` | seabios/src/config.h:13 | IVT 表的段地址（0x0000） |
+| `SEG_IVT` | seabios/src/config.h:60 | IVT 表的段地址（0x0000） |
 | `SEG_BIOS` | seabios/src/config.h:10 | BIOS 代码段地址（0xF000） |
+| `SEGOFF` 宏 | seabios/src/farptr.h:199 | 构造 segoff_s 结构的辅助宏 |
+| `SET_FARVAR` 宏 | seabios/src/farptr.h:181-182 | 写入远指针变量的宏 |
 
 ### Linux Kernel 源代码
 
@@ -413,27 +425,49 @@ ivt_init(void)
 }
 ```
 
-**SET_IVT 宏定义：**
+**IVT 相关数据结构和宏定义：**
 
 ```c
-// seabios/src/util.h:194-196
-#define SET_IVT(vector, segoff) \
-    SET_FARVAR(SEG_IVT, *(struct segoff_s *)(vector*4), segoff)
-
-// seabios/src/types.h:49-52 - IVT 表项的数据结构
+// seabios/src/types.h:25-33 - IVT 表项的数据结构
 struct segoff_s {
-    u16 offset;  // 偏移地址（16 位）
-    u16 seg;     // 段地址（16 位）
-} PACKED;
+    union {
+        struct {
+            u16 offset;  // 偏移地址（16 位）
+            u16 seg;     // 段地址（16 位）
+        };
+        u32 segoff;      // 也可以作为 32 位整体访问
+    };
+};
 
-// seabios/src/config.h:13 - IVT 表的段地址
+// seabios/src/std/bda.h:13-15 - IVT 表结构
+struct rmode_IVT {
+    struct segoff_s ivec[256];  // 256 个中断向量
+};
+
+// seabios/src/biosvar.h:21-22 - SET_IVT 宏定义
+#define SET_IVT(vector, segoff)                                         \
+    SET_FARVAR(SEG_IVT, ((struct rmode_IVT *)0)->ivec[vector], segoff)
+
+// seabios/src/biosvar.h:20 - GET_IVT 宏定义
+#define GET_IVT(vector) \
+    GET_FARVAR(SEG_IVT, ((struct rmode_IVT *)0)->ivec[vector])
+
+// seabios/src/config.h:60 - IVT 表的段地址
 #define SEG_IVT  0x0000
 
-// seabios/src/util.h:167 - FUNC16 宏：将 16 位函数地址转换为 segoff_s
-#define FUNC16(func) ({                         \
-    extern void func (void);                    \
-    SEGOFF(SEG_BIOS, (u32)func - BUILD_BIOS_ADDR); \
-})
+// seabios/src/farptr.h:181-182 - SET_FARVAR 宏定义
+#define SET_FARVAR(seg, var, val) \
+    do { GET_FARVAR((seg), (var)) = (val); } while (0)
+
+// seabios/src/farptr.h:199 - SEGOFF 宏：构造 segoff_s 结构
+#define SEGOFF(s,o) ({struct segoff_s __so; __so.offset=(o); __so.seg=(s); __so;})
+
+// seabios/src/biosvar.h:24-27 - FUNC16 宏：将 16 位函数地址转换为 segoff_s
+#define FUNC16(func) ({                                 \
+        ASSERT32FLAT();                                 \
+        extern void func (void);                        \
+        SEGOFF(SEG_BIOS, (u32)func - BUILD_BIOS_ADDR);  \
+    })
 ```
 
 **实际操作示例：INT 13h 磁盘服务**
@@ -1664,10 +1698,17 @@ SET_IVT(0x13, FUNC16(entry_13));
 SET_IVT(0x13, SEGOFF(SEG_BIOS, (u32)entry_13 - BUILD_BIOS_ADDR));
 
 // 第二层展开（SET_IVT）：
-SET_FARVAR(SEG_IVT, *(struct segoff_s *)(0x13*4),
+SET_FARVAR(SEG_IVT, ((struct rmode_IVT *)0)->ivec[0x13],
            SEGOFF(0xF000, offset_of_entry_13));
 
+// 第三层展开（SET_FARVAR）：
+GET_FARVAR(SEG_IVT, ((struct rmode_IVT *)0)->ivec[0x13]) =
+    SEGOFF(0xF000, offset_of_entry_13);
+
 // 最终效果：写入物理地址 0x4C（0x13 * 4）
+// ((struct rmode_IVT *)0)->ivec[0x13] 计算偏移 = 0x13 * 4 = 0x4C
+// 段地址 SEG_IVT = 0x0000
+// 物理地址 = 0x0000 << 4 + 0x4C = 0x0004C
 *(u16 *)(0x0000 + 0x13 * 4 + 0) = offset_of_entry_13;  // 偏移地址
 *(u16 *)(0x0000 + 0x13 * 4 + 2) = 0xF000;              // 段地址 SEG_BIOS
 ```
@@ -2071,16 +2112,28 @@ x86-64（2003）→ IDT：长模式，强制要求
 8. **seabios/src/post.c**
    - `ivt_init()` 函数
 
-9. **seabios/src/util.h**
-   - `SET_IVT` 宏定义
+9. **seabios/src/biosvar.h**
+   - `SET_IVT` 宏定义（21-22 行）
+   - `GET_IVT` 宏定义（20 行）
 
 10. **seabios/src/types.h**
-    - `struct segoff_s` 定义
+    - `struct segoff_s` 定义（25-33 行，union 设计）
 
-11. **seabios/src/romlayout.S**
+11. **seabios/src/std/bda.h**
+    - `struct rmode_IVT` 定义（13-15 行，IVT 表结构）
+
+12. **seabios/src/farptr.h**
+    - `SET_FARVAR` 宏定义（181-182 行）
+    - `SEGOFF` 宏定义（199 行）
+
+13. **seabios/src/config.h**
+    - `SEG_IVT` 定义（60 行）
+    - `SEG_BIOS` 定义（10 行）
+
+14. **seabios/src/romlayout.S**
     - BIOS 中断服务入口（如 `entry_13`）
 
-12. **seabios/src/block.c**
+15. **seabios/src/block.c**
     - INT 13h 磁盘服务 C 实现
 
 ### 11.4 相关文档
