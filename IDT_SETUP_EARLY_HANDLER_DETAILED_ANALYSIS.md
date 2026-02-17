@@ -723,6 +723,193 @@ write_idt_entry(idt_table, i, &desc)  ← 写入 idt_table[i]
 idt_table[i] = desc  ← 内存写入完成
 ```
 
+### 3.9 完整的 IDT 表内容清单（256 个向量）
+
+**重要说明**：`idt_setup_early_handler()` 只是 IDT 初始化的**第一步**，后续还有多个阶段会继续填充和覆盖 idt_table 的内容。
+
+#### 初始化阶段时间线
+
+```
+阶段 0：编译后状态
+  idt_table[0..255] = 全部为 0（BSS 段）
+
+阶段 1：idt_setup_early_handler() [最早期，x86_64_start_kernel]
+  └─ 填充向量 0-31 → early_idt_handler_array[0..31]
+
+阶段 2：idt_setup_early_traps() [trap_init() 开始]
+  └─ 覆盖部分向量：#DB(1), #BP(3), #PF(14, 仅 x86-32), #VE(20)
+
+阶段 3：idt_setup_early_pf() [仅 x86-64]
+  └─ 覆盖向量 14 (#PF) → asm_exc_page_fault
+
+阶段 4：idt_setup_traps() [trap_init() 中期]
+  └─ 覆盖所有异常向量（0-31）+ INT 0x80
+
+阶段 5：idt_setup_apic_and_irq_gates() [trap_init() 完成]
+  └─ 填充向量 32-255（IRQ、APIC、系统向量）
+```
+
+#### 完整向量表（按初始化阶段分组）
+
+**向量 0-31：CPU 异常（最终由 idt_setup_traps 设置）**
+
+| 向量 | 助记符 | 异常名称 | 处理程序 | 门类型 | IST | DPL |
+|------|-------|---------|---------|--------|-----|-----|
+| 0 | #DE | Divide Error | `asm_exc_divide_error` | INT | 0 | 0 |
+| 1 | #DB | Debug | `asm_exc_debug` | INT | IST1 | 0 |
+| 2 | #NMI | NMI | `asm_exc_nmi` | INT | IST2 | 0 |
+| 3 | #BP | Breakpoint | `asm_exc_int3` | INT | 0 | **3** |
+| 4 | #OF | Overflow | `asm_exc_overflow` | INT | 0 | **3** |
+| 5 | #BR | Bound Range | `asm_exc_bounds` | INT | 0 | 0 |
+| 6 | #UD | Invalid Opcode | `asm_exc_invalid_op` | INT | 0 | 0 |
+| 7 | #NM | Device Not Available | `asm_exc_device_not_available` | INT | 0 | 0 |
+| 8 | #DF | Double Fault | `asm_exc_double_fault` (64位) / TSS (32位) | INT/TASK | IST3 | 0 |
+| 9 | - | Coprocessor Overrun | `asm_exc_coproc_segment_overrun` | INT | 0 | 0 |
+| 10 | #TS | Invalid TSS | `asm_exc_invalid_tss` | INT | 0 | 0 |
+| 11 | #NP | Segment Not Present | `asm_exc_segment_not_present` | INT | 0 | 0 |
+| 12 | #SS | Stack Fault | `asm_exc_stack_segment` | INT | 0 | 0 |
+| 13 | #GP | General Protection | `asm_exc_general_protection` | INT | 0 | 0 |
+| 14 | #PF | Page Fault | `asm_exc_page_fault` | INT | 0 | 0 |
+| 15 | - | Spurious | `asm_exc_spurious_interrupt_bug` | INT | 0 | 0 |
+| 16 | #MF | x87 FPU Error | `asm_exc_coprocessor_error` | INT | 0 | 0 |
+| 17 | #AC | Alignment Check | `asm_exc_alignment_check` | INT | 0 | 0 |
+| 18 | #MC | Machine Check | `asm_exc_machine_check` | INT | IST4 | 0 |
+| 19 | #XF | SIMD Exception | `asm_exc_simd_coprocessor_error` | INT | 0 | 0 |
+| 20 | #VE | Virtualization | `asm_exc_virtualization_exception` | INT | 0 | 0 |
+| 21 | #CP | Control Protection | `asm_exc_control_protection` | INT | 0 | 0 |
+| 22-28 | - | Reserved | (未使用) | - | - | - |
+| 29 | #VC | VMM Communication | `asm_exc_vmm_communication` | INT | IST5 | 0 |
+| 30 | - | Reserved | (未使用) | - | - | - |
+| 31 | - | Reserved | (未使用) | - | - | - |
+
+**向量 32-127：设备中断（由 idt_setup_apic_and_irq_gates 设置）**
+
+| 向量范围 | 用途 | 处理程序 | 说明 |
+|---------|------|---------|------|
+| 32 (0x20) | IRQ 0 起始 | `irq_entries_start + 0` | 8259A PIC IRQ 0 |
+| 33-47 | IRQ 1-15 | `irq_entries_start + n*IDT_ALIGN` | 传统 ISA IRQ |
+| 48-127 | 扩展 IRQ | `irq_entries_start + n*IDT_ALIGN` | PCI/MSI 中断 |
+
+**向量 128：系统调用（由 idt_setup_traps 设置）**
+
+| 向量 | 用途 | 处理程序 | 门类型 | DPL | 说明 |
+|------|------|---------|--------|-----|------|
+| 128 (0x80) | INT 0x80 | `entry_INT80_32` (32位) / `asm_int80_emulation` (64位) | **TRAP** | **3** | 唯一的陷阱门！ |
+
+**向量 129-234：预留/未分配**
+
+| 向量范围 | 状态 |
+|---------|------|
+| 129-234 | 可分配给设备中断 |
+
+**向量 235-255：系统向量（由 idt_setup_apic_and_irq_gates 设置）**
+
+| 向量 | 十六进制 | 名称 | 处理程序 | 用途 |
+|------|---------|------|---------|------|
+| 235 | 0xEB | POSTED_MSI_NOTIFICATION | `asm_sysvec_posted_msi_notification` | Posted MSI 通知 |
+| 236 | 0xEC | LOCAL_TIMER | `asm_sysvec_apic_timer_interrupt` | 本地 APIC 定时器 |
+| 237 | 0xED | HYPERV_STIMER0 | (Hyper-V) | Hyper-V 定时器 |
+| 238 | 0xEE | HYPERV_REENLIGHTENMENT | (Hyper-V) | Hyper-V 重新启蒙 |
+| 239 | 0xEF | MANAGED_IRQ_SHUTDOWN | (动态) | 托管 IRQ 关闭 |
+| 240 | 0xF0 | POSTED_INTR_NESTED | `asm_sysvec_kvm_posted_intr_nested_ipi` | KVM 嵌套中断 |
+| 241 | 0xF1 | POSTED_INTR_WAKEUP | `asm_sysvec_kvm_posted_intr_wakeup_ipi` | KVM 唤醒中断 |
+| 242 | 0xF2 | POSTED_INTR | `asm_sysvec_kvm_posted_intr_ipi` | KVM Posted 中断 |
+| 243 | 0xF3 | HYPERVISOR_CALLBACK | (虚拟化) | Hypervisor 回调 |
+| 244 | 0xF4 | DEFERRED_ERROR | `asm_sysvec_deferred_error` | AMD 延迟错误 |
+| 245 | 0xF5 | (未分配) | - | - |
+| 246 | 0xF6 | IRQ_WORK | `asm_sysvec_irq_work` | IRQ 工作队列 |
+| 247 | 0xF7 | X86_PLATFORM_IPI | `asm_sysvec_x86_platform_ipi` | 平台特定 IPI |
+| 248 | 0xF8 | REBOOT | `asm_sysvec_reboot` | 重启 IPI |
+| 249 | 0xF9 | THRESHOLD_APIC | `asm_sysvec_threshold` | 阈值错误 |
+| 250 | 0xFA | THERMAL_APIC | `asm_sysvec_thermal` | 热事件 |
+| 251 | 0xFB | CALL_FUNCTION_SINGLE | `asm_sysvec_call_function_single` | 单核函数调用 IPI |
+| 252 | 0xFC | CALL_FUNCTION | `asm_sysvec_call_function` | 多核函数调用 IPI |
+| 253 | 0xFD | RESCHEDULE | `asm_sysvec_reschedule_ipi` | 重调度 IPI |
+| 254 | 0xFE | ERROR_APIC | `asm_sysvec_error_interrupt` | APIC 错误 |
+| 255 | 0xFF | SPURIOUS_APIC | `asm_sysvec_spurious_apic_interrupt` | 伪中断 |
+
+#### 关键特性对比
+
+| 特性 | 异常向量 (0-31) | 设备中断 (32-127) | 系统向量 (235-255) | INT 0x80 (128) |
+|------|----------------|------------------|-------------------|----------------|
+| **门类型** | Interrupt Gate | Interrupt Gate | Interrupt Gate | **Trap Gate** |
+| **DPL** | 0 (除 #BP, #OF 为 3) | 0 | 0 | **3** |
+| **IST** | #DB(1), #NMI(2), #DF(3), #MC(4), #VC(5) | 0 | 0 | 0 |
+| **segment** | __KERNEL_CS (0x0010) | __KERNEL_CS | __KERNEL_CS | __KERNEL_CS |
+| **初始化阶段** | idt_setup_traps() | idt_setup_apic_and_irq_gates() | idt_setup_apic_and_irq_gates() | idt_setup_traps() |
+
+#### 数据结构示例对比
+
+**异常向量（Interrupt Gate, DPL=0）**：
+```
+idt_table[14] (#PF):
+  offset_low    = 0x2a80       // asm_exc_page_fault 的地址
+  segment       = 0x0010       // __KERNEL_CS
+  bits          = 0x8E00       // IST=0, type=0xE, DPL=0, P=1
+  offset_middle = 0x8100
+  offset_high   = 0xffffffff
+  reserved      = 0x00000000
+```
+
+**系统调用（Trap Gate, DPL=3，唯一特例！）**：
+```
+idt_table[128] (INT 0x80):
+  offset_low    = 0x1234       // entry_INT80_32 的地址
+  segment       = 0x0010       // __KERNEL_CS
+  bits          = 0xEF00       // IST=0, type=0xF (Trap!), DPL=3, P=1
+  offset_middle = 0x5678
+  offset_high   = 0xffffffff
+  reserved      = 0x00000000
+```
+
+**系统向量（Interrupt Gate, DPL=0）**：
+```
+idt_table[253] (RESCHEDULE_VECTOR = 0xFD):
+  offset_low    = 0xabcd       // asm_sysvec_reschedule_ipi 的地址
+  segment       = 0x0010       // __KERNEL_CS
+  bits          = 0x8E00       // IST=0, type=0xE, DPL=0, P=1
+  offset_middle = 0x9abc
+  offset_high   = 0xffffffff
+  reserved      = 0x00000000
+```
+
+#### 源代码引用
+
+```c
+// arch/x86/kernel/idt.c
+
+// 阶段 1：早期处理程序（向量 0-31）
+void __init idt_setup_early_handler(void) {
+    for (i = 0; i < 32; i++)
+        set_intr_gate(i, early_idt_handler_array[i]);
+    load_idt(&idt_descr);
+}
+
+// 阶段 2-4：异常门设置
+void __init idt_setup_traps(void) {
+    idt_setup_from_table(idt_table, def_idts, ARRAY_SIZE(def_idts), true);
+    // def_idts[] 包含所有异常向量的最终处理程序
+
+    if (ia32_enabled())
+        idt_setup_from_table(idt_table, ia32_idt, 1, true);
+    // ia32_idt[] = { SYSG(0x80, entry_INT80_32) }
+}
+
+// 阶段 5：APIC 和 IRQ 门
+void __init idt_setup_apic_and_irq_gates(void) {
+    // 设置 APIC 系统向量（235-255）
+    idt_setup_from_table(idt_table, apic_idts, ARRAY_SIZE(apic_idts), true);
+
+    // 设置设备中断向量（32-234）
+    for (i = 32; i < 235; i++)
+        set_intr_gate(i, irq_entries_start + ...);
+
+    idt_map_in_cea();  // 映射到 CPU Entry Area
+    load_idt(&idt_descr);
+    set_memory_ro(&idt_table, 1);  // 设置为只读！
+}
+```
+
 ---
 
 ## 4. 阶段 3：加载 IDT 到 CPU
