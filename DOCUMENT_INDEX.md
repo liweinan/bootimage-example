@@ -134,6 +134,7 @@
 | [LINUX_KERNEL_SETUP_FLOW.md](LINUX_KERNEL_SETUP_FLOW.md) | Linux 内核 Setup 流程详解 |
 | [LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md](LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md) | **Linux 内核启动代码 System V ABI 遵守情况分析报告** ⭐ 新增<br>• 详细分析启动代码对 ABI 的遵守（综合评分：98%）<br>• 参数传递机制（boot_params 完整传递链）<br>• 寄存器使用规则（Caller/Callee-saved）<br>• 返回值传递、栈帧管理、Red Zone 处理<br>• asmlinkage 真相揭秘（x86-64 上为空定义）<br>• 内核特殊优化（8字节栈对齐、禁用 Red Zone）<br>• 14+ 代码示例 + 权威规范引用<br>• 30+ 交叉引用链接 |
 | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md) | **Linux 内核函数修饰符与调用约定**（已更新 v2.0 → v2.3）<br>• x86-64/x86-32/ARM32/ARM64 调用约定详解 ⭐ 新增<br>• 函数修饰符（asmlinkage、__visible、__init、__noreturn）<br>• 调用约定 vs 二进制格式（ELF vs Mach-O）⭐ 新增<br>• Linux 内核 ABI 稳定性分析 ⭐ 新增<br>• 汇编代码交互、常见组合模式 |
+| [SEABIOS_GRUB_ABI_COMPLIANCE_ANALYSIS.md](SEABIOS_GRUB_ABI_COMPLIANCE_ANALYSIS.md) | **SeaBIOS & GRUB ABI 遵从性分析报告** ⭐ 新增<br>• SeaBIOS i386 平台 ABI 分析（合规性 30%）<br>• GRUB 多架构 ABI 分析（i386/x86-64/ARM32/ARM64）<br>• 违反标准的编译器标志详解（`-mregparm=3`, `-mrtd`, `-mpreferred-stack-boundary=2`）<br>• 固件代码为何偏离标准 ABI（代码体积、性能、独立运行环境）<br>• 与 Linux 内核的异同对比<br>• 代码体积节省 10-15%、性能优化分析<br>• 附实测汇编代码对比 |
 | [COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md) | **Linux 压缩内核重定位机制** |
 | [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) | 为什么需要重定位压缩内核（KASLR 分析） |
 
@@ -420,6 +421,6 @@ python3 verify_grub_boot_sector.py [iso_file]
 
 ---
 
-**最后更新**：2026-02-14
+**最后更新**：2026-02-17
 **文档总数**：100+ 篇
 **维护者**：Linux 内核启动文档项目
