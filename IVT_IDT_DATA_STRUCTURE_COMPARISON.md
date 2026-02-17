@@ -1070,9 +1070,9 @@ x86-64 架构在 **IDT** 中定义了三种门描述符：
 
 | 门类型 | Type 值 | 用途 | 进入时是否关中断 | Linux 使用场景 |
 |--------|---------|------|-----------------|---------------|
-| **中断门<br>（Interrupt Gate）** | 0xE | 处理硬件中断和某些异常 | ✅ 是<br>（IF←0） | 硬件中断（IRQ）<br>某些异常（#PF, #DF, #NMI, #MC） |
-| **陷阱门<br>（Trap Gate）** | 0xF | 处理大部分异常和系统调用 | ❌ 否<br>（IF 不变） | 大部分异常（#BP, #GP, #DE）<br>系统调用（int 0x80, syscall） |
-| **任务门<br>（Task Gate）** | 0x5 | 硬件任务切换 | ✅ 是 | ❌ Linux 不使用<br>（x86-64 已废弃） |
+| **中断门<br>（Interrupt Gate）** | 0xE | 处理所有中断、异常和系统调用 | ✅ 是<br>（IF←0） | **现代 Linux 全部使用中断门**<br>硬件中断（IRQ）<br>CPU 异常（#PF, #GP, #BP等）<br>系统调用（INT 0x80） |
+| **陷阱门<br>（Trap Gate）** | 0xF | 历史：用于某些异常和系统调用 | ❌ 否<br>（IF 不变） | ❌ **现代 Linux 不使用**<br>（早期内核曾用于 INT 0x80） |
+| **任务门<br>（Task Gate）** | 0x5 | 硬件任务切换 | ✅ 是 | ❌ Linux 从不使用<br>（x86-64 已废弃） |
 
 #### 三种门的数据结构详细对比
 
@@ -1290,7 +1290,7 @@ static const __initconst struct idt_data ist_idts[] = {
 | **硬件中断**<br>(IRQ) | 中断门<br>0xE | 0 | 0 | 键盘、网卡、定时器 | 需要关中断防止嵌套 |
 | **关键异常**<br>(需要独立栈) | 中断门<br>0xE | 1-4 | 0 | #DF, #NMI, #MC, #DB | 栈可能已损坏<br>或需要防止递归 |
 | **普通异常**<br>(栈安全) | 中断门<br>0xE | 0 | 0 | #PF, #GP, #DE, #TS | 需要关中断保护栈帧 |
-| **系统调用**<br>(用户可触发) | 陷阱门<br>0xF | 0 | 3 | int 0x80, syscall | 用户态可调用<br>不关中断保持响应 |
+| **系统调用**<br>(用户可触发) | **中断门<br>0xE** | 0 | **3** | **INT 0x80** | 用户态可调用<br>**现代内核也用中断门** |
 | **任务切换** | 任务门<br>0x5 | N/A | - | 无（Linux 不使用） | Linux 用软件任务切换 |
 
 #### 完整的 IDT 向量门类型列表（0-255）
@@ -1401,27 +1401,40 @@ static const __initconst struct idt_data ist_idts[] = {
 // DPL: 0
 ```
 
-**向量 128 (0x80)：传统系统调用（唯一的陷阱门）**
+**向量 128 (0x80)：传统系统调用（使用中断门，DPL=3）**
 
 ```c
-// arch/x86/kernel/idt.c:141-145
-#ifdef CONFIG_IA32_EMULATION
-    SYSG(IA32_SYSCALL_VECTOR, entry_INT80_compat),  // 128 (0x80)
+// arch/x86/kernel/idt.c:122-128（实际源代码）
+static const struct idt_data ia32_idt[] __initconst = {
+#if defined(CONFIG_IA32_EMULATION)
+	SYSG(IA32_SYSCALL_VECTOR,	asm_int80_emulation),  // 128 (0x80)
+#elif defined(CONFIG_X86_32)
+	SYSG(IA32_SYSCALL_VECTOR,	entry_INT80_32),
 #endif
+};
 
-// SYSG 宏定义（系统门 = 陷阱门 + DPL=3）
-#define SYSG(_vector, _addr)                    \
-    {                                           \
-        .vector     = _vector,                  \
-        .bits.type  = GATE_TRAP,       /* 0xF */\
-        .bits.ist   = DEFAULT_STACK,   /* 0   */\
-        .bits.p     = 1,                        \
-        .bits.dpl   = 3,               /* Ring 3 可调用 */ \
-        .addr       = _addr,                    \
-    }
+// SYSG 宏定义（arch/x86/kernel/idt.c:37）
+// ⚠️ 重要：现代内核使用 INTERRUPT Gate，不是 TRAP Gate！
+#define SYSG(_vector, _addr)				\
+	G(_vector, _addr, DEFAULT_STACK, GATE_INTERRUPT, DPL3, __KERNEL_CS)
+//                                       ^^^^^^^^^^^^^^^
+//                                       0xE，不是 0xF！
 
-// 注意：现代 Linux (x86-64) 主要使用 syscall/sysenter 指令
-// 向量 0x80 仅为 32 位兼容性保留
+// 展开后的实际内容：
+{
+    .vector     = 128,                     // IA32_SYSCALL_VECTOR
+    .bits.ist   = 0,                       // DEFAULT_STACK
+    .bits.type  = GATE_INTERRUPT,  /* 0xE，中断门！ */
+    .bits.dpl   = 3,               /* Ring 3 可调用 */
+    .bits.p     = 1,               /* Present */
+    .addr       = asm_int80_emulation,
+    .segment    = __KERNEL_CS,
+}
+
+// 注意：
+// 1. 现代 Linux (x86-64) 主要使用 syscall/sysenter 指令
+// 2. 向量 0x80 仅为 32 位兼容性保留
+// 3. 早期内核曾使用 Trap Gate，现代内核已改为 Interrupt Gate
 ```
 
 **向量 129-238：高级中断向量（主要未使用，保留给设备）**
@@ -1468,30 +1481,35 @@ static const __initconst struct idt_data ist_idts[] = {
 | **0-31** | 32 | 中断门<br>0xE | 0 | 0 | CPU 异常 | `arch/x86/kernel/idt.c:97-130`<br>`def_idts[]` |
 | **1,2,8,18** | 4 | 中断门<br>0xE | 1-4 | 0 | IST 异常覆盖 | `arch/x86/kernel/cpu/common.c:2066-2091`<br>`ist_idts[]` |
 | **32-127** | 96 | 中断门<br>0xE | 0 | 0 | 设备中断 IRQ | `arch/x86/kernel/apic/vector.c`<br>`irq_matrix_*()` |
-| **128 (0x80)** | 1 | **陷阱门<br>0xF** | 0 | **3** | 32位系统调用 | `arch/x86/kernel/idt.c:141-145`<br>`SYSG()` 宏 |
+| **128 (0x80)** | 1 | **中断门<br>0xE** | 0 | **3** | 32位系统调用<br>（兼容模式） | `arch/x86/kernel/idt.c:122-128`<br>`SYSG()` 宏 |
 | **129-238** | 110 | 中断门<br>0xE | 0 | 0 | 未分配<br>（可用于设备） | - |
 | **239-255** | 17 | 中断门<br>0xE | 0 | 0 | APIC/IPI 系统向量 | `arch/x86/include/asm/irq_vectors.h:89-115` |
 
 **关键结论：**
 
-1. **中断门（0xE）占绝对主导**：256 个向量中，只有 **1 个**使用陷阱门（向量 0x80）
-2. **陷阱门（0xF）极其罕见**：仅用于 32 位兼容系统调用，现代 64 位系统已不常用
+1. **中断门（0xE）100% 主导**：256 个向量**全部**使用中断门（0xE）
+2. **陷阱门（0xF）完全不用**：现代 Linux 内核（5.x+）已不再使用陷阱门
 3. **任务门（0x5）完全不用**：Linux 内核从不使用任务门
 4. **IST 只用于 4 个关键异常**：#DB (IST1), #NMI (IST2), #DF (IST3), #MC (IST4)
 5. **用户态只能触发 1 个向量**：0x80 (DPL=3)，其他 255 个全部 DPL=0（内核专用）
 6. **现代系统调用不通过 IDT**：x86-64 使用 `syscall` 指令，绕过 IDT 直接跳转到 MSR 指定的地址
 
-**为什么要区分中断门和陷阱门？**
+**为什么 Intel 定义了中断门和陷阱门？**
 
-- **中断门（0xE）**：关闭中断是为了防止**嵌套中断**破坏栈帧
-  - 示例：处理键盘中断时，不希望被另一个键盘中断打断
-  - 示例：处理 #PF（缺页异常）时，虽然可能很慢（换页），但仍需要关中断保护栈帧的完整性
-  - 处理程序可以在合适的时候手动重新启用中断（`sti` 指令）
+- **中断门（0xE）**：自动关闭中断（CLI），防止**嵌套中断**破坏栈帧
+  - 设计目的：保护内核栈在中断处理期间的完整性
+  - CPU 自动执行：进入处理程序时 `IF ← 0`（禁用中断）
+  - 手动控制：处理程序可以在合适的时候重新启用中断（`STI` 指令）
+  - 现代 Linux：**所有 256 个向量都使用中断门**
 
-- **陷阱门（0xF）**：不关中断是为了保持**响应性**
-  - 历史：早期内核中 #BP（断点）、#OF（溢出）等使用陷阱门
-  - 现状：现代 Linux 内核几乎全部改用中断门（更安全）
-  - 主要用于：系统调用（int 0x80）需要 DPL=3 + 不关中断
+- **陷阱门（0xF）**：不修改 IF 标志，保持**响应性**
+  - 设计目的：某些异常处理期间允许响应硬件中断
+  - Intel 规范：Section 6.12.1.2 明确定义了两者的 IF 标志处理区别
+  - 历史使用：早期 Linux 内核（2.6 之前）对某些向量使用陷阱门
+  - **现代 Linux：完全不使用陷阱门**
+    - 原因 1：安全性（中断门更安全，防止栈破坏）
+    - 原因 2：性能（现代处理程序会及时手动 STI）
+    - 原因 3：简化（统一使用中断门，减少代码复杂度）
 
 **为什么任务门在 Linux 中被废弃？**
 

@@ -66,7 +66,7 @@
 | [BIOS_FIRST_BLOCK_ANALYSIS.md](BIOS_FIRST_BLOCK_ANALYSIS.md) | BIOS 第一个块（First Block）分析 |
 | [BIOS_INTERRUPT_COMPLETE.md](BIOS_INTERRUPT_COMPLETE.md) | BIOS 中断完整文档 |
 | [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md) | BIOS IVT 与 Linux 内核 IDT 的软件中断服务程序对比 |
-| [IVT_IDT_DATA_STRUCTURE_COMPARISON.md](IVT_IDT_DATA_STRUCTURE_COMPARISON.md) | BIOS IVT 与 Kernel IDT 数据结构详细对比（实模式 vs 保护模式/长模式）<br>• **包含完整的 256 向量统计表**：Interrupt Gate vs Trap Gate 数量对比<br>• 结论：255 个 Interrupt Gate (0xE)，仅 1 个 Trap Gate (0xF，INT 0x80） |
+| [IVT_IDT_DATA_STRUCTURE_COMPARISON.md](IVT_IDT_DATA_STRUCTURE_COMPARISON.md) | BIOS IVT 与 Kernel IDT 数据结构详细对比（实模式 vs 保护模式/长模式）<br>• **包含完整的 256 向量统计表**：Interrupt Gate vs Trap Gate 数量对比<br>• 结论：**256 个向量全部使用 Interrupt Gate (0xE)**，现代 Linux 不使用 Trap Gate |
 | [BIOS_SIZE.md](BIOS_SIZE.md) | BIOS 大小与映射关系详解 |
 | [BIOS_VERIFICATION_REPORT.md](BIOS_VERIFICATION_REPORT.md) | BIOS 固定地址验证报告 |
 
