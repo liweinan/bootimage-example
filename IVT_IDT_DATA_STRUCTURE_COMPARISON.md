@@ -1,9 +1,10 @@
 # BIOS IVT 与 Kernel IDT 数据结构详细对比
 
-**版本**: 1.3
+**版本**: 1.4
 **日期**: 2026-02-17
 **作者**: Linux 内核启动文档项目
 **更新内容**:
+- v1.4: 添加完整的 IDT 向量门类型列表（0-255）及内核代码引述
 - v1.3: 添加三种门描述符的详细数据结构对比（bit-level布局）、Linux 内核使用场景、IST 配置说明
 - v1.2: 添加设计哲学对比、"门"描述符深度解释、生动类比（木门 vs 金库门）
 - v1.1: 添加详细的 SeaBIOS 和 Linux kernel 源代码引用
@@ -1079,6 +1080,194 @@ static const __initconst struct idt_data ist_idts[] = {
 | **普通异常**<br>(栈安全) | 中断门<br>0xE | 0 | 0 | #PF, #GP, #DE, #TS | 需要关中断保护栈帧 |
 | **系统调用**<br>(用户可触发) | 陷阱门<br>0xF | 0 | 3 | int 0x80, syscall | 用户态可调用<br>不关中断保持响应 |
 | **任务切换** | 任务门<br>0x5 | N/A | - | 无（Linux 不使用） | Linux 用软件任务切换 |
+
+#### 完整的 IDT 向量门类型列表（0-255）
+
+**注意**：本列表基于 Linux 内核 6.x 版本。
+
+**向量 0-31：CPU 定义的异常（全部使用中断门）**
+
+```c
+// arch/x86/kernel/idt.c:97-130 - 异常处理程序的完整定义
+static const __initconst struct idt_data def_idts[] = {
+    INTG(X86_TRAP_DE,       asm_exc_divide_error),           // 0:  #DE 除法错误
+    INTG(X86_TRAP_DB,       asm_exc_debug),                  // 1:  #DB 调试异常*
+    INTG(X86_TRAP_NMI,      asm_exc_nmi),                    // 2:  #NMI 不可屏蔽中断*
+    INTG(X86_TRAP_BP,       asm_exc_int3),                   // 3:  #BP 断点
+    INTG(X86_TRAP_OF,       asm_exc_overflow),               // 4:  #OF 溢出
+    INTG(X86_TRAP_BR,       asm_exc_bounds),                 // 5:  #BR 边界检查
+    INTG(X86_TRAP_UD,       asm_exc_invalid_op),             // 6:  #UD 无效操作码
+    INTG(X86_TRAP_NM,       asm_exc_device_not_available),   // 7:  #NM 设备不可用（FPU）
+    INTG(X86_TRAP_DF,       asm_exc_double_fault),           // 8:  #DF 双重故障*
+    INTG(X86_TRAP_OLD_MF,   asm_exc_coproc_segment_overrun), // 9:  协处理器段溢出
+    INTG(X86_TRAP_TS,       asm_exc_invalid_tss),            // 10: #TS 无效 TSS
+    INTG(X86_TRAP_NP,       asm_exc_segment_not_present),    // 11: #NP 段不存在
+    INTG(X86_TRAP_SS,       asm_exc_stack_segment),          // 12: #SS 栈段错误
+    INTG(X86_TRAP_GP,       asm_exc_general_protection),     // 13: #GP 通用保护错误
+    INTG(X86_TRAP_PF,       asm_exc_page_fault),             // 14: #PF 缺页异常
+    INTG(X86_TRAP_SPURIOUS, asm_exc_spurious_interrupt_bug), // 15: 伪中断
+    INTG(X86_TRAP_MF,       asm_exc_coprocessor_error),      // 16: #MF x87 FPU 错误
+    INTG(X86_TRAP_AC,       asm_exc_alignment_check),        // 17: #AC 对齐检查
+    INTG(X86_TRAP_MC,       asm_exc_machine_check),          // 18: #MC 机器检查*
+    INTG(X86_TRAP_XF,       asm_exc_simd_coprocessor_error), // 19: #XF SIMD 浮点异常
+    INTG(X86_TRAP_VE,       asm_exc_virtualization_exception), // 20: #VE 虚拟化异常
+    INTG(X86_TRAP_CP,       asm_exc_control_protection),      // 21: #CP 控制流保护
+    // 22-28: Intel 保留
+    INTG(X86_TRAP_VC,       asm_exc_vmm_communication),       // 29: #VC VMM 通信（SEV-ES）
+    INTG(X86_TRAP_SECURITY, asm_exc_security_exception),      // 30: #SX 安全异常（SEV）
+    // 31: Intel 保留
+};
+
+// 注：标记 * 的异常会被 ist_idts 覆盖，设置 IST 字段
+```
+
+**门类型定义（INTG 宏）：**
+
+```c
+// arch/x86/kernel/idt.c:253-258
+#define INTG(_vector, _addr)                    \
+    {                                           \
+        .vector     = _vector,                  \
+        .bits.type  = GATE_INTERRUPT,  /* 0xE */\
+        .bits.ist   = DEFAULT_STACK,   /* 0   */\
+        .bits.p     = 1,                        \
+        .bits.dpl   = 0,               /* Ring 0 */ \
+        .addr       = _addr,                    \
+    }
+
+// DEFAULT_STACK = 0（不使用 IST）
+```
+
+**使用 IST 的特殊异常（覆盖上述默认设置）：**
+
+```c
+// arch/x86/kernel/cpu/common.c:2066-2091
+static const __initconst struct idt_data ist_idts[] = {
+    ISTG(X86_TRAP_DB,  asm_exc_debug,         IST_INDEX_DB),   // 1:  #DB → IST1
+    ISTG(X86_TRAP_NMI, asm_exc_nmi,           IST_INDEX_NMI),  // 2:  #NMI → IST2
+    ISTG(X86_TRAP_DF,  asm_exc_double_fault,  IST_INDEX_DF),   // 8:  #DF → IST3
+    ISTG(X86_TRAP_MC,  asm_exc_machine_check, IST_INDEX_MC),   // 18: #MC → IST4
+};
+
+// arch/x86/include/asm/cpu_entry_area.h
+#define IST_INDEX_DB    1  // Debug：防止递归调试
+#define IST_INDEX_NMI   2  // NMI：不可屏蔽，需要独立栈
+#define IST_INDEX_DF    3  // Double Fault：栈已损坏时的最后防线
+#define IST_INDEX_MC    4  // Machine Check：硬件严重错误
+```
+
+**向量 32-127：设备中断（IRQ，全部使用中断门）**
+
+```c
+// arch/x86/include/asm/irq_vectors.h
+#define FIRST_EXTERNAL_VECTOR   0x20  // 32：第一个外部中断向量
+
+// arch/x86/kernel/apic/vector.c - 动态分配 IRQ 向量
+// 所有设备中断（键盘、网卡、磁盘等）都使用中断门
+
+// 示例 IRQ 分配（传统 8259 PIC 模式）：
+// 向量 32 (IRQ0):  系统定时器
+// 向量 33 (IRQ1):  键盘
+// 向量 34 (IRQ2):  级联（从 PIC）
+// 向量 35 (IRQ3):  COM2/COM4
+// 向量 36 (IRQ4):  COM1/COM3
+// 向量 37 (IRQ5):  LPT2（或声卡）
+// 向量 38 (IRQ6):  软盘
+// 向量 39 (IRQ7):  LPT1
+// 向量 40 (IRQ8):  实时时钟（RTC）
+// 向量 41 (IRQ9):  ACPI
+// 向量 42 (IRQ10): 可用
+// 向量 43 (IRQ11): 可用
+// 向量 44 (IRQ12): PS/2 鼠标
+// 向量 45 (IRQ13): 数学协处理器
+// 向量 46 (IRQ14): 主 IDE
+// 向量 47 (IRQ15): 从 IDE
+
+// 现代系统（APIC 模式）：向量动态分配到 32-127 范围
+// 门类型：全部 GATE_INTERRUPT (0xE)
+// IST: 0
+// DPL: 0
+```
+
+**向量 128 (0x80)：传统系统调用（唯一的陷阱门）**
+
+```c
+// arch/x86/kernel/idt.c:141-145
+#ifdef CONFIG_IA32_EMULATION
+    SYSG(IA32_SYSCALL_VECTOR, entry_INT80_compat),  // 128 (0x80)
+#endif
+
+// SYSG 宏定义（系统门 = 陷阱门 + DPL=3）
+#define SYSG(_vector, _addr)                    \
+    {                                           \
+        .vector     = _vector,                  \
+        .bits.type  = GATE_TRAP,       /* 0xF */\
+        .bits.ist   = DEFAULT_STACK,   /* 0   */\
+        .bits.p     = 1,                        \
+        .bits.dpl   = 3,               /* Ring 3 可调用 */ \
+        .addr       = _addr,                    \
+    }
+
+// 注意：现代 Linux (x86-64) 主要使用 syscall/sysenter 指令
+// 向量 0x80 仅为 32 位兼容性保留
+```
+
+**向量 129-238：高级中断向量（主要未使用，保留给设备）**
+
+```c
+// 这些向量可以动态分配给 PCI/PCIe 设备
+// 门类型：GATE_INTERRUPT (0xE)
+// IST: 0
+// DPL: 0
+```
+
+**向量 239-255：APIC 和系统管理向量（全部使用中断门）**
+
+```c
+// arch/x86/include/asm/irq_vectors.h:89-115
+#define FIRST_SYSTEM_VECTOR     0xef  // 239
+
+// 系统向量定义（从高到低）：
+#define SPURIOUS_APIC_VECTOR            0xff  // 255: APIC 伪中断
+#define ERROR_APIC_VECTOR               0xfe  // 254: APIC 错误
+#define RESCHEDULE_VECTOR               0xfd  // 253: 重新调度 IPI
+#define CALL_FUNCTION_VECTOR            0xfc  // 252: 函数调用 IPI
+#define CALL_FUNCTION_SINGLE_VECTOR     0xfb  // 251: 单 CPU 函数调用
+#define THERMAL_APIC_VECTOR             0xfa  // 250: CPU 温度警告
+#define THRESHOLD_APIC_VECTOR           0xf9  // 249: MCE 阈值中断
+#define REBOOT_VECTOR                   0xf8  // 248: 重启 IPI
+#define X86_PLATFORM_IPI_VECTOR         0xf7  // 247: 平台 IPI
+#define IRQ_WORK_VECTOR                 0xf6  // 246: IRQ work
+#define UV_BAU_MESSAGE                  0xf5  // 245: UV BAU 消息
+#define DEFERRED_ERROR_VECTOR           0xf4  // 244: AMD 延迟错误
+#define HYPERVISOR_CALLBACK_VECTOR      0xf3  // 243: Hypervisor 回调
+#define POSTED_INTR_VECTOR              0xf2  // 242: Posted interrupt
+#define POSTED_INTR_WAKEUP_VECTOR       0xf1  // 241: Posted int wakeup
+#define POSTED_INTR_NESTED_VECTOR       0xf0  // 240: Posted int nested
+#define LOCAL_TIMER_VECTOR              0xef  // 239: APIC 定时器
+
+// 所有系统向量：GATE_INTERRUPT (0xE), IST=0, DPL=0
+```
+
+**IDT 0-255 完整总结表：**
+
+| 向量范围 | 数量 | 门类型 | IST | DPL | 用途 | 内核代码引用 |
+|---------|------|--------|-----|-----|------|-------------|
+| **0-31** | 32 | 中断门<br>0xE | 0 | 0 | CPU 异常 | `arch/x86/kernel/idt.c:97-130`<br>`def_idts[]` |
+| **1,2,8,18** | 4 | 中断门<br>0xE | 1-4 | 0 | IST 异常覆盖 | `arch/x86/kernel/cpu/common.c:2066-2091`<br>`ist_idts[]` |
+| **32-127** | 96 | 中断门<br>0xE | 0 | 0 | 设备中断 IRQ | `arch/x86/kernel/apic/vector.c`<br>`irq_matrix_*()` |
+| **128 (0x80)** | 1 | **陷阱门<br>0xF** | 0 | **3** | 32位系统调用 | `arch/x86/kernel/idt.c:141-145`<br>`SYSG()` 宏 |
+| **129-238** | 110 | 中断门<br>0xE | 0 | 0 | 未分配<br>（可用于设备） | - |
+| **239-255** | 17 | 中断门<br>0xE | 0 | 0 | APIC/IPI 系统向量 | `arch/x86/include/asm/irq_vectors.h:89-115` |
+
+**关键结论：**
+
+1. **中断门（0xE）占绝对主导**：256 个向量中，只有 **1 个**使用陷阱门（向量 0x80）
+2. **陷阱门（0xF）极其罕见**：仅用于 32 位兼容系统调用，现代 64 位系统已不常用
+3. **任务门（0x5）完全不用**：Linux 内核从不使用任务门
+4. **IST 只用于 4 个关键异常**：#DB (IST1), #NMI (IST2), #DF (IST3), #MC (IST4)
+5. **用户态只能触发 1 个向量**：0x80 (DPL=3)，其他 255 个全部 DPL=0（内核专用）
+6. **现代系统调用不通过 IDT**：x86-64 使用 `syscall` 指令，绕过 IDT 直接跳转到 MSR 指定的地址
 
 **为什么要区分中断门和陷阱门？**
 
