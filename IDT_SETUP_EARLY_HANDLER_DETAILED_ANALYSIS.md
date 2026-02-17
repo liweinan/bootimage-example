@@ -749,6 +749,141 @@ idt_table[i] = desc  ← 内存写入完成
   └─ 填充向量 32-255（IRQ、APIC、系统向量）
 ```
 
+#### ❓ 为什么前 32 个向量要填充两次？
+
+**阶段 1 vs 阶段 4 的关键区别**：
+
+| 对比项 | 阶段 1：idt_setup_early_handler() | 阶段 4：idt_setup_traps() |
+|--------|----------------------------------|--------------------------|
+| **调用时机** | 极早期（x86_64_start_kernel） | trap_init()（cpu_init() 之后） |
+| **处理程序** | early_idt_handler_array[] | 各异常专用处理程序（asm_exc_*） |
+| **处理方式** | 所有异常 → early_idt_handler_common | 每个异常有独立处理程序 |
+| **IST 支持** | ❌ 不支持（TSS 未初始化） | ✅ 支持（#DF, #NMI, #MC 等使用 IST） |
+| **功能** | 临时应急，仅支持基本异常处理 | 完整功能，支持复杂异常处理 |
+| **主要目的** | 处理 #PF 用于早期页表建立 | 正式的生产环境异常处理 |
+
+**为什么需要两次？**
+
+1. **阶段 1：临时应急（"保命"）**
+   - **时间点**：内核刚启动，很多子系统还未初始化
+   - **限制条件**：
+     - TSS（Task State Segment）未建立 → 无法使用 IST
+     - Per-CPU 数据结构未准备好
+     - 只能使用默认内核栈
+   - **关键需求**：必须能处理 #PF（缺页异常）
+     - 早期页表是动态建立的
+     - 访问未映射的内存 → #PF → early_make_pgtable() 建立映射
+   - **处理程序特点**：
+     ```c
+     // 所有异常都跳转到这里
+     early_idt_handler_common:
+         保存寄存器
+         调用 do_early_exception(regs, trapnr)
+         恢复寄存器
+         iret
+
+     do_early_exception():
+         if (trapnr == #PF)
+             early_make_pgtable()  // 动态建立页表
+         else
+             early_fixup_exception() // 或 panic
+     ```
+
+2. **阶段 4：正式上岗（"完整功能"）**
+   - **时间点**：cpu_init() 完成后，TSS、IST 都已设置好
+   - **完整功能**：
+     - 可以使用 IST（Interrupt Stack Table）
+     - 每个异常有专门的处理程序
+     - 支持复杂的错误恢复、信号传递、调试等
+   - **关键改进**：
+     ```c
+     // 每个异常有独立入口
+     asm_exc_page_fault:      // #PF 专用处理
+         PUSH_AND_CLEAR_REGS
+         call exc_page_fault   // C 函数
+             handle_page_fault()
+             do_user_addr_fault()
+             ...复杂的页错误处理...
+         POP_REGS
+         iret
+
+     asm_exc_double_fault:    // #DF 使用 IST3
+         使用独立的 IST 栈（防止栈溢出导致的双重错误）
+         call exc_double_fault
+             panic("Double Fault")
+
+     asm_exc_nmi:             // #NMI 使用 IST2
+         使用独立的 IST 栈（防止被中断打断）
+         call exc_nmi
+             ...NMI 处理...
+     ```
+
+**渐进式初始化的必要性**：
+
+```
+内核启动早期状态：
+  ✅ 基本 C 运行环境（栈、BSS 段）
+  ✅ early_idt_handler_array 汇编代码
+  ❌ TSS 未初始化
+  ❌ IST 不可用
+  ❌ Per-CPU 数据未准备
+  ❌ 异常处理子系统未初始化
+
+         ↓ idt_setup_early_handler()
+         ↓ 使用简单处理程序
+         ↓
+         ↓ 内核继续初始化...
+         ↓ cpu_init() 设置 TSS/IST
+         ↓ 各种子系统初始化
+         ↓
+         ↓ idt_setup_traps()
+         ↓ 切换到完整处理程序
+
+trap_init() 完成后：
+  ✅ TSS 已初始化
+  ✅ IST 栈已设置
+  ✅ Per-CPU 数据已准备
+  ✅ 异常处理子系统已就绪
+  ✅ 可以使用复杂的异常处理逻辑
+```
+
+**代码证据**：
+
+```c
+// arch/x86/kernel/head64.c
+void __init x86_64_start_kernel(char *real_mode_data)
+{
+    // 极早期：只有基本环境
+    kasan_early_init();
+    __native_tlb_flush_global(...);
+
+    idt_setup_early_handler();  // ← 阶段 1：临时应急
+
+    // 此时 TSS 还未初始化，不能使用 IST！
+    tdx_early_init();
+    copy_bootdata(__va(real_mode_data));
+    // ... 继续初始化 ...
+}
+
+// arch/x86/kernel/traps.c
+void __init trap_init(void)
+{
+    // 此时已经过了 cpu_init()，TSS/IST 已设置好
+
+    idt_setup_traps();  // ← 阶段 4：正式上岗
+
+    // 替换所有异常向量，使用完整功能处理程序
+    // 现在可以安全地使用 IST 了
+
+    idt_setup_apic_and_irq_gates();
+    // ...
+}
+```
+
+**总结**：这是典型的"先有鸡还是先有蛋"问题的解决方案——渐进式初始化：
+1. 先用简单的处理程序"保命"（处理必需的 #PF）
+2. 等环境准备好后，换上完整功能的处理程序
+
 #### 完整向量表（按初始化阶段分组）
 
 **向量 0-31：CPU 异常（最终由 idt_setup_traps 设置）**
