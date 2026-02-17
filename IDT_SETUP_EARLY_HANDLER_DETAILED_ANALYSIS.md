@@ -528,7 +528,7 @@ struct idt_data {
 };
 ```
 
-**init_idt_data() 函数**（`arch/x86/include/asm/desc.h`）：
+**init_idt_data() 函数**（`arch/x86/include/asm/desc.h:405-416`）：
 
 ```c
 static inline void init_idt_data(struct idt_data *data, unsigned int n,
@@ -943,7 +943,7 @@ CPU 触发异常 → 读取 idt_table[i] → 跳转到 early_idt_handler_array[i
 |------|----------|------|
 | `idt_setup_early_handler()` | `arch/x86/kernel/idt.c:317-331` | 主函数 |
 | `set_intr_gate()` | `arch/x86/kernel/idt.c:206-213` | 设置中断门 |
-| `init_idt_data()` | `arch/x86/include/asm/desc.h` | 初始化 idt_data 宏 |
+| `init_idt_data()` | `arch/x86/include/asm/desc.h:405-416` | 初始化 idt_data 结构（静态内联函数） |
 | `idt_setup_from_table()` | `arch/x86/kernel/idt.c:193-204` | 批量写入 |
 | `idt_init_desc()` | `arch/x86/kernel/idt.c:64-73` | 构建门描述符 |
 | `write_idt_entry()` | `arch/x86/include/asm/desc.h:177-180` | 原子写入 |

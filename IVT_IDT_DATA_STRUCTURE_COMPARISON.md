@@ -1946,17 +1946,20 @@ static __init void set_intr_gate(unsigned int n, const void *addr)
     idt_setup_from_table(idt_table, &data, 1, false);
 }
 
-// arch/x86/kernel/idt.c:95-102 - 初始化 idt_data 结构的宏
-#define init_idt_data(data, n, addr)                \
-do {                                                 \
-    (data)->vector   = (n);                          /* 向量号 */        \
-    (data)->bits.ist = DEFAULT_STACK;                /* IST = 0（不使用独立栈） */  \
-    (data)->bits.type = GATE_INTERRUPT;              /* 0xE（Interrupt Gate，禁用中断） */  \
-    (data)->bits.dpl  = DPL0;                        /* 特权级 0（只能从内核调用） */  \
-    (data)->bits.p    = 1;                           /* Present = 1（有效） */  \
-    (data)->addr      = (addr);                      /* 处理程序地址 */  \
-    (data)->segment   = __KERNEL_CS;                 /* 内核代码段选择子 0x10 */  \
-} while (0)
+// arch/x86/include/asm/desc.h:405-416 - 初始化 idt_data 结构（静态内联函数）
+static inline void init_idt_data(struct idt_data *data, unsigned int n,
+				 const void *addr)
+{
+	BUG_ON(n > 0xFF);  // 向量号必须 <= 255
+
+	memset(data, 0, sizeof(*data));  // 先清零所有字段
+	data->vector	= n;                 // 向量号
+	data->addr	= addr;              // 处理程序地址
+	data->segment	= __KERNEL_CS;       // 内核代码段选择子（0x10）
+	data->bits.type	= GATE_INTERRUPT;    // 中断门（0xE）
+	data->bits.p	= 1;                 // Present（有效）
+	// 注意：bits.ist、bits.dpl 由 memset 清零（默认 IST=0, DPL=0）
+}
 
 // arch/x86/include/asm/desc_defs.h:105-112 - idt_data 中间数据结构
 struct idt_data {
