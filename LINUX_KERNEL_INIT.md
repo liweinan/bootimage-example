@@ -1066,6 +1066,16 @@ void __init idt_setup_early_handler(void)
 - ❌ 尚未设置 **硬件中断**（IRQ）和 **INT 0x80**（系统调用）
 - ✅ 硬件中断和系统调用在后续的 `start_kernel()` → `trap_init()` / `init_IRQ()` 中完成
 
+> 📖 **深入理解 idt_setup_early_handler() 的每一行代码**：
+>
+> 详见 **[idt_setup_early_handler() 函数详细分析](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md)**：
+> - 数据结构详解：`idt_table`、`idt_descr`、`gate_desc`、`early_idt_handler_array`
+> - 逐行代码分析：每次循环做了什么、为什么是 32 个向量
+> - `set_intr_gate()` 的完整工作流程（init_idt_data → idt_setup_from_table → write_idt_entry）
+> - `early_idt_handler_array` 的汇编实现（.rept 宏、错误码处理、统一栈帧）
+> - `load_idt()` 的底层实现（lidt 指令、IDTR 寄存器、原子切换）
+> - 完整的执行流程和内存变化
+
 > 📖 **深入理解初始化顺序**：
 >
 > 为什么必须先 `kasan_early_init()` 后 `idt_setup_early_handler()`？如果顺序反过来会发生什么？

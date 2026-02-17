@@ -167,6 +167,7 @@
 |------|------|
 | [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md) | Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue） |
 | [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md) | **Linux 内核 IDT 表的演进流程详解**<br>• 两个 IDT 表、5 个演进阶段<br>• **IDT 中的用户态可触发门（DPL=3）详解：INT3/INTO/INT 0x80 完整对比** |
+| [IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md) | **idt_setup_early_handler() 函数详细分析** ⭐ 新增<br>• 数据结构详解：`idt_table`、`idt_descr`、`gate_desc`、`desc_ptr`<br>• `early_idt_handler_array` 的汇编实现（.rept 宏、32 个处理程序桩）<br>• 逐行代码分析：为什么是 32 个向量、每次循环做了什么<br>• `set_intr_gate()` 的完整工作流程（init_idt_data → idt_setup_from_table → write_idt_entry）<br>• `load_idt()` 的底层实现（lidt 指令、IDTR 寄存器更新、原子切换）<br>• `early_idt_handler_common` 公共处理程序（栈帧布局、调用 do_early_exception）<br>• EXCEPTION_ERRCODE_MASK 详解（哪些异常自动压入错误码）<br>• 完整的执行流程图和内存变化对比 |
 | [KASAN_INSTRUMENTATION_AND_INIT_ORDER.md](KASAN_INSTRUMENTATION_AND_INIT_ORDER.md) | **KASAN 插桩机制与初始化顺序深度分析** ⭐ 新增<br>• 编译时插桩 vs 运行时初始化的本质区别<br>• 为什么必须先 kasan_early_init() 后 idt_setup_early_handler()<br>• `__asan_loadXX`/`__asan_storeXX` 函数工作原理<br>• 如果 KASAN 未初始化会发生什么（递归 Page Fault → Triple Fault）<br>• 内核源代码证据（head64.c 明确注释）<br>• 为什么不让 KASAN 自动跳过检查（性能、Chicken-and-Egg 问题）<br>• `__head` 和 `KASAN_SANITIZE` 的作用<br>• 影子内存（Shadow Memory）机制详解 |
 | [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md) | **Linux 系统调用初始化详解**<br>• trap_init/syscall_init<br>• INT 0x80 vs SYSCALL/SYSENTER 性能对比<br>• entry_SYSCALL_64 入口分析 |
 

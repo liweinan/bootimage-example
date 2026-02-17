@@ -447,6 +447,18 @@ static gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
        - 作用：处理启动早期的异常（#PF, #DE, #GP 等）
        - 限制：尚无 IST（中断栈），尚无硬件 IRQ 门，尚无 INT 0x80
 
+> 📖 **深入理解 idt_setup_early_handler() 的每一行代码**：
+>
+> `idt_setup_early_handler()` 究竟做了什么？`early_idt_handler_array` 是如何实现的？`set_intr_gate()` 和 `load_idt()` 的底层细节是什么？
+>
+> 详见 **[idt_setup_early_handler() 函数详细分析](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md)**：
+> - 数据结构详解（`idt_table`、`idt_descr`、`gate_desc` 的完整布局）
+> - `early_idt_handler_array` 的汇编实现（.rept 宏生成 32 个处理程序桩）
+> - `set_intr_gate()` 的工作流程（init_idt_data → idt_setup_from_table → write_idt_entry）
+> - `load_idt()` 的底层实现（lidt 指令、IDTR 寄存器、原子切换）
+> - 为什么是 32 个向量（x86 架构保留的异常向量）
+> - EXCEPTION_ERRCODE_MASK 详解（哪些异常自动压入错误码）
+
 #### 阶段 1 的内存管理状态：分页已启用，但内存管理未完善
 
 **关键问题**：在 `idt_setup_early_handler()` 被调用时，系统的内存管理处于什么状态？
