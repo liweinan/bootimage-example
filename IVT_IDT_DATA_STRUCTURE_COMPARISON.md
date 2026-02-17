@@ -1012,9 +1012,49 @@ gate_desc idt_table[IDT_ENTRIES] __page_aligned_bss;
 // 即使内核代码也受到页表保护的限制
 ```
 
-#### 三种类型的门
+#### Intel x86 架构中的所有"门"类型
 
-x86-64 架构定义了三种门描述符，都存储在 IDT 中：
+**重要说明**：Intel SDM 中的"门描述符"（Gate Descriptors）是一个**总称**，不同类型的门存储在不同的表中：
+
+```
+门描述符（Gate Descriptors）分类
+│
+├── 存储在 GDT/LDT 中的门：
+│   └── Call Gate（调用门）              ← Intel SDM Section 5.8.3
+│       • 用途：跨特权级函数调用
+│       • 触发：CALL FAR 指令
+│       • 现代用途：几乎不用（64位用 SYSCALL 代替）
+│
+└── 存储在 IDT 中的门：                    ← Intel SDM Section 6.14.1
+    ├── Interrupt Gate（中断门）
+    │   • 用途：处理硬件中断和某些异常
+    │   • 特点：自动禁用中断（IF←0）
+    │
+    ├── Trap Gate（陷阱门）
+    │   • 用途：处理异常和系统调用
+    │   • 特点：不修改 IF 标志
+    │
+    └── Task Gate（任务门）
+        • 用途：硬件任务切换
+        • 状态：x86-64 已废弃
+```
+
+**关键区别**：
+
+| 特性 | Call Gate | IDT Gate (Interrupt/Trap) |
+|------|-----------|--------------------------|
+| **位置** | GDT 或 LDT | **IDT** |
+| **SDM 章节** | Section 5.8.3 | Section 6.14.1 |
+| **用途** | 跨特权级调用 | 中断/异常处理 |
+| **触发方式** | `CALL FAR` 指令 | `INT n`、硬件中断、CPU 异常 |
+| **64位支持** | 支持（16字节） | 支持（16字节） |
+| **Linux 使用** | ❌ 几乎不用 | ✅ 广泛使用 |
+
+**注意**：本文档主要讨论的是 **IDT 中的门描述符**（Interrupt Gate 和 Trap Gate），不涉及 Call Gate。
+
+#### IDT 中的三种门类型
+
+x86-64 架构在 **IDT** 中定义了三种门描述符：
 
 | 门类型 | Type 值 | 用途 | 进入时是否关中断 | Linux 使用场景 |
 |--------|---------|------|-----------------|---------------|
@@ -2206,9 +2246,49 @@ x86-64（2003）→ IDT：长模式，强制要求
 ### 11.1 Intel 手册
 
 1. **Intel 64 and IA-32 Architectures Software Developer's Manual**
-   - Volume 3A, Chapter 6: Interrupt and Exception Handling
-   - Volume 3A, Section 6.10: Interrupt Descriptor Table (IDT)
-   - Volume 3A, Section 6.14: Exception and Interrupt Handling in 64-Bit Mode
+
+   **Volume 3A: System Programming Guide, Part 1**
+
+   **Chapter 5: Protection**
+   - Section 5.8: Control Transfers
+   - **Section 5.8.3: Call Gates** (调用门，GDT/LDT 中的门描述符)
+     - Call-Gate Descriptor 结构
+     - 跨特权级函数调用机制
+     - 与 IDT Gate 的区别
+
+   **Chapter 6: Interrupt and Exception Handling**
+   - Section 6.1: Interrupt and Exception Overview
+   - **Section 6.10: Interrupt Descriptor Table (IDT)**
+     - IDT 的基本概念和作用
+   - **Section 6.11: IDT Descriptors**
+     - **Figure 6-2**: IDT Gate Descriptors (32-bit mode)
+     - Interrupt Gate、Trap Gate、Task Gate 的区别
+   - **Section 6.14: Exception and Interrupt Handling in 64-Bit Mode**
+   - **Section 6.14.1: 64-Bit Mode IDT** ⭐ **核心章节**
+     - **Figure 6-7**: 64-Bit IDT Gate Descriptors (16 字节结构)
+     - IST (Interrupt Stack Table) 机制
+     - 64-bit mode 下的门描述符格式
+   - Section 6.14.2: 64-Bit Mode Stack Frame
+   - Section 6.14.5: Interrupt Stack Table
+
+   **Chapter 7: Task Management**
+   - **Section 7.2.5: Task-Gate Descriptor** (已废弃，64位模式不支持)
+
+   **Chapter 3: Protected-Mode Memory Management**
+   - **Table 3-2**: System-Segment and Gate-Descriptor Types
+     - 列出所有门描述符的 Type 字段值
+     - Interrupt Gate (0xE)、Trap Gate (0xF)、Call Gate、Task Gate
+
+   **下载地址**：
+   - Intel 官方：https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+   - Order Number: 325462 (Combined Volumes)
+
+   **关键概念澄清**：
+   - **Gate Descriptors（门描述符）** 是一个总称，包括：
+     - **Call Gate**：放在 GDT/LDT，用于跨特权级调用（Section 5.8.3）
+     - **Interrupt Gate**：放在 IDT，用于中断处理（Section 6.14.1）
+     - **Trap Gate**：放在 IDT，用于异常/陷阱处理（Section 6.14.1）
+     - **Task Gate**：已废弃（Section 7.2.5）
 
 ### 11.2 Linux 内核源代码
 
