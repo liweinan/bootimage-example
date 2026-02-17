@@ -495,6 +495,7 @@ init_mem_mapping();
 > **详细的内存管理演化分析**（包含完整的内核源码追踪、时间线图、状态对比表），请参见：
 > [Linux 内存管理演化 - 4.0 从临时页表到完整内存管理](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md#40-从临时页表到完整内存管理主内核的内存初始化全过程)
 
+```
 阶段 2: setup_arch() → idt_setup_early_traps()
     └─ idt_setup_early_traps()
        ├─ idt_setup_from_table(idt_table, early_idts, ...)
