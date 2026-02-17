@@ -176,6 +176,14 @@ asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_
 
 ### 2.1 early_idt_handler_array - 异常处理程序数组（汇编生成）
 
+> 💡 **深入理解**：`early_idt_handler_array` 的名字容易误导！它**不是真正的数组**，而是一个**汇编符号**，指向连续的机器代码块。
+>
+> **常见误解**：认为 `early_idt_handler_array[i]` 是从数组中读取地址
+> **正确理解**：`early_idt_handler_array[i]` 是计算第 i 个代码桩的起始地址
+>
+> 📖 **详细分析**：这个概念非常容易混淆，我们专门写了一篇深入文档来澄清：
+> → [EARLY_IDT_HANDLER_ARRAY_EXPLAINED.md](./EARLY_IDT_HANDLER_ARRAY_EXPLAINED.md)
+
 **❗ 关键澄清**：这**不是空表**，而是编译时就生成的**实际代码**！
 
 | 对比项 | early_idt_handler_array | idt_table |
