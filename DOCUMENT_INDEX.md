@@ -66,7 +66,7 @@
 | [BIOS_FIRST_BLOCK_ANALYSIS.md](BIOS_FIRST_BLOCK_ANALYSIS.md) | BIOS 第一个块（First Block）分析 |
 | [BIOS_INTERRUPT_COMPLETE.md](BIOS_INTERRUPT_COMPLETE.md) | BIOS 中断完整文档 |
 | [BIOS_IVT_VS_KERNEL_IDT.md](BIOS_IVT_VS_KERNEL_IDT.md) | BIOS IVT 与 Linux 内核 IDT 的软件中断服务程序对比 |
-| [IVT_IDT_DATA_STRUCTURE_COMPARISON.md](IVT_IDT_DATA_STRUCTURE_COMPARISON.md) | BIOS IVT 与 Kernel IDT 数据结构详细对比（实模式 vs 保护模式/长模式） |
+| [IVT_IDT_DATA_STRUCTURE_COMPARISON.md](IVT_IDT_DATA_STRUCTURE_COMPARISON.md) | BIOS IVT 与 Kernel IDT 数据结构详细对比（实模式 vs 保护模式/长模式）<br>• **包含完整的 256 向量统计表**：Interrupt Gate vs Trap Gate 数量对比<br>• 结论：255 个 Interrupt Gate (0xE)，仅 1 个 Trap Gate (0xF，INT 0x80） |
 | [BIOS_SIZE.md](BIOS_SIZE.md) | BIOS 大小与映射关系详解 |
 | [BIOS_VERIFICATION_REPORT.md](BIOS_VERIFICATION_REPORT.md) | BIOS 固定地址验证报告 |
 
@@ -167,7 +167,7 @@
 | 文档 | 描述 |
 |------|------|
 | [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md) | Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue） |
-| [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md) | **Linux 内核 IDT 表的演进流程详解**<br>• 两个 IDT 表、5 个演进阶段<br>• **IDT 中的用户态可触发门（DPL=3）详解：INT3/INTO/INT 0x80 完整对比** |
+| [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md) | **Linux 内核 IDT 表的演进流程详解**<br>• 两个 IDT 表、5 个演进阶段<br>• **IDT 中的用户态可触发门（DPL=3）详解**：256 个向量中仅 3 个是 DPL=3（INT3/INTO/INT 0x80 完整对比） |
 | [X86_64_TSS_AND_IST.md](X86_64_TSS_AND_IST.md) | **x86-64 任务状态段（TSS）与中断栈表（IST）详解**<br>• TSS 历史演变（硬件任务切换→栈管理器）<br>• IST 机制工作原理与必要性<br>• Double Fault/NMI/Machine Check 的 IST 使用<br>• TSS 初始化时机与启动约束<br>• 未初始化 TSS 时使用 IST 的危险场景 |
 | [IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md) | **idt_setup_early_handler() 函数详细分析** ⭐ v2.0 模块化重构<br>• 四个阶段完整流程：编译时准备 → 运行时写入 → 加载到 CPU → 运行时使用<br>• 数据结构详解：`idt_table`、`idt_descr`、`gate_desc`、`desc_ptr`<br>• `early_idt_handler_array` 的汇编实现（.rept 宏、32 个处理程序桩）<br>• 逐行代码分析：为什么是 32 个向量、每次循环做了什么<br>• `set_intr_gate()` 的完整工作流程（init_idt_data → idt_setup_from_table → write_idt_entry）<br>• `load_idt()` 的底层实现（lidt 指令、IDTR 寄存器更新、原子切换）<br>• 完整的执行流程图和内存变化对比<br>• **配套详细文档**：完整向量表、数据结构详解、异常处理流程（见下方） |
 | [IDT_COMPLETE_VECTOR_TABLE.md](IDT_COMPLETE_VECTOR_TABLE.md) | **IDT 完整向量表参考手册** ⭐ 新增（从主文档拆分）<br>• 完整的 256 个向量清单（0-31 异常、32-127 IRQ、128 系统调用、235-255 APIC）<br>• 五阶段初始化时间线（为什么前 32 个向量要填充两次）<br>• Emergency Handlers vs Production Handlers 对比<br>• 各向量的功能说明、处理程序地址、IST 使用情况<br>• 数据结构示例和源代码引用 |

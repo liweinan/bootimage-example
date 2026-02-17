@@ -28,6 +28,11 @@
 
 > 📚 **文档导航**: [返回总索引](DOCUMENT_INDEX.md) | [阅读指南](READING_GUIDE.md) | [IDT 演进](LINUX_KERNEL_IDT_EVOLUTION.md)
 
+> 🎯 **快速查找**：
+> - 想看 **IDT 256 个向量的完整统计**？→ [直接跳转到统计表](#idt-0-255-完整总结表)
+> - 想了解 **Interrupt Gate vs Trap Gate 数量对比**？→ [关键结论](#关键结论)
+> - 想知道 **哪些向量是 DPL=3**（用户态可触发）？→ [DPL=3 详解](LINUX_KERNEL_IDT_EVOLUTION.md#idt-中的用户态可触发门dpl3-门详解)
+
 > **相关文档**：
 > - 关于 **IVT 和 IDT 的软件中断服务程序对比**（BIOS 服务 vs 内核系统调用、硬件中断与软件中断的协作关系），请参见 [BIOS IVT 与 Kernel IDT 的软件中断服务程序对比](BIOS_IVT_VS_KERNEL_IDT.md)
 > - 关于 **TSS 和 IST 机制**（IDT 中的 IST 字段用途、独立栈机制），请参见 [x86-64 任务状态段（TSS）与中断栈表（IST）详解](X86_64_TSS_AND_IST.md)
