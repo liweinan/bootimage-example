@@ -16,6 +16,7 @@
 
 > 📚 **文档导航**:
 > - [返回总索引](DOCUMENT_INDEX.md) | [IDT 详细分析](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md) | [数据结构关系](IDT_DATA_STRUCTURES_RELATIONSHIP.md)
+> - [Call Gate vs IDT Gate 对比](CALL_GATE_VS_IDT_GATE_KERNEL_STRUCTURES.md) | [IVT/IDT 对比](IVT_IDT_DATA_STRUCTURE_COMPARISON.md)
 
 > 🎯 **快速导航**:
 > - 想了解 Intel SDM 规范？→ [第 2 节](#2-intel-sdm-64-位门描述符规范)

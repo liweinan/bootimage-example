@@ -32,6 +32,7 @@
 > - 关于 **IVT 和 IDT 的软件中断服务程序对比**（BIOS 服务 vs 内核系统调用、硬件中断与软件中断的协作关系），请参见 [BIOS IVT 与 Kernel IDT 的软件中断服务程序对比](BIOS_IVT_VS_KERNEL_IDT.md)
 > - 关于 **TSS 和 IST 机制**（IDT 中的 IST 字段用途、独立栈机制），请参见 [x86-64 任务状态段（TSS）与中断栈表（IST）详解](X86_64_TSS_AND_IST.md)
 > - 关于 **idt_setup_early_handler() 函数详解**（Linux 内核如何初始化 IDT），请参见 [idt_setup_early_handler() 函数详细分析](IDT_SETUP_EARLY_HANDLER_DETAILED_ANALYSIS.md)
+> - 关于 **Call Gate vs IDT Gate 的区别**（为什么看起来很像但存储位置不同、Linux 内核数据结构对应），请参见 [Call Gate vs IDT Gate：Linux 内核数据结构对比](CALL_GATE_VS_IDT_GATE_KERNEL_STRUCTURES.md)
 
 ---
 
