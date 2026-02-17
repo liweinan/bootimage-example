@@ -1,9 +1,10 @@
 # BIOS IVT 与 Kernel IDT 数据结构详细对比
 
-**版本**: 1.2
+**版本**: 1.3
 **日期**: 2026-02-17
 **作者**: Linux 内核启动文档项目
 **更新内容**:
+- v1.3: 添加三种门描述符的详细数据结构对比（bit-level布局）、Linux 内核使用场景、IST 配置说明
 - v1.2: 添加设计哲学对比、"门"描述符深度解释、生动类比（木门 vs 金库门）
 - v1.1: 添加详细的 SeaBIOS 和 Linux kernel 源代码引用
 
@@ -71,6 +72,13 @@
 | `do_page_fault()` | arch/x86/mm/fault.c:1347-1355 | Page Fault C 实现 |
 | `__KERNEL_CS` | arch/x86/include/asm/segment.h:203-205 | 内核代码段选择子（0x10） |
 | `GATE_INTERRUPT` | arch/x86/include/asm/desc_defs.h:100-102 | Interrupt Gate 类型（0xE） |
+| `GATE_TRAP` | arch/x86/include/asm/desc_defs.h:100-102 | Trap Gate 类型（0xF） |
+| `GATE_TASK` | arch/x86/include/asm/desc_defs.h:100-102 | Task Gate 类型（0x5，已废弃） |
+| `def_idts` | arch/x86/kernel/idt.c:97-130 | IDT 初始化数据（异常门定义） |
+| `ist_idts` | arch/x86/kernel/cpu/common.c:2066-2091 | IST 异常定义（#DF, #NMI, #MC, #DB） |
+| `IST_INDEX_*` | arch/x86/include/asm/cpu_entry_area.h | IST 索引常量（1-4） |
+| `INTG` 宏 | arch/x86/kernel/idt.c:253-258 | 中断门初始化宏 |
+| `SYSG` 宏 | arch/x86/kernel/idt.c:253-258 | 系统门初始化宏（陷阱门+DPL=3） |
 
 ---
 
@@ -849,32 +857,255 @@ x86-64 架构定义了三种门描述符，都存储在 IDT 中：
 
 | 门类型 | Type 值 | 用途 | 进入时是否关中断 | Linux 使用场景 |
 |--------|---------|------|-----------------|---------------|
-| **中断门<br>（Interrupt Gate）** | 0xE | 处理硬件中断 | ✅ 是<br>（IF←0） | 硬件中断（IRQ）<br>某些异常（#PF, #DF） |
-| **陷阱门<br>（Trap Gate）** | 0xF | 处理异常和系统调用 | ❌ 否<br>（IF 不变） | 大部分异常（#BP, #GP）<br>系统调用（int 0x80） |
+| **中断门<br>（Interrupt Gate）** | 0xE | 处理硬件中断和某些异常 | ✅ 是<br>（IF←0） | 硬件中断（IRQ）<br>某些异常（#PF, #DF, #NMI, #MC） |
+| **陷阱门<br>（Trap Gate）** | 0xF | 处理大部分异常和系统调用 | ❌ 否<br>（IF 不变） | 大部分异常（#BP, #GP, #DE）<br>系统调用（int 0x80, syscall） |
 | **任务门<br>（Task Gate）** | 0x5 | 硬件任务切换 | ✅ 是 | ❌ Linux 不使用<br>（x86-64 已废弃） |
 
-**关键区别**：
+#### 三种门的数据结构详细对比
 
-```c
-// arch/x86/include/asm/desc_defs.h:100-102
-#define GATE_INTERRUPT  0xE  // 进入时：RFLAGS.IF = 0（禁用中断）
-#define GATE_TRAP       0xF  // 进入时：RFLAGS.IF 保持不变
+**关键发现：三种门的数据结构完全不同！虽然都占用16字节（x86-64），但字段含义和布局截然不同。**
 
-// Linux 内核的使用示例：
-INTG(X86_TRAP_DE,  asm_exc_divide_error)     // 中断门：#DE（除法错误）
-INTG(X86_TRAP_PF,  asm_exc_page_fault)       // 中断门：#PF（缺页异常）
-SYSG(X86_TRAP_OF,  asm_exc_overflow)         // 系统门（陷阱门 + DPL=3）：#OF（溢出）
+**1. 中断门（Interrupt Gate）—— 包含完整地址 + IST**
+
+```
+x86-64 中断门（16 字节）：
+
+127                                64  ← 高 64 位
++------------------------------------+
+|         Offset 63..32              |  处理程序地址的高 32 位
++------------------------------------+
+
+63      48 47   45 44  40 39     32  ← 低 64 位的高 32 位
++--------+-------+------+-----+-----+
+| Offset |  IST  | zero | Type| DPL |P|
+| 31..16 | (0-7) | (000)|(1110)|     |
++--------+-------+------+-----+-----+
+   ↑        ↑       ↑      ↑
+   |        |       |      └─ 类型 = 0xE（中断门）
+   |        |       └─ 必须为 0（保留位）
+   |        └─ IST 索引（0=不用，1-7=TSS.IST[IST-1]）
+   └─ 处理程序地址的中间 16 位
+
+31                16 15             0  ← 低 64 位的低 32 位
++-------------------+----------------+
+| Segment Selector  | Offset 15..0   |
++-------------------+----------------+
+   ↑                   ↑
+   |                   └─ 处理程序地址的低 16 位
+   └─ 代码段选择子（如 __KERNEL_CS = 0x10）
+
+关键字段：
+• Offset (64位): offset_high(32) + offset_middle(16) + offset_low(16)
+• Segment (16位): 代码段选择子
+• IST (3位): 0-7，指定使用哪个 IST 栈（0 表示不使用）
+• Type (4位): 1110 (0xE)
+• DPL (2位): 描述符特权级
+• P (1位): Present 位
 ```
 
-**为什么要区分？**
+**2. 陷阱门（Trap Gate）—— 几乎和中断门一样**
 
-- **中断门**：关闭中断是为了防止**嵌套中断**破坏栈帧
+```
+x86-64 陷阱门（16 字节）：
+
+结构与中断门完全相同，唯一区别：
+
+47      45 44  40
++-------+------+
+|  IST  | Type |
+| (0-7) |(1111)|  ← Type = 0xF（陷阱门，不是 0xE）
++-------+------+
+
+关键区别：
+• Type = 0xF（1111）vs 中断门的 0xE（1110）
+• CPU 行为：进入时不关中断（RFLAGS.IF 保持不变）
+• 其他字段完全相同（包括 IST 字段）
+```
+
+**3. 任务门（Task Gate）—— 完全不同的结构**
+
+```
+x86-64 任务门（16 字节）：
+
+127                                64  ← 高 64 位
++------------------------------------+
+|         Reserved (must be 0)       |  必须为 0
++------------------------------------+
+
+63      48 47   45 44  40 39     32  ← 低 64 位的高 32 位
++--------+-------+------+-----+-----+
+|Reserved| zero  | zero | Type| DPL |P|
+| (全0)  | (000) | (000)|(0101)|     |
++--------+-------+------+-----+-----+
+   ↑        ↑       ↑      ↑
+   |        |       |      └─ 类型 = 0x5（任务门）
+   |        |       └─ 必须为 0
+   |        └─ 没有 IST 字段！
+   └─ 保留（未使用）
+
+31                16 15             0  ← 低 64 位的低 32 位
++-------------------+----------------+
+|   TSS Selector    |   Reserved (0) |
++-------------------+----------------+
+   ↑                   ↑
+   |                   └─ 保留（必须为 0）
+   └─ TSS 段选择子（指向要切换到的任务）
+
+关键字段：
+• TSS Selector (16位): 指向 GDT 中的 TSS 描述符
+• Type (4位): 0101 (0x5)
+• DPL (2位): 描述符特权级
+• P (1位): Present 位
+• 没有 Offset 字段！（不需要代码地址）
+• 没有 IST 字段！（整个任务切换，不需要栈切换）
+```
+
+**数据结构对比总结：**
+
+| 字段 | 中断门 | 陷阱门 | 任务门 |
+|------|--------|--------|--------|
+| **Offset (64位)** | ✅ 有 | ✅ 有 | ❌ 无 |
+| **Segment (16位)** | ✅ 有<br>（代码段） | ✅ 有<br>（代码段） | ✅ 有<br>（TSS段） |
+| **IST (3位)** | ✅ 有<br>（0-7） | ✅ 有<br>（0-7） | ❌ 无 |
+| **Type (4位)** | 0xE (1110) | 0xF (1111) | 0x5 (0101) |
+| **工作方式** | 跳转到代码地址<br>可用 IST 栈 | 跳转到代码地址<br>可用 IST 栈 | 硬件切换整个任务<br>从 TSS 加载所有寄存器 |
+
+**为什么数据结构不同？**
+
+因为三者的**工作方式完全不同**：
+
+```
+中断门/陷阱门的工作流程：
+1. CPU 读取门描述符中的 Offset 和 Segment
+2. 如果 IST ≠ 0：切换到 TSS.IST[IST-1] 指定的栈
+3. 压栈保存返回地址（SS, RSP, RFLAGS, CS, RIP）
+4. 跳转到 Segment:Offset
+5. 如果是中断门：RFLAGS.IF = 0（关中断）
+
+任务门的工作流程：
+1. CPU 读取门描述符中的 TSS Selector
+2. 通过 TSS Selector 从 GDT 中获取 TSS 描述符
+3. 保存当前任务的所有寄存器到当前 TSS
+4. 从新 TSS 中加载所有寄存器（CS, RIP, RSP, CR3, 等等）
+5. 完成硬件任务切换（不需要 Offset，因为 RIP 在 TSS 里）
+```
+
+**Linux 内核中的门类型定义和使用：**
+
+```c
+// arch/x86/include/asm/desc_defs.h:100-102 - 门类型常量
+#define GATE_INTERRUPT  0xE  // 中断门：进入时 RFLAGS.IF = 0（禁用中断）
+#define GATE_TRAP       0xF  // 陷阱门：进入时 RFLAGS.IF 保持不变
+#define GATE_CALL       0xC  // 调用门（x86-64 很少用）
+#define GATE_TASK       0x5  // 任务门（x86-64 已废弃，Linux 不使用）
+
+// arch/x86/kernel/idt.c:97-130 - Linux 内核的 IDT 初始化（摘录）
+static const __initconst struct idt_data def_idts[] = {
+    // 大部分异常使用中断门（关中断，保护栈帧）
+    INTG(X86_TRAP_DE,       asm_exc_divide_error),        // #DE：除法错误
+    INTG(X86_TRAP_NMI,      asm_exc_nmi),                 // #NMI：不可屏蔽中断
+    INTG(X86_TRAP_DF,       asm_exc_double_fault),        // #DF：双重故障
+    INTG(X86_TRAP_TS,       asm_exc_invalid_tss),         // #TS：无效 TSS
+    INTG(X86_TRAP_NP,       asm_exc_segment_not_present), // #NP：段不存在
+    INTG(X86_TRAP_SS,       asm_exc_stack_segment),       // #SS：栈段错误
+    INTG(X86_TRAP_GP,       asm_exc_general_protection),  // #GP：通用保护错误
+    INTG(X86_TRAP_PF,       asm_exc_page_fault),          // #PF：缺页异常
+    INTG(X86_TRAP_MF,       asm_exc_coprocessor_error),   // #MF：浮点错误
+    INTG(X86_TRAP_AC,       asm_exc_alignment_check),     // #AC：对齐检查
+    INTG(X86_TRAP_MC,       asm_exc_machine_check),       // #MC：机器检查
+    INTG(X86_TRAP_XF,       asm_exc_simd_coprocessor_error), // #XF：SIMD 错误
+
+    // 少数异常使用陷阱门（不关中断，保持响应）
+    // 注意：早期内核版本中 #BP, #OF 等用陷阱门，现代内核改用中断门
+
+    // 系统调用门（陷阱门 + DPL=3，允许用户态调用）
+    SYSG(X86_TRAP_OF,       asm_exc_overflow),            // #OF：溢出（用户态可触发）
+
+    // 任务门：Linux 完全不使用！
+    // x86-64 架构虽然支持，但 Linux 使用软件任务切换（更灵活）
+};
+
+// arch/x86/kernel/idt.c:253-258 - 宏定义
+#define INTG(_vector, _addr)    \
+    { .vector = _vector, .bits.type = GATE_INTERRUPT, \
+      .bits.ist = DEFAULT_STACK, .bits.p = 1, .bits.dpl = 0, \
+      .addr = _addr }
+
+#define SYSG(_vector, _addr)    \
+    { .vector = _vector, .bits.type = GATE_TRAP, \
+      .bits.ist = DEFAULT_STACK, .bits.p = 1, .bits.dpl = 3, \
+      .addr = _addr }
+```
+
+**Linux 内核中硬件中断的门类型：**
+
+```c
+// arch/x86/kernel/apic/vector.c - 硬件中断向量分配
+// 所有硬件中断（IRQ）都使用中断门（GATE_INTERRUPT）
+
+// 示例：键盘中断（IRQ1，向量 33）
+IDT[33] = {
+    .type = GATE_INTERRUPT,  // 0xE（关中断）
+    .ist  = 0,               // 不使用 IST，用常规内核栈
+    .dpl  = 0,               // Ring 0 only
+    .addr = common_interrupt_handler,  // 通用中断处理入口
+};
+```
+
+**使用 IST 的特殊异常（需要独立栈）：**
+
+```c
+// arch/x86/kernel/cpu/common.c:2066-2091 - TSS 初始化时设置 IST
+static const __initconst struct idt_data ist_idts[] = {
+    ISTG(X86_TRAP_DB,   asm_exc_debug,          IST_INDEX_DB),   // #DB：IST1
+    ISTG(X86_TRAP_NMI,  asm_exc_nmi,            IST_INDEX_NMI),  // #NMI：IST2
+    ISTG(X86_TRAP_DF,   asm_exc_double_fault,   IST_INDEX_DF),   // #DF：IST3
+    ISTG(X86_TRAP_MC,   asm_exc_machine_check,  IST_INDEX_MC),   // #MC：IST4
+};
+
+// IST 索引定义（arch/x86/include/asm/cpu_entry_area.h）
+#define IST_INDEX_DB    1  // Debug：需要独立栈防止递归
+#define IST_INDEX_NMI   2  // NMI：不可屏蔽，必须有独立栈
+#define IST_INDEX_DF    3  // Double Fault：栈已损坏，必须独立栈
+#define IST_INDEX_MC    4  // Machine Check：硬件严重错误，独立栈
+```
+
+**Linux 内核使用总结表：**
+
+| 中断/异常类型 | 门类型 | IST | DPL | 典型示例 | 原因 |
+|--------------|--------|-----|-----|---------|------|
+| **硬件中断**<br>(IRQ) | 中断门<br>0xE | 0 | 0 | 键盘、网卡、定时器 | 需要关中断防止嵌套 |
+| **关键异常**<br>(需要独立栈) | 中断门<br>0xE | 1-4 | 0 | #DF, #NMI, #MC, #DB | 栈可能已损坏<br>或需要防止递归 |
+| **普通异常**<br>(栈安全) | 中断门<br>0xE | 0 | 0 | #PF, #GP, #DE, #TS | 需要关中断保护栈帧 |
+| **系统调用**<br>(用户可触发) | 陷阱门<br>0xF | 0 | 3 | int 0x80, syscall | 用户态可调用<br>不关中断保持响应 |
+| **任务切换** | 任务门<br>0x5 | N/A | - | 无（Linux 不使用） | Linux 用软件任务切换 |
+
+**为什么要区分中断门和陷阱门？**
+
+- **中断门（0xE）**：关闭中断是为了防止**嵌套中断**破坏栈帧
   - 示例：处理键盘中断时，不希望被另一个键盘中断打断
+  - 示例：处理 #PF（缺页异常）时，虽然可能很慢（换页），但仍需要关中断保护栈帧的完整性
   - 处理程序可以在合适的时候手动重新启用中断（`sti` 指令）
 
-- **陷阱门**：不关中断是为了保持**响应性**
-  - 示例：处理断点异常（#BP）时，仍然可以响应硬件中断
-  - 处理缺页异常时可能需要很长时间（从磁盘换入页面），期间应响应中断
+- **陷阱门（0xF）**：不关中断是为了保持**响应性**
+  - 历史：早期内核中 #BP（断点）、#OF（溢出）等使用陷阱门
+  - 现状：现代 Linux 内核几乎全部改用中断门（更安全）
+  - 主要用于：系统调用（int 0x80）需要 DPL=3 + 不关中断
+
+**为什么任务门在 Linux 中被废弃？**
+
+```c
+// 任务门的问题：
+// 1. 硬件任务切换非常慢（保存/恢复所有寄存器）
+// 2. 灵活性差（无法自定义切换哪些寄存器）
+// 3. x86-64 长模式已不支持（Intel SDM 明确规定）
+
+// Linux 的替代方案：软件任务切换
+// arch/x86/kernel/process_64.c:__switch_to()
+// - 只保存/恢复必要的寄存器
+// - 可以自定义调度策略
+// - 支持更复杂的线程模型（NPTL）
+```
 
 #### 生活化类比：办公楼门禁系统
 
