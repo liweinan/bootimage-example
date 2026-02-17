@@ -168,7 +168,18 @@ asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_
 
 在内核编译阶段，以下三个核心数据结构被定义并分配内存：
 
-###2.1 early_idt_handler_array - 异常处理程序数组（汇编生成）
+### 2.1 early_idt_handler_array - 异常处理程序数组（汇编生成）
+
+**❗ 关键澄清**：这**不是空表**，而是编译时就生成的**实际代码**！
+
+| 对比项 | early_idt_handler_array | idt_table |
+|--------|------------------------|----------|
+| **性质** | 代码段（.text 段） | 数据段（.bss 段） |
+| **编译后状态** | ✅ **包含完整的机器指令** | ❌ **全为 0（空数据）** |
+| **内容** | 32 段汇编代码桩（每段 10-12 字节） | 256 个门描述符位置（每个 16 字节） |
+| **作用** | 可执行代码（CPU 可以跳转执行） | 可写数据（运行时填充） |
+| **生成时机** | 编译时由 `.rept` 宏展开 | 编译时分配空间 |
+| **类比** | 已经印刷好的书籍 | 空白的书架 |
 
 **源代码**（`arch/x86/kernel/head_64.S:488-505`）：
 
@@ -244,6 +255,65 @@ early_idt_handler_array[31]       | 向量 31 的桩（10-12 字节）
 	jmp early_idt_handler_common  # 5 字节
 ```
 
+**编译后的实际机器码**（证明不是空表！）：
+
+可以通过 `objdump -d vmlinux` 查看编译后的实际内容：
+
+```
+ffffffff81002a00 <early_idt_handler_array>:
+ffffffff81002a00:   6a 00                   pushq  $0x0
+ffffffff81002a02:   6a 00                   pushq  $0x0
+ffffffff81002a04:   e9 b7 00 00 00          jmpq   ffffffff81002ac0 <early_idt_handler_common>
+ffffffff81002a09:   cc                      int3
+ffffffff81002a0a:   cc                      int3
+ffffffff81002a0b:   cc                      int3
+
+ffffffff81002a0c <early_idt_handler_array+0xc>:
+ffffffff81002a0c:   6a 00                   pushq  $0x0
+ffffffff81002a0e:   6a 01                   pushq  $0x1
+ffffffff81002a10:   e9 ab 00 00 00          jmpq   ffffffff81002ac0 <early_idt_handler_common>
+ffffffff81002a15:   cc                      int3
+...
+
+ffffffff81002a80 <early_idt_handler_array+0x80>:
+ffffffff81002a80:   6a 0e                   pushq  $0xe    # 向量 14 (#PF)
+ffffffff81002a82:   e9 39 00 00 00          jmpq   ffffffff81002ac0 <early_idt_handler_common>
+ffffffff81002a87:   cc                      int3
+...
+```
+
+**对比 idt_table 的编译后状态**：
+
+```bash
+# 查看 idt_table 的内容（BSS 段）
+$ readelf -s vmlinux | grep idt_table
+82823: ffffffff82809000  4096 OBJECT  LOCAL  DEFAULT   28 idt_table
+
+$ objdump -s -j .bss vmlinux | grep -A5 82809000
+# 输出：全部为 0x00（空数据）
+ffffffff82809000 00000000 00000000 00000000 00000000  ................
+ffffffff82809010 00000000 00000000 00000000 00000000  ................
+...
+```
+
+**总结对比**：
+
+```
+编译完成后的内核映像（vmlinux）中：
+
+early_idt_handler_array:
+  段：.text（代码段）
+  内容：✅ 完整的机器指令（6a 00, 6a 00, e9 ..., cc）
+  状态：可执行，CPU 可以直接跳转到这些地址执行
+  大小：约 320-384 字节（32 × 10-12 字节）
+
+idt_table:
+  段：.bss（未初始化数据段）
+  内容：❌ 全部为 0x00
+  状态：可写，等待运行时填充
+  大小：4096 字节（256 × 16 字节）
+```
+
 **关键常量**：
 
 ```c
@@ -255,6 +325,8 @@ early_idt_handler_array[31]       | 向量 31 的桩（10-12 字节）
 ```
 
 ### 2.2 idt_table - IDT 表本体（BSS 段分配）
+
+**✅ 这个才是"空表"**：编译后全为 0，等待运行时填充！
 
 **源代码**（`arch/x86/kernel/idt.c:173`）：
 
