@@ -514,7 +514,7 @@ static __init void set_intr_gate(unsigned int n, const void *addr)
 
 ### 3.3 init_idt_data() - 初始化 idt_data 结构
 
-**idt_data 结构**（`arch/x86/include/asm/desc.h`）：
+**idt_data 结构**（`arch/x86/include/asm/desc_defs.h`）：
 
 ```c
 struct idt_data {
@@ -525,19 +525,21 @@ struct idt_data {
 };
 ```
 
-**init_idt_data() 宏**：
+**init_idt_data() 函数**（`arch/x86/include/asm/desc.h`）：
 
 ```c
-#define init_idt_data(data, n, addr)			\
-do {							\
-	(data)->vector	= (n);				\
-	(data)->bits.ist = DEFAULT_STACK;		\
-	(data)->bits.type = GATE_INTERRUPT;		\
-	(data)->bits.dpl = DPL0;			\
-	(data)->bits.p	= 1;				\
-	(data)->addr	= (addr);			\
-	(data)->segment	= __KERNEL_CS;			\
-} while (0)
+static inline void init_idt_data(struct idt_data *data, unsigned int n,
+				 const void *addr)
+{
+	BUG_ON(n > 0xFF);  // 向量号必须 <= 255
+
+	memset(data, 0, sizeof(*data));  // 先清零
+	data->vector	= n;
+	data->addr	= addr;
+	data->segment	= __KERNEL_CS;
+	data->bits.type	= GATE_INTERRUPT;
+	data->bits.p	= 1;
+}
 ```
 
 **示例：设置向量 14（#PF）**
@@ -549,14 +551,19 @@ do {							\
 struct idt_data data;
 init_idt_data(&data, 14, early_idt_handler_array[14]);
 
-// 展开后：
-data.vector   = 14;
-data.bits.ist = 0;                              // 不使用 IST
-data.bits.type = GATE_INTERRUPT;                // 0xE
-data.bits.dpl  = DPL0;                          // 0（只能从 Ring 0 触发）
-data.bits.p    = 1;                             // Present
-data.addr      = early_idt_handler_array[14];   // 处理程序地址
-data.segment   = __KERNEL_CS;                   // 0x0010
+// 执行过程：
+// 1. BUG_ON(14 > 0xFF) - 检查向量号合法性（通过）
+// 2. memset(&data, 0, sizeof(data)) - 清零整个结构
+// 3. 设置字段：
+data.vector      = 14;                           // 向量号
+data.addr        = early_idt_handler_array[14];  // 处理程序地址
+data.segment     = __KERNEL_CS;                  // 0x0010
+data.bits.type   = GATE_INTERRUPT;               // 0xE
+data.bits.p      = 1;                            // Present
+
+// 其他字段（memset 已清零）：
+// data.bits.ist = 0  (不使用 IST，默认栈)
+// data.bits.dpl = 0  (Ring 0，内核特权级)
 ```
 
 ### 3.4 idt_setup_from_table() - 批量写入
