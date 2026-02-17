@@ -234,7 +234,7 @@ DECLARE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page);
 
 ### 4.1 共同点：都是"门描述符"
 
-**Intel SDM 中的门描述符家族**（Table 3-2）：
+**Intel SDM 中的门描述符家族**（Intel SDM Vol. 3A, Table 3-2 "System-Segment and Gate-Descriptor Types", Section 3.5, 第 3-13 页）：
 
 | Type 值 | 名称 | 存储位置 | 大小 | x86-64 支持 |
 |---------|------|---------|------|------------|

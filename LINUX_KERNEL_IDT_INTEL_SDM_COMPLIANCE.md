@@ -149,6 +149,8 @@ Intel SDM 定义的 64 位模式下的门描述符格式：
 
 **位域**: bits 43:40（字节 5 的低 4 位）
 
+**Type 值定义**（Intel SDM Vol. 3A, Table 3-2 "System-Segment and Gate-Descriptor Types", Section 3.5, 第 3-13 页）：
+
 | Type 值 | 二进制 | 门类型 | 说明 |
 |---------|-------|-------|------|
 | **0xE** | 1110b | **Interrupt Gate** | 自动清除 IF 标志（禁用中断） |

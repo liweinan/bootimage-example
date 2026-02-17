@@ -708,7 +708,7 @@ process_op(struct disk_op_s *op)
 15      | P     | 1位  | Present 位（必须为 1）
 ```
 
-**类型（type）值：**
+**类型（type）值**（Intel SDM Vol. 3A, Table 3-2 "System-Segment and Gate-Descriptor Types", Section 3.5, 第 3-13 页）：
 
 | 值   | 类型                | 说明 |
 |------|---------------------|------|
@@ -2282,9 +2282,13 @@ x86-64（2003）→ IDT：长模式，强制要求
    - **Section 7.2.5: Task-Gate Descriptor** (已废弃，64位模式不支持)
 
    **Chapter 3: Protected-Mode Memory Management**
-   - **Table 3-2**: System-Segment and Gate-Descriptor Types
+   - **Section 3.5**: System Descriptor Types（第 3-13 页）
+   - **Table 3-2**: System-Segment and Gate-Descriptor Types（第 3-13 页）
      - 列出所有门描述符的 Type 字段值
-     - Interrupt Gate (0xE)、Trap Gate (0xF)、Call Gate、Task Gate
+     - Type 0x5 = Task Gate（64位不支持）
+     - Type 0xC = Call Gate（64位支持但不常用）
+     - Type 0xE = Interrupt Gate（自动清除 IF 标志）
+     - Type 0xF = Trap Gate（不修改 IF 标志）
 
    **下载地址**：
    - Intel 官方：https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
