@@ -982,48 +982,102 @@ IDT 在内核启动过程中经历 **5 个阶段**的演化（详见 [IDT 表的
 
 ---
 
-### 3.6 后续步骤与补充说明
+### 3.6 x86_64_start_kernel()
 
-#### 3.6.1 x86_64_start_kernel() 概述
-
-startup_64 执行完毕后，进入 C 代码 **x86_64_start_kernel()**（`arch/x86/kernel/head64.c`）：
+startup_64 执行完毕后，进入 C 代码 **x86_64_start_kernel()**（`arch/x86/kernel/head64.c:219-289`）：
 
 ```c
-void __init x86_64_start_kernel(void)
+asmlinkage __visible void __init __noreturn x86_64_start_kernel(char *real_mode_data)
 {
-	// 切换到运行时 IDT（idt_table）
-	idt_setup_early_handler();   // 填充早期异常向量
-	load_idt(&idt_descr);         // 加载 idt_table
-	
-	// 后续初始化
-	// - TDX 支持
-	// - copy_bootdata
-	// - load_ucode_bsp（加载微码）
-	// - 建立内核高地址映射
-	
-	// 最终调用 start_kernel()
-	x86_64_start_reservations() → start_kernel();
+	// 编译时检查（BUILD_BUG_ON）
+	BUILD_BUG_ON(MODULES_VADDR < __START_KERNEL_map);
+	// ... 更多 BUILD_BUG_ON 检查 ...
+
+	cr4_init_shadow();
+
+	/* Kill off the identity-map trampoline */
+	reset_early_page_tables();                    // 清除早期恒等映射
+
+	// 5 级页表支持
+	if (pgtable_l5_enabled()) {
+		page_offset_base = __PAGE_OFFSET_BASE_L5;
+		vmalloc_base     = __VMALLOC_BASE_L5;
+		vmemmap_base     = __VMEMMAP_BASE_L5;
+	}
+
+	clear_bss();                                  // 清零 BSS 段
+	clear_page(init_top_pgt);                     // 清空顶级页表
+
+	sme_early_init();                             // AMD SME 加密支持
+	kasan_early_init();                           // KASAN 内存检测工具
+
+	// 刷新全局 TLB（KASAN 初始化后）
+	__native_tlb_flush_global(this_cpu_read(cpu_tlbstate.cr4));
+
+	idt_setup_early_handler();                    // ★ 设置早期 IDT 处理程序
+
+	tdx_early_init();                             // Intel TDX 支持
+	copy_bootdata(__va(real_mode_data));          // 拷贝 boot_params
+	load_ucode_bsp();                             // 加载 CPU 微码
+
+	/* set init_top_pgt kernel high mapping*/
+	init_top_pgt[511] = early_top_pgt[511];       // 建立内核高地址映射
+
+	x86_64_start_reservations(real_mode_data);    // → start_kernel()
 }
 ```
 
-**idt_setup_early_handler() 的作用**：
+**关键步骤说明**：
+
+1. **reset_early_page_tables()** - 清除压缩内核使用的恒等映射（identity mapping），为新的页表布局做准备
+2. **clear_bss()** - 清零未初始化的全局变量区域
+3. **sme_early_init()** - AMD Secure Memory Encryption 支持，必须在可能触发缺页异常的操作之前调用
+4. **kasan_early_init()** - Kernel Address Sanitizer 初始化（内存错误检测工具）
+5. **idt_setup_early_handler()** - 设置早期 IDT，处理启动阶段的异常
+6. **load_ucode_bsp()** - 在 BSP（Bootstrap Processor）上加载 CPU 微码更新
+7. **init_top_pgt[511] = early_top_pgt[511]** - 将早期页表的内核映射复制到 init_top_pgt
+
+**idt_setup_early_handler() 详解**（`arch/x86/kernel/idt.c:320-331`）：
 
 ```c
-// arch/x86/kernel/idt.c
 void __init idt_setup_early_handler(void)
 {
+	int i;
+
 	for (i = 0; i < NUM_EXCEPTION_VECTORS; i++)
 		set_intr_gate(i, early_idt_handler_array[i]);
-	load_idt(&idt_descr);
+#ifdef CONFIG_X86_32
+	for ( ; i < NR_VECTORS; i++)
+		set_intr_gate(i, early_ignore_irq);
+#endif
+	load_idt(&idt_descr);  // 加载 idt_descr（指向 idt_table）
 }
 ```
 
-- 切换到运行时 IDT（idt_table，256 个向量）
-- 填充早期异常处理程序（early_idt_handler_array）
-- 此时 CPU 使用内核 IDT 取代 bringup_idt_table
-- 注意：此时仅有 CPU 异常，尚无硬件 IRQ 和 INT 0x80
+**作用**：
+- 切换到运行时 IDT（**idt_table**，256 个向量）
+- 填充前 32 个异常向量（**early_idt_handler_array**）
+- x86-32 下额外填充剩余向量为 **early_ignore_irq**
+- 调用 `load_idt(&idt_descr)` 加载新的 IDT（替代 **bringup_idt_table**）
+- 此时 CPU 使用完整的 **idt_table** 而非启动时的临时 **bringup_idt_table**
 
-#### 3.6.2 位置无关代码（PIC）与 `__pi_` 前缀
+**注意**：
+- ⚠️ 此时仅设置了 **CPU 异常处理程序**（0-31 号向量）
+- ❌ 尚未设置 **硬件中断**（IRQ）和 **INT 0x80**（系统调用）
+- ✅ 硬件中断和系统调用在后续的 `start_kernel()` → `trap_init()` / `init_IRQ()` 中完成
+
+> 📖 **深入理解初始化顺序**：
+>
+> 为什么必须先 `kasan_early_init()` 后 `idt_setup_early_handler()`？如果顺序反过来会发生什么？
+>
+> 详见 **[KASAN 插桩机制与初始化顺序深度分析](KASAN_INSTRUMENTATION_AND_INIT_ORDER.md)**：
+> - head64.c 中的明确注释："`native_write_cr4()` 被 KASAN 插桩，必须在 KASAN 初始化后调用"
+> - 编译时插桩 vs 运行时初始化的本质区别
+> - 如果 KASAN 未初始化就执行插桩代码：递归 Page Fault → Triple Fault → 系统重启
+> - 为什么不能让 KASAN 自动跳过检查（性能开销、Chicken-and-Egg 问题、设计哲学）
+> - `__head` 和 `KASAN_SANITIZE` 的作用
+
+#### 3.6.1 位置无关代码（PIC）与 `__pi_` 前缀
 
 **背景**：在 startup_64 早期阶段，内核尚未完全建立虚拟地址映射，需要使用**位置无关代码（Position Independent Code, PIC）**来访问全局符号。
 
@@ -1043,7 +1097,7 @@ void __init idt_setup_early_handler(void)
 
 > **详细内容**：位置无关代码的完整实现机制（`-fPIC` 编译选项、`objcopy` 符号前缀处理、RIP 相对寻址、`rip_rel_ptr()` 宏、`SYM_PIC_ALIAS` 宏、以及 `startup_64_setup_gdt_idt()` 如何访问全局符号等），请参见 **[X86_POSITION_INDEPENDENT_CODE.md](X86_POSITION_INDEPENDENT_CODE.md)**。
 
-#### 3.6.3 相关文档
+#### 3.6.2 相关文档
 
 本章涉及的核心机制详解：
 

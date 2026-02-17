@@ -86,6 +86,17 @@ idt_setup_early_handler()   ← 现在可以安全使用 idt.c 中的代码 ✅�
 - 但 `idt.c` 的代码会被 **KASAN instrumentation**（插桩）
 - 而此时 KASAN **还没初始化** → 访问未初始化的 shadow memory → **崩溃** 💥
 
+> 📖 **深入理解 KASAN 插桩机制**：
+>
+> 为什么 KASAN 未初始化时执行插桩代码会崩溃？插桩是编译时决定还是运行时决定？为什么不能让 KASAN 自动跳过检查？
+>
+> 详见 **[KASAN 插桩机制与初始化顺序深度分析](KASAN_INSTRUMENTATION_AND_INIT_ORDER.md)**：
+> - 编译时插桩 vs 运行时初始化的本质区别
+> - `__asan_loadXX`/`__asan_storeXX` 函数的工作原理
+> - 如果 KASAN 未初始化会发生什么（递归 Page Fault）
+> - 内核源代码中的明确证据（head64.c 注释）
+> - 为什么不让 KASAN 自动跳过检查（性能、Chicken-and-Egg 问题）
+
 ##### 关键证据：`__head` 标记禁用 instrumentation
 
 **`__head` 宏定义**（`arch/x86/include/asm/init.h:6-8`）：

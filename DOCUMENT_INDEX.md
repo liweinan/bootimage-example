@@ -135,6 +135,7 @@
 | [LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md](LINUX_KERNEL_ABI_COMPLIANCE_ANALYSIS.md) | **Linux 内核启动代码 System V ABI 遵守情况分析报告** ⭐ 新增<br>• 详细分析启动代码对 ABI 的遵守（综合评分：98%）<br>• 参数传递机制（boot_params 完整传递链）<br>• 寄存器使用规则（Caller/Callee-saved）<br>• 返回值传递、栈帧管理、Red Zone 处理<br>• asmlinkage 真相揭秘（x86-64 上为空定义）<br>• 内核特殊优化（8字节栈对齐、禁用 Red Zone）<br>• 14+ 代码示例 + 权威规范引用<br>• 30+ 交叉引用链接 |
 | [LINUX_KERNEL_FUNCTION_ATTRIBUTES.md](LINUX_KERNEL_FUNCTION_ATTRIBUTES.md) | **Linux 内核函数修饰符与调用约定**（已更新 v2.0 → v2.3）<br>• x86-64/x86-32/ARM32/ARM64 调用约定详解 ⭐ 新增<br>• 函数修饰符（asmlinkage、__visible、__init、__noreturn）<br>• 调用约定 vs 二进制格式（ELF vs Mach-O）⭐ 新增<br>• Linux 内核 ABI 稳定性分析 ⭐ 新增<br>• 汇编代码交互、常见组合模式 |
 | [SEABIOS_GRUB_ABI_COMPLIANCE_ANALYSIS.md](SEABIOS_GRUB_ABI_COMPLIANCE_ANALYSIS.md) | **SeaBIOS & GRUB ABI 遵从性分析报告** ⭐ 新增<br>• SeaBIOS i386 平台 ABI 分析（合规性 30%）<br>• GRUB 多架构 ABI 分析（i386/x86-64/ARM32/ARM64）<br>• 违反标准的编译器标志详解（`-mregparm=3`, `-mrtd`, `-mpreferred-stack-boundary=2`）<br>• 固件代码为何偏离标准 ABI（代码体积、性能、独立运行环境）<br>• 与 Linux 内核的异同对比<br>• 代码体积节省 10-15%、性能优化分析<br>• 附实测汇编代码对比 |
+| [LINUX_ABI_BOUNDARIES_AND_TRANSITIONS.md](LINUX_ABI_BOUNDARIES_AND_TRANSITIONS.md) | **Linux ABI 边界与转换：System V ABI vs Linux Userspace ABI** ⭐ 新增<br>• 明确区分三种 ABI：System V ABI（函数调用）、Linux Userspace ABI（内核承诺）、启动协议 ABI<br>• 系统调用 ABI 详解：为何第 4 个参数用 R10 而非 RCX<br>• 启动过程中的 5 个 ABI 边界（硬件→BIOS→Bootloader→Kernel→Userspace）<br>• vDSO 与 vsyscall 机制（混合 ABI）<br>• ABI 稳定性对比（Linus："We do not break userspace"）<br>• 实际代码示例（System V 函数调用 vs Syscall） |
 | [COMPRESSED_KERNEL_RELOCATION.md](COMPRESSED_KERNEL_RELOCATION.md) | **Linux 压缩内核重定位机制** |
 | [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) | 为什么需要重定位压缩内核（KASLR 分析） |
 
@@ -166,6 +167,7 @@
 |------|------|
 | [LINUX_INTERRUPT_GUIDE.md](LINUX_INTERRUPT_GUIDE.md) | Linux 中断处理机制（Top Half/Bottom Half、softirq/tasklet/workqueue） |
 | [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md) | **Linux 内核 IDT 表的演进流程详解**<br>• 两个 IDT 表、5 个演进阶段<br>• **IDT 中的用户态可触发门（DPL=3）详解：INT3/INTO/INT 0x80 完整对比** |
+| [KASAN_INSTRUMENTATION_AND_INIT_ORDER.md](KASAN_INSTRUMENTATION_AND_INIT_ORDER.md) | **KASAN 插桩机制与初始化顺序深度分析** ⭐ 新增<br>• 编译时插桩 vs 运行时初始化的本质区别<br>• 为什么必须先 kasan_early_init() 后 idt_setup_early_handler()<br>• `__asan_loadXX`/`__asan_storeXX` 函数工作原理<br>• 如果 KASAN 未初始化会发生什么（递归 Page Fault → Triple Fault）<br>• 内核源代码证据（head64.c 明确注释）<br>• 为什么不让 KASAN 自动跳过检查（性能、Chicken-and-Egg 问题）<br>• `__head` 和 `KASAN_SANITIZE` 的作用<br>• 影子内存（Shadow Memory）机制详解 |
 | [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md) | **Linux 系统调用初始化详解**<br>• trap_init/syscall_init<br>• INT 0x80 vs SYSCALL/SYSENTER 性能对比<br>• entry_SYSCALL_64 入口分析 |
 
 ### 中断控制器
