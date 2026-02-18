@@ -274,7 +274,7 @@ idt_table[14] 的 16 字节内容（小端序）：
 
 ### idt_init_desc() - 构建门描述符
 
-**源代码位置**：`arch/x86/kernel/idt.c:64-73`
+**源代码位置**：`arch/x86/include/asm/desc.h:418-430`
 
 ```c
 static inline void idt_init_desc(gate_desc *gate, const struct idt_data *d)

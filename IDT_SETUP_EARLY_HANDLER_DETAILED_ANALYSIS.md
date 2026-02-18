@@ -611,7 +611,7 @@ idt_setup_from_table(gate_desc *idt, const struct idt_data *t, int size, bool sy
 
 ### 3.5 idt_init_desc() - 构建门描述符
 
-**源代码位置**：`arch/x86/kernel/idt.c:64-73`
+**源代码位置**：`arch/x86/include/asm/desc.h:418-430`
 
 ```c
 static inline void idt_init_desc(gate_desc *gate, const struct idt_data *d)
@@ -945,7 +945,7 @@ CPU 触发异常 → 读取 idt_table[i] → 跳转到 early_idt_handler_array[i
 | `set_intr_gate()` | `arch/x86/kernel/idt.c:206-213` | 设置中断门 |
 | `init_idt_data()` | `arch/x86/include/asm/desc.h:405-416` | 初始化 idt_data 结构（静态内联函数） |
 | `idt_setup_from_table()` | `arch/x86/kernel/idt.c:193-204` | 批量写入 |
-| `idt_init_desc()` | `arch/x86/kernel/idt.c:64-73` | 构建门描述符 |
+| `idt_init_desc()` | `arch/x86/include/asm/desc.h:418-430` | 构建门描述符 |
 | `write_idt_entry()` | `arch/x86/include/asm/desc.h:177-180` | 原子写入 |
 | `load_idt()` | `arch/x86/include/asm/desc.h:122-125` | 加载 IDTR |
 | `idt_table` | `arch/x86/kernel/idt.c:173` | IDT 表定义 |

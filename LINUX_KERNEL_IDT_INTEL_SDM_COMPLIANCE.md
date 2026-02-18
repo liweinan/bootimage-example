@@ -477,7 +477,7 @@ struct idt_data {
 
 #### 5.2.1 核心转换函数
 
-**源代码位置**: `arch/x86/kernel/idt.c:64-73`
+**源代码位置**: `arch/x86/include/asm/desc.h:418-430`
 
 ```c
 static inline void idt_init_desc(gate_desc *gate, const struct idt_data *d)
