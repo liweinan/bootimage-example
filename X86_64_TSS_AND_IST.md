@@ -1,6 +1,6 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 1.2
+**版本**: 2.0
 **日期**: 2026-01-30
 **作者**: Linux 内核启动文档项目
 
@@ -258,45 +258,136 @@ struct tss32 {
 - 每个 CPU 核心一个 TSS（而不是每个任务一个）
 - 主要用于用户态→内核态的栈切换和 IST
 
+### 2.3 Intel SDM 官方描述：64 位模式任务管理（Section 7.7）
+
+根据 **Intel SDM Vol 3A, Section 7.7 "Task Management in 64-bit Mode"** 的官方说明：
+
+> "In 64-bit mode, task structure and task state are similar to those in protected mode. However, the task switching mechanism available in protected mode is **not supported** in 64-bit mode. Task management and switching **must be performed by software**."
+
+**64 位模式下的限制**：
+
+处理器在 64 位模式下如果尝试以下操作，将产生通用保护异常（#GP）：
+- 使用 JMP、CALL、INTn 或中断将控制转移到 TSS 或任务门
+- 在 EFLAGS.NT（嵌套任务）设置为 1 时执行 IRET
+
+**64 位 TSS 必须存在**：
+
+> "Although hardware task-switching is not supported in 64-bit mode, a 64-bit task state segment (TSS) **must exist**."
+
+操作系统在激活 IA-32e 模式后**必须**：
+1. 创建至少一个 64-bit TSS
+2. 在 64 位模式下执行 LTR 指令，将 TR 寄存器指向负责 64 位模式程序和兼容模式程序的 64-bit TSS
+
+**64-bit TSS 保存的关键信息**：
+| 字段 | 说明 |
+|------|------|
+| RSPn | 特权级 0-2 的栈指针的完整 64 位规范形式（canonical form） |
+| ISTn | 中断栈表指针的完整 64 位规范形式 |
+| I/O Map Base Address | 从 64-bit TSS 基址到 I/O 权限位图的 16 位偏移 |
+
 ---
 
 ## 3. x86-64 中的 TSS 结构
 
 ### 3.1 硬件定义的 TSS 结构
 
-**Intel SDM Vol 3A, Section 7.7**：
+**Intel SDM Vol 3A, Section 7.7, Figure 7-11 "64-Bit TSS Format"**：
 
 ```
-+0    Reserved
-+4    RSP0 (Low 32 bits)       ┐
-+8    RSP0 (High 32 bits)      ├─ Ring 0 栈指针（64 位）
-+12   RSP1 (Low 32 bits)       │
-+16   RSP1 (High 32 bits)      │
-+20   RSP2 (Low 32 bits)       │
-+24   RSP2 (High 32 bits)      │
-+28   Reserved                 │
-+32   Reserved                 │
-+36   IST1 (Low 32 bits)       ┐
-+40   IST1 (High 32 bits)      ├─ IST 栈 1（64 位）
-+44   IST2 (Low 32 bits)       │
-+48   IST2 (High 32 bits)      │
-+52   IST3 (Low 32 bits)       │
-+56   IST3 (High 32 bits)      │
-+60   IST4 (Low 32 bits)       │
-+64   IST4 (High 32 bits)      │
-+68   IST5 (Low 32 bits)       │
-+72   IST5 (High 32 bits)      │
-+76   IST6 (Low 32 bits)       │
-+80   IST6 (High 32 bits)      │
-+84   IST7 (Low 32 bits)       │
-+88   IST7 (High 32 bits)      ┘
-+92   Reserved
-+96   Reserved
-+100  I/O Map Base Address (16 bits)
-+102  [I/O Permission Bitmap]
+                     31                               15                    0
+                  ┌────────────────────────────────┬──────────────────────┐
+             100  │    I/O Map Base Address        │       Reserved       │
+                  ├────────────────────────────────┴──────────────────────┤
+              96  │                        Reserved                        │
+                  ├───────────────────────────────────────────────────────┤
+              92  │                        Reserved                        │
+                  ├───────────────────────────────────────────────────────┤
+              88  │               IST7 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              84  │               IST7 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              80  │               IST6 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              76  │               IST6 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              72  │               IST5 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              68  │               IST5 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              64  │               IST4 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              60  │               IST4 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              56  │               IST3 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              52  │               IST3 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              48  │               IST2 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              44  │               IST2 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              40  │               IST1 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              36  │               IST1 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              32  │                        Reserved                        │
+                  ├───────────────────────────────────────────────────────┤
+              28  │                        Reserved                        │
+                  ├───────────────────────────────────────────────────────┤
+              24  │               RSP2 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              20  │               RSP2 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              16  │               RSP1 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+              12  │               RSP1 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+               8  │               RSP0 (upper 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+               4  │               RSP0 (lower 32 bits)                    │
+                  ├───────────────────────────────────────────────────────┤
+               0  │                        Reserved                        │
+                  └───────────────────────────────────────────────────────┘
+                   (Reserved bits 必须设置为 0)
 ```
 
 **最小 TSS 大小**：104 字节（0x68）
+
+### 3.1.1 64 位 TSS 描述符格式
+
+根据 **Intel SDM Vol 3A, Section 7.2.3 "TSS Descriptor in 64-bit mode"**，在 IA-32e 模式下，TSS 描述符扩展为 **16 字节**（两个连续的 8 字节条目）：
+
+```
+                           64-bit TSS Descriptor (16 bytes)
+         ┌─────────────────────────────────────────────────────────────┐
+  Byte 15│                        Reserved                             │
+  Byte 14│                                                             │
+  Byte 13│                                                             │
+  Byte 12│                                                             │
+         ├─────────────────────────────────────────────────────────────┤
+  Byte 11│                  Base Address [63:32]                       │
+  Byte 10│                                                             │
+  Byte  9│                                                             │
+  Byte  8│                                                             │
+         ├────────┬─────┬───────┬─────────────────────────────────────┤
+  Byte  7│Base[31:24]│ G │ 0 │ 0 │ AVL │ Limit[19:16] │ P │DPL│ 0 │Type│
+         ├────────┴─────┴───────┴───────┴──────────────┴───┴───┴───┴───┤
+  Byte  4│                  Base Address [23:0]                        │
+         ├─────────────────────────────────────────────────────────────┤
+  Byte  2│              Segment Selector (for TSS)                     │
+         ├─────────────────────────────────────────────────────────────┤
+  Byte  0│                  Segment Limit [15:0]                       │
+         └─────────────────────────────────────────────────────────────┘
+```
+
+**Type 字段值**：
+- `1001b (9)`: 64-bit TSS (Available)
+- `1011b (Bh)`: 64-bit TSS (Busy)
+
+**关键点**：
+- 64 位 TSS 描述符占用 GDT 中**两个连续的条目**
+- 高 8 字节的 Type 字段为 `0000b`，用于与低 8 字节的 Type 区分
+- 这允许 TSS 基址使用完整的 64 位规范地址
 
 ### 3.2 Linux 内核的 TSS 结构
 
@@ -305,38 +396,24 @@ struct tss32 {
 ```c
 struct x86_hw_tss {
     u32                     reserved1;
-    u64                     sp0;            // RSP0: Ring 0 栈（系统调用、中断）
-    u64                     sp1;            // RSP1: Ring 1（未使用）
-    u64                     sp2;            // RSP2: Ring 2（未使用）
+    u64                     sp0;
+    u64                     sp1;
+
+    /*
+     * Since Linux does not use ring 2, the 'sp2' slot is unused by
+     * hardware.  entry_SYSCALL_64 uses it as scratch space to stash
+     * the user RSP value.
+     */
+    u64                     sp2;
+
     u64                     reserved2;
-    u64                     ist[7];         // IST1 到 IST7
+    u64                     ist[7];
     u32                     reserved3;
     u32                     reserved4;
     u16                     reserved5;
-    u16                     io_map_base;    // I/O 位图偏移
+    u16                     io_bitmap_base;
+
 } __attribute__((packed));
-
-/*
- * 完整的 per-CPU TSS 结构
- */
-struct tss_struct {
-    /*
-     * TSS 的硬件部分（CPU 可见）
-     */
-    struct x86_hw_tss       x86_tss;
-
-    /*
-     * 软件部分（CPU 不可见，只是为了内存布局）
-     */
-    unsigned long           SYSENTER_stack_canary;
-    unsigned long           SYSENTER_stack;
-
-    /*
-     * I/O 权限位图（紧跟在 TSS 之后）
-     * 大小：8192 字节（覆盖 65536 个端口）
-     */
-    unsigned long           io_bitmap[IO_BITMAP_LONGS + 1];
-} ____cacheline_aligned;
 ```
 
 **关键字段说明**：
@@ -346,11 +423,139 @@ struct tss_struct {
 | `reserved1` | +0 | 4 字节 | 保留（对应 x86-32 的 prev_task） |
 | `sp0` | +4 | 8 字节 | **Ring 0 栈**：用户态→内核态时切换到此栈 |
 | `sp1` | +12 | 8 字节 | Ring 1 栈（未使用，x86-64 只用 Ring 0/3） |
-| `sp2` | +20 | 8 字节 | Ring 2 栈（未使用） |
+| `sp2` | +20 | 8 字节 | **Linux 特殊用法**：`entry_SYSCALL_64` 用作临时保存用户 RSP |
+| `reserved2` | +28 | 8 字节 | 保留 |
 | `ist[0..6]` | +36 | 56 字节 | **7 个 IST 栈**：为关键异常提供独立栈 |
-| `io_map_base` | +100 | 2 字节 | I/O 位图在 TSS 中的偏移 |
+| `reserved3` | +92 | 4 字节 | 保留 |
+| `reserved4` | +96 | 4 字节 | 保留 |
+| `reserved5` | +100 | 2 字节 | 保留 |
+| `io_bitmap_base` | +102 | 2 字节 | I/O 位图在 TSS 中的偏移 |
 
-### 3.3 Per-CPU 的 TSS
+### 3.3 SDM 定义与 Linux 内核结构的对比分析
+
+以下表格将 **Intel SDM Figure 7-11** 中的 64-bit TSS 硬件定义与 **Linux 内核 `struct x86_hw_tss`** 进行逐字段对比：
+
+| SDM 字段名 | SDM 偏移 | Linux 字段 | Linux 偏移 | 匹配情况 | 说明 |
+|------------|----------|------------|------------|----------|------|
+| Reserved | 0-3 | `reserved1` | 0-3 | ✅ 完全匹配 | 4 字节保留字段 |
+| RSP0 | 4-11 | `sp0` | 4-11 | ✅ 完全匹配 | Ring 0 栈指针 |
+| RSP1 | 12-19 | `sp1` | 12-19 | ✅ 完全匹配 | Ring 1 栈指针（未使用） |
+| RSP2 | 20-27 | `sp2` | 20-27 | ⚠️ 字段匹配，用途不同 | **Linux 重新利用为 syscall 临时空间** |
+| Reserved | 28-35 | `reserved2` | 28-35 | ✅ 完全匹配 | 8 字节保留字段 |
+| IST1-IST7 | 36-91 | `ist[7]` | 36-91 | ✅ 完全匹配 | 7 个 IST 栈指针（各 8 字节） |
+| Reserved | 92-99 | `reserved3` + `reserved4` | 92-99 | ✅ 完全匹配 | 8 字节保留字段 |
+| Reserved | 100-101 | `reserved5` | 100-101 | ✅ 完全匹配 | 2 字节保留字段 |
+| I/O Map Base Address | 102-103 | `io_bitmap_base` | 102-103 | ✅ 完全匹配 | I/O 位图偏移 |
+
+**总大小**：104 字节 (0x68)
+
+#### 3.3.1 Linux 对 `sp2` 字段的特殊利用
+
+SDM 规定 RSP2 用于 Ring 2 的栈指针，但 Linux 只使用 Ring 0 和 Ring 3，因此 RSP2 字段对硬件而言完全闲置。Linux 内核巧妙地将其重新利用：
+
+```asm
+// arch/x86/entry/entry_64.S - entry_SYSCALL_64 中的使用
+SYM_INNER_LABEL(entry_SYSCALL_64_after_hwframe, SYM_L_GLOBAL)
+    swapgs
+    /* tss.sp2 is scratch space. */
+    movq    %rsp, PER_CPU_VAR(cpu_tss_rw + TSS_sp2)  // 保存用户 RSP
+    SWITCH_TO_KERNEL_CR3 scratch_reg=%rsp
+    movq    PER_CPU_VAR(cpu_current_top_of_stack), %rsp  // 切换到内核栈
+
+    /* Construct struct pt_regs on stack */
+    pushq   $__USER_DS                              /* pt_regs->ss */
+    pushq   PER_CPU_VAR(cpu_tss_rw + TSS_sp2)       /* pt_regs->sp (从 sp2 取回) */
+    pushq   %r11                                    /* pt_regs->flags */
+    pushq   $__USER_CS                              /* pt_regs->cs */
+    pushq   %rcx                                    /* pt_regs->ip */
+```
+
+**为什么选择 `sp2`？**
+1. **已在缓存中**：TSS 结构在 syscall 路径上经常被访问，`sp2` 与 `sp0` 在同一缓存行
+2. **无竞争**：per-CPU 的 TSS，不需要加锁
+3. **无副作用**：硬件不会读取 RSP2（因为没有 Ring 2 代码）
+
+#### 3.3.2 系统调用方式与 TSS 使用对比
+
+x86 架构上系统调用的实现方式经历了演变，不同方式对 TSS 的依赖程度不同：
+
+| 方式 | 是否查 IDT | 是否自动用 TSS 做任务切换 | 是否从 TSS 加载内核栈 |
+|------|-----------|--------------------------|---------------------|
+| **`int 0x80`**（32 位老式） | 是 | 否 | ✅ 是（硬件自动从 TSS 加载 SS0/ESP0） |
+| **`sysenter`**（32 位优化） | 否 | 否 | ❌ 否（硬件不自动用 TSS，但软件可读 TSS） |
+| **`syscall`**（64 位） | 否 | 否 | ❌ 否（硬件不自动用 TSS，从 per-cpu 变量获取栈） |
+
+**`int 0x80`（传统方式）**：
+- 本质是软中断，CPU 处理方式同普通中断：查 IDT → 特权级切换时从 TSS 加载内核栈
+- 性能开销大（需要查表、权限检查等）
+
+**`sysenter/sysexit`（Intel 32 位优化）**：
+- 使用 MSR 寄存器预先存好内核态 CS、EIP、ESP 等信息
+- 进入内核时**不查 IDT，不用 TSS 自动加载栈**
+- 比 `int 0x80` 更快
+
+**`syscall/sysret`（64 位标准）**：
+- 使用 `IA32_LSTAR` MSR 存储入口地址，`IA32_STAR` 存储 CS/SS 选择子
+- **不查 IDT，不用 TSS 的栈切换机制**
+- RSP 不变（仍指向用户栈），内核必须**手动切换栈**
+- Linux 用 `TSS.sp2` 临时保存用户 RSP，然后从 per-cpu 变量加载内核栈
+
+**关键区别**：传统中断（`int 0x80`）依赖 TSS 的 `sp0` 进行**硬件自动栈切换**；现代 `syscall` 完全**绕过 TSS 的栈切换机制**，仅借用 `sp2` 作为临时存储。
+
+#### 3.3.3 IST 数组索引的注意事项
+
+SDM 中 IST 编号为 **IST1 到 IST7**（1-based），而 Linux 内核的 `ist[7]` 数组是 **0-based**：
+
+| SDM 名称 | Linux 数组索引 | 偏移量 | Linux 用途 |
+|----------|----------------|--------|------------|
+| IST1 | `ist[0]` | +36 | Double Fault (IST_INDEX_DF) |
+| IST2 | `ist[1]` | +44 | NMI (IST_INDEX_NMI) |
+| IST3 | `ist[2]` | +52 | Debug (IST_INDEX_DB) |
+| IST4 | `ist[3]` | +60 | Machine Check (IST_INDEX_MCE) |
+| IST5 | `ist[4]` | +68 | VMM Communication (IST_INDEX_VC) |
+| IST6 | `ist[5]` | +76 | 预留 |
+| IST7 | `ist[6]` | +84 | 预留 |
+
+Linux 内核定义了常量来避免混淆（`arch/x86/include/asm/page_64_types.h`）：
+
+```c
+#define IST_INDEX_DF    0   // Double Fault 使用 IST1 (ist[0])
+#define IST_INDEX_NMI   1   // NMI 使用 IST2 (ist[1])
+#define IST_INDEX_DB    2   // Debug 使用 IST3 (ist[2])
+#define IST_INDEX_MCE   3   // Machine Check 使用 IST4 (ist[3])
+#define IST_INDEX_VC    4   // VMM Communication Exception 使用 IST5 (ist[4])
+```
+
+在 `arch/x86/kernel/cpu/common.c` 中初始化：
+
+```c
+tss->x86_tss.ist[IST_INDEX_DF] = __this_cpu_ist_top_va(DF);
+tss->x86_tss.ist[IST_INDEX_NMI] = __this_cpu_ist_top_va(NMI);
+tss->x86_tss.ist[IST_INDEX_DB] = __this_cpu_ist_top_va(DB);
+tss->x86_tss.ist[IST_INDEX_MCE] = __this_cpu_ist_top_va(MCE);
+tss->x86_tss.ist[IST_INDEX_VC] = __this_cpu_ist_top_va(VC);
+```
+
+### 3.4 完整的 per-CPU TSS 结构
+
+Linux 为每个 CPU 维护一个完整的 `tss_struct`，包含硬件部分和软件扩展：
+
+```c
+// arch/x86/include/asm/processor.h
+struct tss_struct {
+    /*
+     * TSS 的硬件部分（CPU 可见）
+     */
+    struct x86_hw_tss       x86_tss;
+
+    /*
+     * I/O 权限位图
+     */
+    struct x86_io_bitmap    io_bitmap;
+} __aligned(PAGE_SIZE);
+```
+
+### 3.5 Per-CPU TSS 的初始化
 
 Linux 为**每个 CPU 核心**维护一个独立的 TSS：
 
@@ -359,7 +564,9 @@ Linux 为**每个 CPU 核心**维护一个独立的 TSS：
 DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_struct, cpu_tss_rw) = {
     .x86_tss = {
         /*
-         * sp0 会在每次任务切换时更新为新任务的内核栈
+         * 64 位模式下：sp0 指向 entry trampoline stack（固定）
+         * 32 位模式下：sp0 会在每次任务切换时更新为新任务的内核栈
+         * 初始值为无效地址，在 cpu_init() 中会被正确设置
          */
         .sp0 = (1UL << (BITS_PER_LONG - 1)) + 1,
 
@@ -386,11 +593,162 @@ DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_struct, cpu_tss_rw) = {
 - 每个 CPU 有独立的 IST 栈
 - 避免多核竞争
 
+### 3.6 64 位 Linux 的栈切换机制：Entry Trampoline Stack
+
+这是一个容易混淆的概念。在 64 位 Linux 中，**TSS.sp0 并不直接指向进程的内核栈**，而是使用了更复杂的 **entry trampoline** 机制。
+
+#### 关键数据结构
+
+```c
+// per-cpu 的 TSS
+DEFINE_PER_CPU(struct tss_struct, cpu_tss_rw);
+
+// per-cpu 的当前进程内核栈顶（这才是真正存储进程栈的地方）
+DEFINE_PER_CPU(unsigned long, cpu_current_top_of_stack);
+
+// per-cpu 的 entry trampoline stack（TSS.sp0 指向这里）
+struct entry_stack {
+    char stack[PAGE_SIZE];  // 4KB
+};
+```
+
+#### 64 位 Linux 的实际设计
+
+**TSS.sp0 的初始化**（在 `cpu_init()` 中）：
+
+```c
+// arch/x86/kernel/cpu/common.c
+/*
+ * sp0 points to the entry trampoline stack regardless of what task
+ * is running.
+ */
+load_sp0((unsigned long)(cpu_entry_stack(cpu) + 1));
+```
+
+**关键点**：TSS.sp0 指向 **entry trampoline stack**（固定的 per-cpu 栈），**不是进程的内核栈**！
+
+#### 上下文切换时的更新
+
+```c
+// arch/x86/kernel/process_64.c
+__switch_to(struct task_struct *prev_p, struct task_struct *next_p)
+{
+    // 更新当前进程的内核栈顶（这是关键！）
+    raw_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p));
+    
+    // 在标准 64 位配置下，TSS.sp0 不变（始终指向 entry trampoline stack）
+    // update_task_stack(next_p) 在标准配置下不更新 TSS.sp0
+}
+```
+
+#### 中断/异常发生时的完整流程
+
+```
+用户态程序执行中...
+        │
+        ▼ 发生中断（特权级 3→0）
+┌─────────────────────────────────────────────────────────────┐
+│ 步骤 1：CPU 硬件自动操作                                     │
+│   - 从 TSS.sp0 加载栈指针（entry trampoline stack）          │
+│   - 在 entry trampoline stack 上压入 SS/RSP/RFLAGS/CS/RIP   │
+├─────────────────────────────────────────────────────────────┤
+│ 步骤 2：entry_64.S 中的 error_entry 代码                     │
+│   - PUSH_AND_CLEAR_REGS（保存通用寄存器到 trampoline stack） │
+│   - 调用 sync_regs()                                        │
+├─────────────────────────────────────────────────────────────┤
+│ 步骤 3：sync_regs() 函数                                     │
+│   struct pt_regs *regs = current_top_of_stack() - 1;        │
+│   if (regs != eregs)                                        │
+│       *regs = *eregs;  // 复制帧到进程的真正内核栈           │
+│   return regs;                                               │
+└─────────────────────────────────────────────────────────────┘
+        │
+        ▼ 现在在进程的真正内核栈上执行
+```
+
+#### 内存布局示意
+
+```
+CPU 0 的 per-cpu 数据区:
++----------------------------------+
+| cpu_tss_rw.x86_tss.sp0 =         |
+|   0xfffffe0000001000             | → 指向 entry trampoline stack（固定不变）
++----------------------------------+
+| cpu_current_top_of_stack =       |
+|   0xffff888012345000             | → 指向当前进程 A 的内核栈（随切换更新）
++----------------------------------+
+
+Entry Trampoline Stack:              进程 A 的内核栈:
++---------------------------+       +---------------------------+
+| 0xfffffe0000001000        |       | 0xffff888012345000        |
+| (CPU 硬件先压栈到这里)     |  -->  | (sync_regs 复制到这里)    |
+| SS, RSP, RFLAGS, CS, RIP  |       | SS, RSP, RFLAGS, CS, RIP  |
+| + 通用寄存器               |       | + 通用寄存器               |
++---------------------------+       +---------------------------+
+```
+
+#### 为什么使用 Entry Trampoline Stack？
+
+1. **安全性**：用户态无法预测或影响 entry trampoline stack 的位置
+2. **简化上下文切换**：TSS.sp0 不需要随进程切换更新
+3. **PTI (Page Table Isolation)**：entry trampoline stack 可以映射在用户页表中，而进程内核栈不能
+4. **性能**：减少上下文切换时的 TSS 更新操作
+
+#### 32 位模式 vs 64 位模式的差异
+
+| 方面 | 32 位模式 | 64 位模式 |
+|------|----------|----------|
+| **TSS.sp0 指向** | 进程的内核栈 | entry trampoline stack（固定） |
+| **上下文切换时** | 更新 TSS.sp0 | 只更新 `cpu_current_top_of_stack` |
+| **中断压栈位置** | 直接在进程内核栈 | 先在 trampoline，再复制到进程栈 |
+
+#### syscall 的栈获取方式
+
+syscall 不使用 TSS，直接从 `cpu_current_top_of_stack` 获取进程内核栈：
+
+```asm
+// arch/x86/entry/entry_64.S
+movq    PER_CPU_VAR(cpu_tss_rw + TSS_sp2), %rsp  // 临时保存用户 RSP
+movq    PER_CPU_VAR(cpu_current_top_of_stack), %rsp  // 直接获取进程内核栈
+```
+
+这就是为什么 syscall 比传统中断更快——它绕过了 TSS 和 entry trampoline 机制。
+
 ---
 
 ## 4. IST 机制详解
 
-### 4.1 IST 的核心思想
+### 4.1 Intel SDM 官方描述（Section 6.14.5）
+
+根据 **Intel SDM Vol 3A, Section 6.14.5 "Interrupt Stack Table"**：
+
+> "The IST mechanism is only available in IA-32e mode. It is part of the 64-bit mode TSS. The motivation for the IST mechanism is to provide a method for **specific interrupts (such as NMI, double-fault, and machine-check) to always execute on a known good stack**."
+
+**与传统模式的对比**：
+
+| 模式 | 栈切换机制 |
+|------|-----------|
+| **Legacy mode** | 可以通过任务门（Task Gate）进行任务切换来获得已知良好的栈 |
+| **IA-32e mode** | Legacy 任务切换不受支持，必须使用 IST 机制 |
+
+**IST 的核心特性**：
+- IST 在 TSS 中提供最多 **7 个 IST 指针**（IST1-IST7）
+- 指针通过 IDT 中断门描述符中的 **3 位 IST 索引字段**引用
+- 当中断发生时，处理器将 IST 指针所指的值加载到 RSP
+
+**IST 使用时的栈切换行为**：
+
+> "When an interrupt occurs, the new SS selector is forced to NULL and the SS selector's RPL field is set to the new CPL. The old SS, RSP, RFLAGS, CS, and RIP are pushed onto the new stack. Interrupt processing then proceeds as normal."
+
+**IST 索引为零时的行为**：
+
+> "If the IST index is zero, the modified legacy stack-switching mechanism described above is used."
+
+这意味着：
+- 可以选择性地为某些中断向量使用 IST，而其他向量使用传统机制
+- 同一个 IDT 中，部分表项可以使用 IST，其他表项不使用
+
+### 4.2 IST 的核心思想
 
 **问题**：如果在处理中断/异常时**当前栈已损坏**怎么办？
 
@@ -413,7 +771,7 @@ DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_struct, cpu_tss_rw) = {
 - 不依赖当前栈的完整性
 - 每种关键异常使用不同的栈，避免相互干扰
 
-### 4.2 IST 切换的硬件行为
+### 4.3 IST 切换的硬件行为
 
 **CPU 在处理中断/异常时的栈切换逻辑**：
 
@@ -453,7 +811,152 @@ IF (IST != 0) {
 - IST 字段为 0 时，回退到传统的 RSP0 切换
 - 无论从哪个特权级触发，IST 都生效
 
-### 4.3 IST 栈的布局
+### 4.4 IA-32e 模式栈切换详解（SDM Section 6.14.4）
+
+根据 **Intel SDM Vol 3A, Section 6.14.4 "Stack Switching in IA-32e Mode"**：
+
+**与 Legacy 模式的区别**：
+
+> "In IA-32e mode, the legacy stack-switch mechanism is modified. When stacks are switched as part of a 64-bit mode privilege-level change (resulting from an interrupt), a **new SS descriptor is not loaded**. IA-32e mode loads **only an inner-level RSP from the TSS**."
+
+**关键行为变化**：
+1. **SS 选择子强制为 NULL**：新的 SS 选择子被强制设为 NULL
+2. **RPL 设置为新 CPL**：SS 选择子的 RPL 字段被设置为新的 CPL
+3. **保存旧的 SS 和 RSP**：旧的 SS 和 RSP 被保存到新栈上
+4. **IRET 恢复**：后续的 IRET 会从栈上弹出旧的 SS 并加载到 SS 寄存器
+
+**设计原因**：
+
+> "The new SS is set to NULL in order to handle nested far transfers (far CALL, INT, interrupts and exceptions)."
+
+将 SS 设为 NULL 是为了正确处理嵌套的远调用和中断。
+
+**总结**：
+
+> "In summary, a stack switch in IA-32e mode works like the legacy stack switch, except that a new SS selector is **not loaded from the TSS**. Instead, the new SS is **forced to NULL**."
+
+### 4.5 64 位模式栈帧详解（SDM Section 6.14.2）
+
+根据 **Intel SDM Vol 3A, Section 6.14.2 "64-Bit Mode Stack Frame"**：
+
+**固定的压栈大小**：
+
+> "In legacy mode, the size of an IDT entry (16 bits or 32 bits) determines the size of interrupt-stack-frame pushes. In 64-bit mode, the size of interrupt stack-frame pushes is **fixed at eight bytes**."
+
+**无条件压入 SS:RSP**：
+
+> "64-bit mode also pushes SS:RSP **unconditionally**, rather than only on a CPL change."
+
+这提供了以下好处：
+- 所有中断都有**一致的栈帧大小**
+- 处理 INTn 指令或外部 INTR# 信号的中断服务程序入口点可以压入额外的错误码占位符以保持一致性
+
+**栈对齐**：
+
+> "In IA-32e mode, the RSP is aligned to a **16-byte boundary** before pushing the stack frame. The stack frame itself is aligned on a 16-byte boundary when the interrupt handler is called."
+
+**对齐的好处**：
+- 允许异常和中断帧在重新启用中断之前对齐到 16 字节边界
+- 允许栈被格式化为最佳存储 16 字节 XMM 寄存器
+
+**64 位模式中断栈帧布局**：
+
+```
+          （高地址）
+        ┌─────────────────────────────┐
+  +40   │           SS                │  8 bytes
+        ├─────────────────────────────┤
+  +32   │          RSP                │  8 bytes
+        ├─────────────────────────────┤
+  +24   │         RFLAGS              │  8 bytes
+        ├─────────────────────────────┤
+  +16   │           CS                │  8 bytes
+        ├─────────────────────────────┤
+  +8    │          RIP                │  8 bytes
+        ├─────────────────────────────┤
+  +0    │     Error Code (可选)       │  8 bytes
+        └─────────────────────────────┘
+          （低地址，新 RSP）
+```
+
+### 4.6 CPU 自动保存 vs 软件手动保存
+
+在理解中断/异常处理时，必须区分 **CPU 硬件自动保存**和**软件手动保存**的内容。
+
+#### CPU 硬件自动保存的内容
+
+**CPU 只自动保存以下寄存器**（64 位模式与 32 位模式有差异）：
+
+| 寄存器 | 32 位模式 | 64 位模式 | 说明 |
+|--------|----------|----------|------|
+| SS | 仅特权级变化时（3→0） | **总是**压入 | 旧的栈段选择子 |
+| RSP | 仅特权级变化时（3→0） | **总是**压入 | 旧的栈指针 |
+| RFLAGS | 总是 | 总是 | 标志寄存器 |
+| CS | 总是 | 总是 | 代码段选择子 |
+| RIP | 总是 | 总是 | 返回地址 |
+| Error Code | 某些异常 | 某些异常 | 异常特定的错误码 |
+
+> **重要（SDM Vol 3A, Section 6.14.2）**：在 64 位模式下，SS:RSP 是**无条件压入**的（"SS:RSP is pushed unconditionally"），无论是否发生特权级切换。这简化了中断帧的处理，使所有中断帧大小一致。
+
+**重要：CPU 不会自动保存任何通用寄存器**（RAX、RBX、RCX、RDX、RSI、RDI、RBP、R8-R15）！
+
+#### 软件必须手动保存的内容
+
+因为中断/异常处理程序会使用通用寄存器，如果不保存就会覆盖原来的值。所以 Linux 内核在中断入口汇编代码中**手动保存**所有通用寄存器：
+
+```asm
+// arch/x86/entry/entry_64.S - 中断入口示例
+SYM_CODE_START(asm_common_interrupt)
+    // CPU 已自动压入 SS/RSP/RFLAGS/CS/RIP/ErrorCode
+    
+    // 软件手动保存通用寄存器
+    pushq   %rdi
+    pushq   %rsi
+    pushq   %rdx
+    pushq   %rcx
+    pushq   %rax
+    pushq   %r8
+    pushq   %r9
+    pushq   %r10
+    pushq   %r11
+    pushq   %rbx
+    pushq   %rbp
+    pushq   %r12
+    pushq   %r13
+    pushq   %r14
+    pushq   %r15
+    
+    // 现在栈上有完整的 pt_regs 结构
+    movq    %rsp, %rdi          // 第一个参数：pt_regs 指针
+    call    do_IRQ              // 调用 C 处理函数
+    
+    // 返回时恢复寄存器
+    popq    %r15
+    popq    %r14
+    // ... 恢复其他寄存器
+    iretq                        // CPU 自动恢复 SS/RSP/RFLAGS/CS/RIP
+SYM_CODE_END(asm_common_interrupt)
+```
+
+#### 3→0 vs 0→0 的完整对比
+
+| 比较项 | 3→0（用户态→内核态） | 0→0（内核态→内核态） |
+|--------|----------------------|----------------------|
+| **栈切换** | 从 TSS 加载新内核栈 | 继续使用当前栈 |
+| **CPU 自动压 SS/RSP** | ✅ 是 | ❌ 否（64 位模式例外，总是压入） |
+| **CPU 自动压 RFLAGS/CS/RIP** | ✅ 是 | ✅ 是 |
+| **CPU 自动压通用寄存器** | ❌ 否 | ❌ 否 |
+| **软件手动保存通用寄存器** | ✅ 是 | ✅ 是 |
+
+**注意**：在 64 位模式下，根据 SDM 的规定，SS:RSP 是**无条件压入**的，即使没有特权级切换。这与 32 位模式不同。
+
+#### 为什么这样设计？
+
+1. **性能考虑**：不是所有中断都需要保存所有寄存器，让软件决定保存哪些更灵活
+2. **统一处理**：中断处理程序（无论从用户态还是内核态进入）都可以用相同的代码结构保存寄存器
+3. **pt_regs 结构**：Linux 用 `pt_regs` 结构体统一访问 CPU 自动保存和软件手动保存的所有寄存器
+
+### 4.7 IST 栈的布局
 
 **每个 CPU 有 7 个独立的 IST 栈**：
 
@@ -492,7 +995,7 @@ IF (IST != 0) {
 #define DOUBLEFAULT_STACK_ORDER (1)  // 2 页 = 8KB
 ```
 
-### 4.4 CPU 压栈的字节级详细布局
+### 4.7 CPU 压栈的字节级详细布局
 
 当异常发生并切换到 IST 栈后，CPU 会**自动**向新栈压入一系列寄存器值。理解这个过程对于分析异常现场至关重要。
 
@@ -608,7 +1111,7 @@ DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)
 - CPU 压栈是**硬件自动完成**的，软件无法干预
 - 这些压栈的值是异常处理函数**诊断问题的关键信息**
 
-### 4.5 IST 地址的动态调整机制
+### 4.8 IST 地址的动态调整机制
 
 虽然从 CPU 硬件视角看，TSS 中的 IST 地址是"固定"的，但 Linux 内核在运行时可以**动态调整**这些地址，以应对嵌套异常等复杂场景。
 
@@ -903,6 +1406,44 @@ DEFINE_IDTENTRY_MCE(exc_machine_check)
 | **栈溢出** | 中断在满栈上压栈 → 踩踏内存 ❌ | 避开损坏的栈 → 正常处理 ✅ |
 | **调试能力** | 难以复现，只能猜测 | 有完整日志和栈回溯 ✅ |
 
+#### 为什么内核态异常不使用 TSS.RSP0？
+
+在理解具体场景之前，必须先理解一个关键概念：**x86 CPU 只在特权级切换时才从 TSS.RSP0 加载栈指针**。
+
+| 异常发生时的状态 | CPU 行为 | 使用的栈 |
+|-----------------|----------|----------|
+| 用户态 → 内核态（CPL 改变） | ✅ 从 TSS.RSP0 加载 | 内核为该进程分配的内核栈 |
+| 内核态 → 内核态（CPL 不变） | ❌ 不查 TSS | **继续使用当前 RSP** |
+| 任意特权级，IDT 条目 IST≠0 | ✅ 从 TSS.ISTn 加载 | IST 专用栈 |
+
+**这意味着**：当代码**已经在内核态运行**时（如驱动程序、内核线程），如果触发一个**普通异常**（如 #PF 缺页，IST=0）：
+
+1. CPU 检查 IDT 条目的 IST 字段 → **IST=0**
+2. CPU 检查是否有特权级切换 → **没有**（都是 Ring 0）
+3. CPU 决定：**继续使用当前 RSP**
+
+此时，即使 `TSS.RSP0` 存储着一个完全有效的内核栈地址，CPU 也**不会去读取它**。
+
+```
+示例场景：
+┌────────────────────────────────────────────────────────────┐
+│ 当前状态：                                                  │
+│   - CPL = 0（内核态）                                      │
+│   - RSP = 0xc001c0de（已被 bug 损坏）                      │
+│   - TSS.RSP0 = 0xffffc90000123000（完全有效！）            │
+│                                                             │
+│ 触发 #PF（缺页异常，IST=0）：                              │
+│   1. IST=0 → 不使用 IST 机制                               │
+│   2. CPL 不变（0→0） → 不查 TSS.RSP0                       │
+│   3. 继续使用当前 RSP = 0xc001c0de                         │
+│   4. 尝试在无效地址压栈 → 失败！                           │
+│                                                             │
+│ 结论：TSS.RSP0 虽然有效，但 CPU 根本不会去读取它           │
+└────────────────────────────────────────────────────────────┘
+```
+
+**这正是 IST 存在的意义**：对于关键异常（#DF, NMI, #MC），即使在内核态触发，也**强制**切换到干净的 IST 栈，打破"同特权级不切换栈"的限制。
+
 #### 具体死机场景对比
 
 **场景 1：栈指针损坏**
@@ -1038,31 +1579,172 @@ Linux 内核在 **2.6 中期（2007-2009 年左右）** 开始全面引入 IST �
 
 ## 6. IST 与 IDT 的集成
 
-### 6.1 IDT 门描述符中的 IST 字段
+### 6.1 Intel SDM 官方描述：64 位 IDT Gate Descriptor
 
-**x86-64 中断门描述符格式**（16 字节）：
+根据 **Intel SDM Vol 3A, Section 6.14.1 "64-Bit Mode IDT"** 和 **Figure 6-7**：
+
+> "In IA-32e mode, the IDT index size is not increased. This is because only 256 interrupts or exceptions are supported. The IDT itself is not larger than 4 KB. However, to support 64-bit offset, the size of each gate entry is increased from 8 to **16 bytes**."
+
+**64 位中断门描述符格式**（16 字节）：
 
 ```
-+0    Offset 15:0          (处理程序地址低 16 位)
-+2    Segment Selector     (代码段选择子)
-+4    IST[2:0] | Reserved  (IST 索引: 0-7)
-      ^^^^^^^^^^^
-      这 3 位指定使用哪个 IST 栈
-      0 = 不使用 IST
-      1 = 使用 TSS.IST[0]
-      2 = 使用 TSS.IST[1]
-      ...
-      7 = 使用 TSS.IST[6]
-
-+5    Type, DPL, P         (类型、特权级、存在位)
-+6    Offset 31:16         (处理程序地址中 16 位)
-+8    Offset 63:32         (处理程序地址高 32 位)
-+12   Reserved
+                        64-bit Interrupt Gate Descriptor
+         ┌─────────────────────────────────────────────────────────────┐
+  Byte 15│                        Reserved                             │
+  Byte 14│                                                             │
+  Byte 13│                                                             │
+  Byte 12│                                                             │
+         ├─────────────────────────────────────────────────────────────┤
+  Byte 11│                                                             │
+  Byte 10│                  Offset [63:32]                             │
+  Byte  9│              (处理程序地址高 32 位)                         │
+  Byte  8│                                                             │
+         ├─────────────────────────────────────────────────────────────┤
+  Byte  7│                                                             │
+  Byte  6│                  Offset [31:16]                             │
+         │              (处理程序地址中 16 位)                         │
+         ├────────┬─────┬────────────────────┬────────────────────────┤
+  Byte  5│   P    │ DPL │  0   │    Type    │         Reserved        │
+         │ (1bit) │(2bit)│(1bit)│   (4bit)   │                        │
+         ├────────┴─────┴────────────────────┼────────────────────────┤
+  Byte  4│         Reserved                   │         IST           │
+         │                                    │        (3 bits)       │
+         ├────────────────────────────────────┴────────────────────────┤
+  Byte  2│                  Segment Selector                           │
+         │                (代码段选择子，16 bits)                      │
+         ├─────────────────────────────────────────────────────────────┤
+  Byte  0│                  Offset [15:0]                              │
+         │              (处理程序地址低 16 位)                         │
+         └─────────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 Linux 内核的 IST 索引定义
+**IST 字段详解**：
 
-**文件**：`arch/x86/include/asm/cpu_entry_area.h`
+| IST 值 | 含义 |
+|--------|------|
+| 0 | 不使用 IST，使用修改后的传统栈切换机制 |
+| 1 | 使用 TSS.IST1 |
+| 2 | 使用 TSS.IST2 |
+| 3 | 使用 TSS.IST3 |
+| 4 | 使用 TSS.IST4 |
+| 5 | 使用 TSS.IST5 |
+| 6 | 使用 TSS.IST6 |
+| 7 | 使用 TSS.IST7 |
+
+**Type 字段值**（64 位模式）：
+- `1110b (0xE)`: 64-bit Interrupt Gate
+- `1111b (0xF)`: 64-bit Trap Gate
+
+**重要说明**：
+
+> "Task gates are **not supported** in IA-32e mode. Attempting to access a task gate in 64-bit mode triggers a general-protection fault (#GP)."
+
+这意味着在 64 位模式下：
+- 只能使用中断门（Interrupt Gate）和陷阱门（Trap Gate）
+- 任务门（Task Gate）完全不可用
+- 必须使用 IST 机制来实现某些任务门曾经提供的功能
+
+### 6.2 SDM 定义与 Linux 内核 IDT Gate 结构的对比分析
+
+Linux 内核在 `arch/x86/include/asm/desc_defs.h` 中定义了对应的结构体：
+
+```c
+struct idt_bits {
+    u16     ist  : 3,    // IST 索引 (0-7)
+            zero : 5,    // 保留位，必须为 0
+            type : 5,    // 门类型 (0xE = 中断门, 0xF = 陷阱门)
+            dpl  : 2,    // 描述符特权级
+            p    : 1;    // 存在位
+} __attribute__((packed));
+
+struct gate_struct {
+    u16             offset_low;     // Offset [15:0]
+    u16             segment;        // Segment Selector
+    struct idt_bits bits;           // 位域字段
+    u16             offset_middle;  // Offset [31:16]
+#ifdef CONFIG_X86_64
+    u32             offset_high;    // Offset [63:32]
+    u32             reserved;       // Reserved
+#endif
+} __attribute__((packed));
+
+typedef struct gate_struct gate_desc;
+```
+
+**SDM 与 Linux 内核字段对比**：
+
+| SDM 字段 | SDM 偏移 (字节) | Linux 字段 | 匹配情况 |
+|----------|-----------------|------------|----------|
+| Offset [15:0] | 0-1 | `offset_low` | ✅ 完全匹配 |
+| Segment Selector | 2-3 | `segment` | ✅ 完全匹配 |
+| IST (3 bits) | 4 (低 3 位) | `bits.ist` | ✅ 完全匹配 |
+| Reserved (5 bits) | 4 (高 5 位) | `bits.zero` | ✅ 完全匹配 |
+| Type (4 bits) | 5 (低 4 位) | `bits.type` | ⚠️ 5 bits（包含 S 位） |
+| S (1 bit) | 5 (bit 4) | 包含在 `bits.type` | ⚠️ Linux 使用 5 bits |
+| DPL (2 bits) | 5 (bits 5-6) | `bits.dpl` | ✅ 完全匹配 |
+| P (1 bit) | 5 (bit 7) | `bits.p` | ✅ 完全匹配 |
+| Offset [31:16] | 6-7 | `offset_middle` | ✅ 完全匹配 |
+| Offset [63:32] | 8-11 | `offset_high` | ✅ 完全匹配 |
+| Reserved | 12-15 | `reserved` | ✅ 完全匹配 |
+
+**Linux 内核初始化 IDT 条目**（`arch/x86/include/asm/desc.h`）：
+
+```c
+static inline void pack_gate(gate_desc *gate, unsigned type, unsigned long func,
+                             unsigned dpl, unsigned ist, unsigned seg)
+{
+    gate->offset_low    = (u16) func;
+    gate->bits.p        = 1;
+    gate->bits.dpl      = dpl;
+    gate->bits.zero     = 0;
+    gate->bits.type     = type;
+    gate->bits.ist      = ist;
+    gate->segment       = seg;
+    gate->offset_middle = (u16) (func >> 16);
+#ifdef CONFIG_X86_64
+    gate->offset_high   = (u32) (func >> 32);
+    gate->reserved      = 0;
+#endif
+}
+```
+
+**在 IDT 中注册带有 IST 的异常处理程序**（`arch/x86/kernel/idt.c`）：
+
+```c
+static const __initconst struct idt_data def_idts[] = {
+    INTG(X86_TRAP_DE,  asm_exc_divide_error),        // IST=0
+    ISTG(X86_TRAP_NMI, asm_exc_nmi, IST_INDEX_NMI),  // IST=1
+    ISTG(X86_TRAP_DF,  asm_exc_double_fault, IST_INDEX_DF),  // IST=0
+    ISTG(X86_TRAP_DB,  asm_exc_debug, IST_INDEX_DB),         // IST=2
+    ISTG(X86_TRAP_MC,  asm_exc_machine_check, IST_INDEX_MCE),// IST=3
+    // ...
+};
+```
+
+其中 `ISTG` 宏展开后会调用 `pack_gate()` 并设置 IST 字段。
+
+### 6.3 Linux 内核的 IST 索引定义
+
+**文件**：`arch/x86/include/asm/page_64_types.h`
+
+```c
+/*
+ * The index for the tss.ist[] array. The hardware limit is 7 entries.
+ */
+#define IST_INDEX_DF    0   // Double Fault → ist[0] (对应 SDM 的 IST1)
+#define IST_INDEX_NMI   1   // NMI → ist[1] (对应 SDM 的 IST2)
+#define IST_INDEX_DB    2   // Debug → ist[2] (对应 SDM 的 IST3)
+#define IST_INDEX_MCE   3   // Machine Check → ist[3] (对应 SDM 的 IST4)
+#define IST_INDEX_VC    4   // Virtualization Exception → ist[4] (对应 SDM 的 IST5)
+```
+
+**重要说明**：
+- Linux 内核的 `IST_INDEX_*` 是 **0-based**，用于索引 TSS 中的 `ist[7]` 数组
+- SDM 中的 IST 编号是 **1-based**（IST1 到 IST7）
+- IDT 门描述符中的 IST 字段使用的是 SDM 的编号（1-7），0 表示不使用 IST
+- 内核在设置 IDT 时会进行转换：`gate.bits.ist = IST_INDEX_* + 1`
+
+**异常栈在 CPU Entry Area 中的布局**（`arch/x86/include/asm/cpu_entry_area.h`）：
 
 ```c
 enum exception_stack_ordering {
@@ -1071,20 +1753,14 @@ enum exception_stack_ordering {
     ESTACK_DB,     // Debug
     ESTACK_MCE,    // Machine Check
     ESTACK_VC,     // Virtualization Exception (SEV-SNP)
-    ESTACK_CEA,    // CPU Entry Area
+    ESTACK_VC2,    // Nested #VC
     N_EXCEPTION_STACKS
 };
-
-// IST 索引（从 1 开始，0 表示不使用 IST）
-#define IST_INDEX_DF    (ESTACK_DF + 1)     // = 1
-#define IST_INDEX_NMI   (ESTACK_NMI + 1)    // = 2
-#define IST_INDEX_DB    (ESTACK_DB + 1)     // = 3
-#define IST_INDEX_MCE   (ESTACK_MCE + 1)    // = 4
-#define IST_INDEX_VC    (ESTACK_VC + 1)     // = 5
-#define IST_INDEX_CEA   (ESTACK_CEA + 1)    // = 6
 ```
 
-### 6.3 设置带 IST 的 IDT 表项
+这个枚举定义了异常栈在内存中的物理布局顺序，与 `IST_INDEX_*` 是一一对应的。
+
+### 6.4 设置带 IST 的 IDT 表项
 
 **API**：`set_intr_gate_ist()`
 
@@ -1108,46 +1784,54 @@ static inline void set_intr_gate_ist(unsigned int n,
 }
 ```
 
+**ISTG 宏的定义**（关键的 `+1` 转换）：
+
+```c
+// arch/x86/kernel/idt.c
+/*
+ * Interrupt gate with interrupt stack. The _ist index is the index in
+ * the tss.ist[] array, but for the descriptor it needs to start at 1.
+ */
+#define ISTG(_vector, _addr, _ist)   \
+    G(_vector, _addr, _ist + 1, GATE_INTERRUPT, DPL0, __KERNEL_CS)
+    //                ^^^^^^^^ 注意这里的 +1 转换！
+```
+
 **实际使用示例**：
 
 ```c
 // arch/x86/kernel/idt.c
 static const __initconst struct idt_data def_idts[] = {
-    // 向量 8: Double Fault，使用 IST 1
-    ISTG(X86_TRAP_DF,  exc_double_fault,  IST_INDEX_DF),
-
-    // 向量 2: NMI，使用 IST 2
-    ISTG(X86_TRAP_NMI, exc_nmi,           IST_INDEX_NMI),
-
-    // 向量 1: Debug，使用 IST 3
-    ISTG(X86_TRAP_DB,  exc_debug,         IST_INDEX_DB),
-
-    // 向量 18: Machine Check，使用 IST 4
-    ISTG(X86_TRAP_MC,  exc_machine_check, IST_INDEX_MCE),
+    INTG(X86_TRAP_DE,  asm_exc_divide_error),               // 无 IST
+    ISTG(X86_TRAP_NMI, asm_exc_nmi, IST_INDEX_NMI),         // IST=1+1=2
+    ISTG(X86_TRAP_DF,  asm_exc_double_fault, IST_INDEX_DF), // IST=0+1=1
+    ISTG(X86_TRAP_DB,  asm_exc_debug, IST_INDEX_DB),        // IST=2+1=3
+    ISTG(X86_TRAP_MC,  asm_exc_machine_check, IST_INDEX_MCE),// IST=3+1=4
+    ISTG(X86_TRAP_VC,  asm_exc_vmm_communication, IST_INDEX_VC), // IST=4+1=5
 };
 ```
+
+**IST 值转换关系**：
+
+| Linux 常量 | 值 | ISTG 宏展开后 | SDM 中的 IST | 使用的栈 |
+|------------|----|--------------:|-------------:|----------|
+| IST_INDEX_DF | 0 | 1 | IST1 | ist[0] |
+| IST_INDEX_NMI | 1 | 2 | IST2 | ist[1] |
+| IST_INDEX_DB | 2 | 3 | IST3 | ist[2] |
+| IST_INDEX_MCE | 3 | 4 | IST4 | ist[3] |
+| IST_INDEX_VC | 4 | 5 | IST5 | ist[4] |
 
 **门描述符的实际编码**：
 
 ```c
-// 示例：Double Fault 的门描述符
-gate_desc idt_table[256];
-
-// idt_table[8] (Double Fault):
-// offset  = &exc_double_fault
-// segment = __KERNEL_CS (0x10)
-// ist     = 1 (IST_INDEX_DF)
-// type    = 0xE (Interrupt Gate)
-// dpl     = 0
-// p       = 1
-
-// 编码为：
-idt_table[8].offset_low    = (u16)(addr & 0xFFFF);
-idt_table[8].segment       = 0x10;
-idt_table[8].ist           = 1;           // ← IST 字段
-idt_table[8].type_attr     = 0x8E;        // P=1, DPL=0, Type=E
-idt_table[8].offset_middle = (u16)((addr >> 16) & 0xFFFF);
-idt_table[8].offset_high   = (u32)(addr >> 32);
+// 示例：Double Fault 的门描述符最终值
+// idt_table[8] (X86_TRAP_DF = 8):
+//   offset  = &asm_exc_double_fault
+//   segment = __KERNEL_CS (0x10)
+//   ist     = 1 (IST_INDEX_DF + 1 = 0 + 1 = 1)
+//   type    = 0xE (GATE_INTERRUPT)
+//   dpl     = 0
+//   p       = 1
 ```
 
 ---
@@ -2168,6 +2852,365 @@ CPU 通过段选择子中的 **TI（Table Indicator）** 位决定查哪张表�
 - **一一对应**：有多少个进程，就有多少个内核栈
 - **协同工作**：进程进入内核态时，CPU 自动从用户栈切换到内核栈；返回时再切换回来。内核栈上的 `pt_regs` 区域是连接这两种状态的"桥梁"
 
+### 15.4 内核栈的分配机制
+
+#### 谁负责分配内核栈？
+
+内核栈的分配发生在**进程创建时**，由 `kernel/fork.c` 中的代码负责。
+
+#### 调用链
+
+```
+用户程序调用 fork()/clone()
+    ↓
+sys_fork() / sys_clone()                    // kernel/fork.c
+    ↓
+kernel_clone()                              // kernel/fork.c:2562
+    ↓
+copy_process()                              // kernel/fork.c:1917
+    ↓
+dup_task_struct()                           // kernel/fork.c:862
+    ↓
+alloc_thread_stack_node()                   // kernel/fork.c:280  ← 内核栈分配！
+```
+
+#### 核心分配函数
+
+```c
+// kernel/fork.c
+static int alloc_thread_stack_node(struct task_struct *tsk, int node)
+{
+    struct vm_struct *vm;
+    void *stack;
+    int i;
+
+    // 1. 优先从 per-CPU 缓存中获取复用的栈（性能优化）
+    for (i = 0; i < NR_CACHED_STACKS; i++) {
+        struct vm_struct *s;
+        s = this_cpu_xchg(cached_stacks[i], NULL);
+        if (!s)
+            continue;
+
+        // 复用缓存的栈
+        kasan_unpoison_range(s->addr, THREAD_SIZE);
+        stack = kasan_reset_tag(s->addr);
+        memset(stack, 0, THREAD_SIZE);  // 清零复用的栈
+
+        tsk->stack_vm_area = s;
+        tsk->stack = stack;             // 保存栈底指针
+        return 0;
+    }
+
+    // 2. 缓存没有，则用 vmalloc 分配新栈
+    stack = __vmalloc_node(THREAD_SIZE, THREAD_ALIGN,
+                           THREADINFO_GFP & ~__GFP_ACCOUNT,
+                           node, __builtin_return_address(0));
+    if (!stack)
+        return -ENOMEM;
+
+    vm = find_vm_area(stack);
+    tsk->stack_vm_area = vm;
+    tsk->stack = stack;                 // 栈底指针保存到 task_struct->stack
+    return 0;
+}
+```
+
+#### 内核栈大小
+
+```c
+// arch/x86/include/asm/page_64_types.h（64 位）
+#define THREAD_SIZE_ORDER   (2 + KASAN_STACK_ORDER)  // 通常是 2
+#define THREAD_SIZE         (PAGE_SIZE << THREAD_SIZE_ORDER)
+// 即 4KB × 4 = 16KB
+
+// arch/x86/include/asm/page_32_types.h（32 位）
+#define THREAD_SIZE_ORDER   1
+#define THREAD_SIZE         (PAGE_SIZE << THREAD_SIZE_ORDER)
+// 即 4KB × 2 = 8KB
+```
+
+| 架构 | 栈大小 | 页数 |
+|-----|--------|-----|
+| x86-64 | 16KB | 4 页 |
+| x86-32 | 8KB | 2 页 |
+
+#### 栈顶指针的计算
+
+内核通过以下宏计算进程的内核栈顶：
+
+```c
+// arch/x86/include/asm/processor.h
+#define task_top_of_stack(task) ((unsigned long)(task_pt_regs(task) + 1))
+
+#define task_pt_regs(task) \
+({                                                                      \
+    unsigned long __ptr = (unsigned long)task_stack_page(task);        \
+    __ptr += THREAD_SIZE - TOP_OF_KERNEL_STACK_PADDING;                \
+    ((struct pt_regs *)__ptr) - 1;                                     \
+})
+```
+
+#### 内核栈内存布局
+
+```
+task_struct->stack 指向栈底（低地址）
+                ↓
+┌───────────────────────────────────────┐ 低地址（栈底）
+│  STACK_END_MAGIC (0x57AC6E9D)         │ ← 栈溢出检测标记
+├───────────────────────────────────────┤
+│                                       │
+│        可用栈空间 (~16KB)             │
+│        ↑ 栈向低地址增长               │
+│                                       │
+├───────────────────────────────────────┤
+│  pt_regs 结构（中断/syscall 保存现场） │ ← task_pt_regs(task) 返回这里
+├───────────────────────────────────────┤
+│  TOP_OF_KERNEL_STACK_PADDING (可选)   │
+└───────────────────────────────────────┘ 高地址（栈顶）
+                ↑
+        task_top_of_stack(task) 返回这里
+```
+
+#### 上下文切换时的使用
+
+当进程切换时，内核更新 `cpu_current_top_of_stack` 指向新进程的内核栈顶：
+
+```c
+// arch/x86/kernel/process_64.c
+__switch_to(struct task_struct *prev_p, struct task_struct *next_p)
+{
+    // 更新 per-cpu 变量，指向新进程的内核栈顶
+    raw_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p));
+    
+    // 在标准 64 位配置下，TSS.sp0 不变（指向 entry trampoline）
+    update_task_stack(next_p);
+}
+```
+
+这样，当新进程触发中断或系统调用时，内核可以从 `cpu_current_top_of_stack` 获取正确的内核栈。
+
+#### 分配机制总结
+
+| 方面 | 说明 |
+|-----|------|
+| **分配时机** | `fork()`/`clone()` 创建新进程时 |
+| **负责模块** | `kernel/fork.c` |
+| **分配函数** | `alloc_thread_stack_node()` |
+| **分配方式** | `vmalloc`（启用 VMAP_STACK 时） |
+| **栈大小** | 64 位: 16KB，32 位: 8KB |
+| **存储位置** | `task_struct->stack`（栈底指针） |
+| **栈顶计算** | `task_top_of_stack(task)` 宏 |
+| **复用机制** | per-CPU 缓存（`cached_stacks[]`） |
+| **释放时机** | 进程退出时（`free_thread_stack()`） |
+
+### 15.5 Linux 启动过程中内核栈的使用时机
+
+内核栈的使用贯穿 Linux 启动的整个过程，从最早的汇编代码到多核 CPU 的初始化。
+
+#### 阶段 1：Boot CPU 早期启动（汇编阶段）
+
+当内核刚开始执行时（`head_64.S`），使用的是**静态分配的 init_stack**：
+
+```asm
+// arch/x86/kernel/head_64.S
+SYM_CODE_START(startup_32)
+    /* Set up the stack for verify_cpu() */
+    leaq    __top_init_kernel_stack(%rip), %rsp   // 设置初始栈
+    
+    call    startup_64_setup_gdt_idt              // 设置 GDT/IDT
+    // ...
+```
+
+**init_stack 的定义**：
+
+```c
+// include/linux/sched.h
+extern unsigned long init_stack[THREAD_SIZE / sizeof(unsigned long)];
+
+// include/asm-generic/vmlinux.lds.h
+#define INIT_TASK_DATA(align)                       \
+    . = ALIGN(align);                               \
+    __start_init_stack = .;                         \
+    init_thread_union = .;                          \
+    init_stack = .;                                 \
+    KEEP(*(.data..init_thread_info))                \
+    . = __start_init_stack + THREAD_SIZE;           \
+    __end_init_stack = .;
+```
+
+**关键变量初始化**：
+
+```c
+// arch/x86/kernel/cpu/common.c
+DEFINE_PER_CPU_CACHE_HOT(unsigned long, cpu_current_top_of_stack) = TOP_OF_INIT_STACK;
+
+// arch/x86/include/asm/processor.h
+#define TOP_OF_INIT_STACK ((unsigned long)&init_stack + sizeof(init_stack) - \
+                           TOP_OF_KERNEL_STACK_PADDING)
+```
+
+#### 阶段 2：Boot CPU 进入 C 代码
+
+Boot CPU 在早期汇编完成后跳转到 C 代码，此时仍使用 init_stack：
+
+```c
+// 调用链：head_64.S → x86_64_start_kernel() → start_kernel()
+//
+// 此时：
+// - RSP 指向 init_stack 的栈顶
+// - current 指向 init_task（0 号进程）
+// - init_task 的内核栈就是 init_stack
+```
+
+#### 阶段 3：TSS 和 Entry Trampoline Stack 初始化
+
+在 `cpu_init()` 中，为 Boot CPU 设置 TSS 和 entry trampoline：
+
+```c
+// arch/x86/kernel/cpu/common.c
+void cpu_init(void)
+{
+    int cpu = raw_smp_processor_id();
+    
+    // ...
+    
+    /*
+     * sp0 points to the entry trampoline stack regardless of what task
+     * is running.
+     */
+    load_sp0((unsigned long)(cpu_entry_stack(cpu) + 1));
+    
+    // ...
+}
+```
+
+**此时的栈布局**：
+
+```
+Boot CPU (CPU 0):
+┌────────────────────────────────────┐
+│ init_stack (init_task 的内核栈)    │ ← 当前 RSP 使用
+│   大小：THREAD_SIZE (16KB)          │
+│   静态分配在 .data 段              │
+├────────────────────────────────────┤
+│ cpu_entry_stack[0]                 │ ← TSS.sp0 指向这里
+│   Entry Trampoline Stack           │
+│   用于中断/异常入口                │
+└────────────────────────────────────┘
+```
+
+#### 阶段 4：Secondary CPU 启动
+
+当启动其他 CPU 核心时（SMP），流程有所不同：
+
+```c
+// arch/x86/kernel/smpboot.c
+static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle, int *cpu0_nmi_registered)
+{
+    // 为 secondary CPU 准备 idle 进程
+    per_cpu(current_task, cpu) = idle;
+    
+    // 设置栈指针（idle 进程的内核栈）
+    idle->thread.sp = (unsigned long)task_pt_regs(idle);
+    
+    // 设置启动入口
+    initial_code = (unsigned long)start_secondary;
+    
+    // 32 位模式下还需要设置 initial_stack
+    if (IS_ENABLED(CONFIG_X86_32)) {
+        initial_stack = idle->thread.sp;
+    }
+    // ...
+}
+```
+
+**Secondary CPU 汇编阶段**（`head_64.S`）：
+
+```asm
+// arch/x86/kernel/head_64.S
+SYM_CODE_START(secondary_startup_64)
+    // ...
+    
+.Lsetup_cpu:
+    // 获取 per-cpu 偏移
+    // RDX 包含 per-cpu offset
+    
+    // 从 per-cpu 变量获取 current_task
+    movq    current_task(%rdx), %rax
+    // 从 task_struct 获取栈指针
+    movq    TASK_threadsp(%rax), %rsp      // 切换到 idle 进程的内核栈
+    
+    // ...
+    
+.Ljump_to_C_code:
+    xorl    %ebp, %ebp
+    callq   *initial_code(%rip)            // 跳转到 start_secondary()
+```
+
+**Secondary CPU 的 C 代码入口**：
+
+```c
+// arch/x86/kernel/smpboot.c
+static void notrace start_secondary(void *unused)
+{
+    /*
+     * Don't put *anything* except direct CPU state initialization
+     * before cpu_init(), SMP booting is too fragile...
+     */
+    cr4_init();
+    
+    // 初始化 TSS、IDT 等
+    cpu_init_exception_handling(false);
+    cpu_init();
+    
+    // ...
+    
+    // 进入 idle 循环
+    cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
+}
+```
+
+#### 启动时间线总结
+
+```
+时间 ────────────────────────────────────────────────────────────────────────►
+
+Boot CPU:
+┌────────────┬────────────┬────────────┬────────────┬────────────┬──────────┐
+│ head_64.S  │ x86_64_    │ start_    │ cpu_init() │ rest_init()│ idle     │
+│ 汇编启动    │ start_     │ kernel()  │ TSS/IST    │ 创建1号进程 │ 循环     │
+│            │ kernel()   │           │ 初始化     │            │          │
+│            │            │           │            │            │          │
+│ ◄──────────────────── init_stack ──────────────────────────────────────► │
+└────────────┴────────────┴────────────┴────────────┴────────────┴──────────┘
+
+Secondary CPUs (在 Boot CPU 执行 smp_init() 后启动):
+┌────────────┬────────────┬────────────┬────────────┬────────────────────────┐
+│ head_64.S  │ start_     │ cpu_init() │ idle 循环   │                        │
+│ 汇编启动    │ secondary()│ TSS/IST    │            │                        │
+│            │            │ 初始化     │            │                        │
+│            │            │            │            │                        │
+│ ◄───────────────── idle 进程的内核栈 ──────────────────────────────────► │
+└────────────┴────────────┴────────────┴────────────┴────────────────────────┘
+```
+
+#### 各 CPU 的栈使用总结
+
+| CPU | 启动时使用的栈 | 来源 | 后续使用 |
+|-----|---------------|------|---------|
+| Boot CPU (CPU 0) | `init_stack` | 静态分配（vmlinux.lds） | `init_task`（0号进程）继续使用 |
+| Secondary CPUs | idle 进程的内核栈 | `alloc_thread_stack_node()` | 该 CPU 的 idle 进程使用 |
+
+#### 关键代码位置
+
+| 阶段 | 文件 | 关键代码 |
+|------|------|---------|
+| 早期汇编（Boot） | `arch/x86/kernel/head_64.S` | `leaq __top_init_kernel_stack(%rip), %rsp` |
+| 早期汇编（Secondary） | `arch/x86/kernel/head_64.S` | `movq TASK_threadsp(%rax), %rsp` |
+| TSS.sp0 设置 | `arch/x86/kernel/cpu/common.c` | `load_sp0((unsigned long)(cpu_entry_stack(cpu) + 1))` |
+| per-cpu 栈变量初始化 | `arch/x86/kernel/cpu/common.c` | `cpu_current_top_of_stack = TOP_OF_INIT_STACK` |
+| Secondary CPU 准备 | `arch/x86/kernel/smpboot.c` | `idle->thread.sp = (unsigned long)task_pt_regs(idle)` |
+
 ---
 
 ## 16. 总结
@@ -2227,15 +3270,22 @@ CPU 通过段选择子中的 **TI（Table Indicator）** 位决定查哪张表�
 
 ### 17.1 Intel/AMD 文档
 
-1. **Intel® 64 and IA-32 Architectures Software Developer's Manual, Volume 3A**
-   - Chapter 7: Task Management
-   - Section 7.7: Task Management in 64-bit Mode
+1. **Intel® 64 and IA-32 Architectures Software Developer's Manual, Volume 3A: System Programming Guide, Part 1**
+   - **Chapter 6: Interrupt and Exception Handling**
+     - Section 6.10: Interrupt Descriptor Table (IDT)
+     - Section 6.11: IDT Descriptors
+     - Section 6.14: Exception and Interrupt Handling in 64-bit Mode
+     - Section 6.14.1: 64-Bit Mode IDT（Figure 6-7: 64-Bit IDT Gate Descriptors）
+     - Section 6.14.2: 64-Bit Mode Stack Frame
+     - Section 6.14.4: Stack Switching in IA-32e Mode
+     - Section 6.14.5: Interrupt Stack Table
+   - **Chapter 7: Task Management**
+     - Section 7.2.1: Task-State Segment (TSS)（Figure 7-2: 32-Bit TSS）
+     - Section 7.2.3: TSS Descriptor in 64-bit mode（Figure 7-4: TSS Descriptor in 64-bit Mode）
+     - Section 7.2.4: Task Register
+     - Section 7.7: Task Management in 64-bit Mode（Figure 7-11: 64-Bit TSS Format）
 
-2. **Intel® 64 and IA-32 Architectures Software Developer's Manual, Volume 3A**
-   - Chapter 6: Interrupt and Exception Handling
-   - Section 6.14.5: Interrupt Stack Table
-
-3. **AMD64 Architecture Programmer's Manual, Volume 2**
+2. **AMD64 Architecture Programmer's Manual, Volume 2: System Programming**
    - Chapter 8: Exceptions and Interrupts
    - Section 8.9: Long Mode Interrupt Stack
 
