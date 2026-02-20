@@ -277,6 +277,7 @@
 |------|------|
 | [DOS_BOOTLOADER.md](DOS_BOOTLOADER.md) | DOS 的引导加载程序（Bootloader）概念 |
 | [DOS_BIOS_INT_USAGE.md](DOS_BIOS_INT_USAGE.md) | DOS 如何使用 BIOS 的 INT 服务 |
+| [DOS_TSR_EXPLAINED.md](DOS_TSR_EXPLAINED.md) | **DOS TSR（Terminate and Stay Resident）程序详解** ⭐ 新增<br>• TSR 工作原理（中断钩子机制）<br>• 驻留机制详解（内存布局、MCB 链表）<br>• 著名 TSR 程序（SideKick、DOSKEY、MOUSE.COM）<br>• 完整代码示例（键盘热键、定时器时钟）<br>• TSR 的问题与局限<br>• 实模式任务切换本质分析<br>• 包含可运行的 DOSBox 演示程序 |
 
 ---
 
@@ -434,6 +435,6 @@ python3 verify_grub_boot_sector.py [iso_file]
 
 ---
 
-**最后更新**：2026-02-18
+**最后更新**：2026-01-30
 **文档总数**：100+ 篇
 **维护者**：Linux 内核启动文档项目
