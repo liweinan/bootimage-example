@@ -1,7 +1,7 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 1.1
-**日期**: 2026-02-17
+**版本**: 1.2
+**日期**: 2026-01-30
 **作者**: Linux 内核启动文档项目
 
 > 📚 **文档导航**: [返回总索引](DOCUMENT_INDEX.md) | [阅读指南](READING_GUIDE.md) | [IDT 演进](LINUX_KERNEL_IDT_EVOLUTION.md) | [内核启动](LINUX_KERNEL_INIT.md)
@@ -21,6 +21,12 @@
 9. [危险场景：未初始化 TSS 时使用 IST](#9-危险场景未初始化-tss-时使用-ist)
 10. [调试与验证](#10-调试与验证)
 11. [历史回顾：没有 IST 的时代](#11-历史回顾没有-ist-的时代)
+12. [TSS 数量的历史演变](#12-tss-数量的历史演变)
+13. [进程上下文的保存位置](#13-进程上下文的保存位置)
+14. [GDT 与 LDT 的关系](#14-gdt-与-ldt-的关系)
+15. [内核栈与用户空间](#15-内核栈与用户空间)
+16. [总结](#16-总结)
+17. [参考文献](#17-参考文献)
 
 ---
 
@@ -1888,9 +1894,285 @@ void __init trap_init(void)
 
 ---
 
-## 12. 总结
+## 12. TSS 数量的历史演变
 
-### 12.1 核心要点
+### 12.1 从"每进程一个"到"每 CPU 一个"
+
+Intel 最初设计 TSS 时，设想每个进程（任务）拥有独立的 TSS，用于硬件自动切换任务。但现代操作系统并未采用这种硬件切换方式，转而使用更灵活的软件切换。
+
+#### 早期实现：每进程一个 TSS（Linux < 2.4）
+
+在早期 Linux 内核（如 2.4 版本之前），确实为每个进程在内存中创建独立的 TSS：
+
+- **TSS 数量** = 进程数
+- **限制**：每个 TSS 和 LDT 的描述符都需要存放在 GDT 中。由于 GDT 最多 8192 个描述符，直接限制了系统最多只能创建约 4090 个进程。
+
+#### 现代实现：每 CPU 一个 TSS（Linux >= 2.4）
+
+从 Linux 2.4 内核开始，实现方式发生根本性改变：
+
+- **TSS 数量** = CPU 核心数
+- 所有运行在同一 CPU 上的进程**共享**该 CPU 的唯一 TSS
+- **TR 寄存器永不改变**（不再在进程切换时重载）
+- 进程切换时，内核仅更新 TSS 中的 `sp0` 字段为下一个进程的内核栈地址
+
+**源代码位置**（`arch/x86/kernel/process.c`）：
+
+```c
+__visible DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_struct, cpu_tss_rw) = {
+    .x86_tss = {
+        .sp0 = (1UL << (BITS_PER_LONG-1)) + 1,  // 初始值为毒值
+        // ...
+    },
+};
+```
+
+### 12.2 为什么可以这样？
+
+现代操作系统只用到 TSS 的一个核心功能：**特权级切换**。
+
+当用户态程序（Ring 3）通过中断或系统调用进入内核态（Ring 0）时，CPU 需要自动切换到内核栈。内核栈地址（`sp0`）从当前 TSS 中获取。只要保证进程切换时 TSS 中的 `sp0` 始终指向新进程的内核栈，就能满足硬件要求。
+
+进程的其他寄存器状态，保存在进程自己的内核栈或 `thread_struct` 中，由软件在切换时负责保存和恢复。
+
+### 12.3 进程切换时更新 TSS.sp0
+
+**源代码位置**（`arch/x86/include/asm/switch_to.h`）：
+
+```c
+static inline void update_task_stack(struct task_struct *task)
+{
+#ifdef CONFIG_X86_32
+    this_cpu_write(cpu_tss_rw.x86_tss.sp1, task->thread.sp0);
+#else
+    if (!cpu_feature_enabled(X86_FEATURE_FRED) && cpu_feature_enabled(X86_FEATURE_XENPV))
+        load_sp0(task_top_of_stack(task));
+#endif
+}
+```
+
+`__switch_to()` 函数中会调用 `update_task_stack()` 更新 TSS.sp0。
+
+### 12.4 演变对比
+
+| 方面 | 早期设计 (Linux < 2.4) | 现代实现 (Linux >= 2.4) |
+|------|------------------------|-------------------------|
+| **TSS 数量** | 与**进程数**相等 | 与**CPU 核心数**相等 |
+| **与进程关系** | 一对一 | 一对多（共享） |
+| **TR 寄存器** | 进程切换时改变 | 永不改变 |
+| **保存上下文** | TSS 保存全部寄存器 | TSS 只保存 `sp0`，其余由软件保存 |
+| **GDT 限制** | 受限（约 4090 进程） | 无限制 |
+
+---
+
+## 13. 进程上下文的保存位置
+
+### 13.1 概述
+
+现代操作系统中，进程的上下文（CPU 寄存器的值）主要保存在三个地方：
+
+1. **进程的内核栈**（`pt_regs` 结构体）
+2. **进程控制块**（`thread_struct` 结构体）
+3. **TSS**（仅保存 `sp0`）
+
+### 13.2 内核栈上的 pt_regs
+
+当用户程序因中断或系统调用进入内核态时，CPU 会自动将一部分寄存器压入当前进程的**内核栈**，形成 `pt_regs` 结构体。
+
+**源代码位置**（`arch/x86/include/asm/ptrace.h`，x86-64）：
+
+```c
+struct pt_regs {
+    /* callee-preserved 寄存器（并非每次都保存） */
+    unsigned long r15;
+    unsigned long r14;
+    unsigned long r13;
+    unsigned long r12;
+    unsigned long bp;
+    unsigned long bx;
+
+    /* callee-clobbered 寄存器（每次内核态入口都保存） */
+    unsigned long r11;
+    unsigned long r10;
+    unsigned long r9;
+    unsigned long r8;
+    unsigned long ax;   // 系统调用号或返回值
+    unsigned long cx;
+    unsigned long dx;
+    unsigned long si;
+    unsigned long di;
+
+    /* 入口信息 */
+    unsigned long orig_ax;  // 原始系统调用号、错误码或中断号
+
+    /* CPU 自动保存的返回执行上下文（IRET 框架） */
+    unsigned long ip;       // 指令指针
+    union { u16 cs; /* ... */ };  // 代码段选择子
+    unsigned long flags;    // 标志寄存器
+    unsigned long sp;       // 栈指针
+    unsigned long ss;       // 栈段选择子
+};
+```
+
+**核心作用**：
+1. 保存用户态的硬件上下文
+2. 传递系统调用参数（内核通过 `di`, `si`, `dx` 等获取参数）
+3. 返回用户空间时恢复执行状态
+4. 调试接口（`ptrace()` 系统调用读取/修改此结构）
+
+### 13.3 进程控制块中的 thread_struct
+
+`thread_struct` 保存在进程描述符 `task_struct` 中，包含进程切换时需要保存的额外状态。
+
+**源代码位置**（`arch/x86/include/asm/processor.h`）：
+
+```c
+struct thread_struct {
+    struct desc_struct  tls_array[GDT_ENTRY_TLS_ENTRIES];  // TLS 描述符
+    unsigned long       sp;           // 内核栈指针
+#ifdef CONFIG_X86_64
+    unsigned short      es, ds;
+    unsigned short      fsindex, gsindex;
+    unsigned long       fsbase, gsbase;
+#endif
+    struct perf_event   *ptrace_bps[HBP_NUM];  // 调试断点
+    unsigned long       virtual_dr6;
+    unsigned long       ptrace_dr7;
+    unsigned long       cr2;          // 缺页地址
+    unsigned long       trap_nr;      // 陷阱号
+    unsigned long       error_code;
+    struct io_bitmap    *io_bitmap;   // I/O 权限
+    unsigned long       iopl_emul;    // IOPL 模拟
+    // ...
+};
+```
+
+### 13.4 FPU / SIMD 寄存器
+
+这些寄存器体积较大（AVX-512 有 512 位 × 32 个），保存成本高，采用**惰性保存**策略：
+
+- **保存位置**：`task_struct` 中的 `thread.fpu` 区域
+- **策略**：内核不在每次进程切换时都保存/恢复这些寄存器。使用 CR0 的 TS 标志，直到新进程真正使用浮点运算指令时才触发异常，由异常处理程序完成 FPU 寄存器的切换。
+
+**源代码位置**（`arch/x86/kernel/process_64.c`）：
+
+```c
+__switch_to(struct task_struct *prev_p, struct task_struct *next_p)
+{
+    // ...
+    switch_fpu(prev_p, cpu);  // FPU 切换
+    save_fsgs(prev_p);
+    load_TLS(next, cpu);
+    // ...
+    update_task_stack(next_p);  // 更新 TSS.sp0
+    // ...
+}
+```
+
+### 13.5 上下文保存总结
+
+| 上下文内容 | 保存位置 | 切换方式 | 备注 |
+|-----------|----------|----------|------|
+| **用户态寄存器**（通用寄存器、RIP 等） | **内核栈**（`pt_regs`） | CPU 自动压入 + `switch_to` 手动切换 | 切换的核心部分 |
+| **内核态寄存器**（SP、FS/GS 等） | **进程描述符**（`thread_struct`） | `__switch_to` 函数处理 | 保存在 PCB 中 |
+| **FPU / SIMD 寄存器** | **进程描述符**（`thread.fpu`） | 惰性切换，按需进行 | 只有使用时才切换 |
+| **内核栈指针**（Ring 0 栈，即 SP0） | **TSS** | `update_task_stack` 更新 | 唯一需要放在 TSS 中的信息 |
+| **页表基地址**（CR3） | **CR3 寄存器** | `switch_mm` 更新 | 实现地址空间切换 |
+
+---
+
+## 14. GDT 与 LDT 的关系
+
+### 14.1 核心区别：全局 vs. 局部
+
+**GDT（全局描述符表）**：
+- **作用范围**：整个系统只有一个 GDT（多核 CPU 每个核心维护一份副本）
+- **包含内容**：系统中所有任务共享的段描述符
+  - 内核代码段（`__KERNEL_CS`）、内核数据段（`__KERNEL_DS`）
+  - 用户代码段（`__USER_CS`）、用户数据段（`__USER_DS`）
+  - TSS 描述符
+  - LDT 描述符（如果需要）
+- **地位**：内存段管理的"总目录"，CPU 必须通过 GDT 才能访问任何段
+
+**LDT（局部描述符表）**：
+- **作用范围**：每个任务（进程）可以有自己的 LDT
+- **包含内容**：特定任务私有的段描述符
+- **地位**：GDT 的"子表"，LDT 本身的描述符存放在 GDT 中
+
+### 14.2 段选择子中的 TI 位
+
+CPU 通过段选择子中的 **TI（Table Indicator）** 位决定查哪张表：
+
+- **TI = 0**：查询 **GDT**
+- **TI = 1**：查询 **LDT**（CPU 从当前任务的 TSS 中取出 LDT 基地址）
+
+### 14.3 现代操作系统中 LDT 的边缘化
+
+**LDT 在主流现代操作系统（如 Linux、Windows）中基本已被废弃**：
+
+1. **平坦内存模型**：现代操作系统使用**分页**作为内存管理的主要手段，对**分段**采取"平坦模型"策略。对于用户态和内核态，只定义少数几个必需的段（代码段和数据段），基地址都是 0，界限扩展到整个线性地址空间。
+
+2. **性能与复杂性**：支持 LDT 会增加操作系统复杂性（需要在 GDT 中为每个进程维护 LDT 描述符，并在进程切换时加载 LDTR 寄存器），而收益甚微。
+
+3. **64 位架构的淡化**：在 x86-64 Long Mode 下，分段功能被大幅削弱，段基址在大多数情况下被强制为 0。
+
+### 14.4 类比理解
+
+- **GDT** = 图书馆的**总索引台**，记录对所有读者通用的规则
+- **LDT** = **私人研究室的内部书架清单**，属于个人的局部内存划分
+
+**最终关系**：GDT 是基础，是 CPU 首先必须访问的。LDT 是 GDT 的延伸，允许每个任务在 GDT 定义的全局规则基础上再定义私有的内存布局。但在现代操作系统简化的内存管理模型下，GDT 仍至关重要，而 LDT 已边缘化。
+
+---
+
+## 15. 内核栈与用户空间
+
+### 15.1 什么是内核栈地址？
+
+**内核栈地址**是位于操作系统内核空间中的内存地址，指向当前执行进程专用的特殊内存区域——**内核栈**。
+
+- **位置**：内核虚拟地址空间的高位区域（如 64 位系统中大于 `0xFFFF800000000000`）
+- **可见性**：从普通用户程序视角无法直接访问（属于内核空间）
+- **数量**：每个进程（或线程）有自己独立的内核栈
+
+**为什么每个进程都需要自己的内核栈？**
+
+当进程 A 和进程 B 同时陷入内核（如同时发起系统调用）时，它们需要独立的内核执行环境。如果共享一个内核栈，A 的返回地址和局部变量很快就会被 B 覆盖，系统会崩溃。
+
+### 15.2 内核栈与用户空间的关系
+
+#### 关系一：内核栈是用户进程的"内核态分身"的栖息地
+
+用户进程是"双重身份"的实体：
+- **用户态**：执行自己的代码（如 `printf`），使用**用户栈**（位于进程的用户空间）
+- **内核态**：调用系统调用（如 `write`），使用**内核栈**
+
+#### 关系二：内核栈用于保存用户进程的硬件上下文
+
+当用户程序因中断或系统调用进入内核态时，CPU 会把用户态的寄存器状态自动保存在**内核栈**上（形成 `pt_regs` 结构体）。当内核处理完事务，准备返回用户空间时，从内核栈中弹出这些值，让用户程序接着断点继续运行。
+
+#### 关系三：严格的隔离与安全的通道
+
+- **向下兼容**：用户空间的数据（通过指针传递的系统调用参数）可被内核访问，因为内核拥有整个系统的最高权限。
+- **向上保护**：内核栈中的敏感信息不会被用户程序访问，因为当 CPU 处于用户态（Ring 3）时，硬件会阻止对内核空间地址的任何访问。
+
+### 15.3 类比理解
+
+- **用户进程的内存空间** = 巨大的"住宅区"（代码段、数据段、堆、用户栈）
+- **内核栈地址** = 位于"政府办公区"（内核空间）的独立"工位"
+
+每当"住宅区"的"住户"（用户进程）需要请求"政府服务"（执行系统调用）时，他就切换到"政府人员"身份，进入这个专用的"工位"进行办公。
+
+**关键点**：
+- **分开存放**：内核栈在"政府办公区"，用户栈在"住宅区"，物理隔离确保安全
+- **一一对应**：有多少个进程，就有多少个内核栈
+- **协同工作**：进程进入内核态时，CPU 自动从用户栈切换到内核栈；返回时再切换回来。内核栈上的 `pt_regs` 区域是连接这两种状态的"桥梁"
+
+---
+
+## 16. 总结
+
+### 16.1 核心要点
 
 1. **TSS 的角色演变**
    - x86-32：硬件任务切换（已废弃）
@@ -1916,13 +2198,13 @@ void __init trap_init(void)
    - 晚期代码使用 IST，提供健壮的异常处理
    - 两阶段设计避免"鸡生蛋"问题
 
-### 11.2 与其他文档的关联
+### 16.2 与其他文档的关联
 
 - **[LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)**：解释为什么需要两个 IDT 表，其中 TSS/IST 依赖是关键原因之一
 - **[LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md)**：详细的启动流程，展示 TSS 初始化的时机
 - **[KASAN_INSTRUMENTATION_AND_INIT_ORDER.md](KASAN_INSTRUMENTATION_AND_INIT_ORDER.md)**：解释另一个独立约束（KASAN），与 TSS/IST 约束共同决定了 IDT 的设计
 
-### 12.3 实践建议
+### 16.3 实践建议
 
 **编写内核代码时**：
 - 确保关键异常（#DF, NMI, #MC）使用 IST
@@ -1941,9 +2223,9 @@ void __init trap_init(void)
 
 ---
 
-## 13. 参考文献
+## 17. 参考文献
 
-### 13.1 Intel/AMD 文档
+### 17.1 Intel/AMD 文档
 
 1. **Intel® 64 and IA-32 Architectures Software Developer's Manual, Volume 3A**
    - Chapter 7: Task Management
@@ -1957,7 +2239,7 @@ void __init trap_init(void)
    - Chapter 8: Exceptions and Interrupts
    - Section 8.9: Long Mode Interrupt Stack
 
-### 13.2 Linux 内核源代码
+### 17.2 Linux 内核源代码
 
 4. **arch/x86/include/asm/processor.h**
    - `struct x86_hw_tss` 定义
@@ -1977,7 +2259,7 @@ void __init trap_init(void)
 8. **arch/x86/kernel/traps.c**
    - `exc_double_fault()` 等异常处理程序
 
-### 13.3 相关文档
+### 17.3 相关文档
 
 9. [LINUX_KERNEL_IDT_EVOLUTION.md](LINUX_KERNEL_IDT_EVOLUTION.md)
    - IDT 表的演进流程
