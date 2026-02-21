@@ -83,6 +83,7 @@
 | [SEABIOS_HANDLE_POST_ENTRY.md](SEABIOS_HANDLE_POST_ENTRY.md) | SeaBIOS handle_post 入口分析 |
 | [SEABIOS_E820_CONSTRUCTION.md](SEABIOS_E820_CONSTRUCTION.md) | SeaBIOS E820 内存映射表构建流程 |
 | [SEABIOS_LOAD_BOOT_SECTOR.md](SEABIOS_LOAD_BOOT_SECTOR.md) | SeaBIOS 如何加载引导扇区到 0x7C00 |
+| [SEABIOS_INT09_KEYBOARD_HANDLER.md](SEABIOS_INT09_KEYBOARD_HANDLER.md) | **SeaBIOS INT 09h 键盘中断处理程序分析** ⭐ 新增<br>• 汇编入口点 entry_09 和 irqentry_extrastack<br>• 寄存器保存机制（ExtraStack、SAVEBREGS 宏）<br>• C 函数 handle_09 和 process_key 流程<br>• 扫描码处理和键盘缓冲区管理<br>• 8042 控制器 I/O 端口详解<br>• 与 TSR 程序的对比分析 |
 
 ---
 
