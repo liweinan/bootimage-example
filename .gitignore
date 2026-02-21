@@ -8,6 +8,10 @@
 *.swp
 *.swo
 
+# macOS 系统文件
+.DS_Store
+
+# JetBrains IDE
 .idea/
 
 # Python 缓存文件
