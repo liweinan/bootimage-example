@@ -3,14 +3,16 @@
 本文档专门说明 **GDT（Global Descriptor Table，全局描述符表）** 的表结构：包括 SDM 中的定义、段描述符的 8 字节格式与系统描述符、GDTR、以及 Linux 内核中的对应数据结构和布局。
 
 **参考文档**：
-- **Intel® 64 and IA-32 Architectures Software Developer's Manual, Volume 3A: System Programming Guide, Part 1**（以下简称 SDM Vol 3A）。本地路径：`/Users/weli/Desktop/pdfs/64-ia-32-architectures-software-developer-vol-3a-part-1-manual.pdf`。
+- **Intel® 64 and IA-32 Architectures Software Developer's Manual, Volume 3A: System Programming Guide, Part 1**（以下简称 SDM Vol 3A）。本地路径：`/Users/weli/Desktop/pdfs/64-ia-32-architectures-software-developer-vol-3a-part-1-manual.pdf`。精确表述与位图以该 PDF 为准。
 - 本文中“SDM”均指该手册；具体章节在以下各节标明。
 
-**内核代码路径**（以 Linux 源码树为基准）：
-- `arch/x86/include/asm/segment.h` — GDT 条目索引与选择子
-- `arch/x86/include/asm/desc_defs.h` — 段描述符结构体与类型/标志
-- `arch/x86/include/asm/desc.h` — `gdt_page` 与 GDT 操作
-- `arch/x86/kernel/cpu/common.c` — per-CPU GDT 初始化
+**内核代码路径**（以 Linux 源码树为基准，校对时使用例如 `~/works/linux`）：
+- `arch/x86/include/asm/segment.h` — GDT 条目索引与选择子（GDT_ENTRY_*、GDT_ENTRIES、__KERNEL_CS 等）
+- `arch/x86/include/asm/desc_defs.h` — 段描述符结构体（`struct desc_struct`）、类型/标志宏（DESC_*）、`struct desc_ptr`、`GDT_ENTRY_INIT`
+- `arch/x86/include/asm/desc.h` — `struct gdt_page`、`native_load_gdt` / `native_store_gdt`、per-CPU GDT 操作
+- `arch/x86/kernel/cpu/common.c` — per-CPU GDT 静态初始化（`DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page)`）
+
+**校对说明**：本文档已对照上述内核源码与 SDM Vol 3A 进行校对；结构体字段、宏定义及 64/32 位 GDT 布局与源码一致，SDM 章节对应见第 6 节。
 
 ---
 
@@ -276,7 +278,7 @@ TSS、LDT、TLS、PERCPU、CPUNODE 等条目在启动或进程切换时由 `arch
 | GDT/LDT 表组织 | Section 3.5.1 |
 | 64 位 TSS/LDT 描述符（16 字节） | Section 3.4.5（系统描述符） |
 
-本文档中的位图与字段解释与上述章节一致；实现细节以 **arch/x86** 下 `segment.h`、`desc_defs.h`、`desc.h`、`cpu/common.c` 为准。
+本文档中的位图与字段解释与上述章节一致；实现细节以 **arch/x86** 下 `segment.h`、`desc_defs.h`、`desc.h`、`cpu/common.c` 为准。SDM 的精确措辞与图表请以本地 PDF（见文首路径）为准；若 PDF 版本不同，章节号可能略有差异。
 
 ---
 
