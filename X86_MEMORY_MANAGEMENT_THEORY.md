@@ -860,6 +860,13 @@ GDT[2] (KERNEL_CS): Base=0x00000000, Limit=0xfffff, DPL=0, L=1
   **不触发特权检查的指令**：add、sub、near jmp、对已加载段的普通 mov 等；  
   这些指令执行时不会“查”CS.RPL 或做 DPL 比较。
 
+  **SDM Figure 5-6（控制转移时 CPL 与 RPL 为何并列）**：  
+  Section 5.8 中 “Privilege Check for Control Transfer Without Using a Gate” 的图把 **CPL** 和 **RPL** 画成两项，容易让人以为有两个独立存储。实际是参与检查的有**两个不同的选择子**：  
+  - **CPL**：来自**当前 CS** 里选择子的 RPL（即当前 CS.RPL），表示“调用方当前特权级”。  
+  - **RPL**：来自**本条 far jmp/call 指令中的目标选择子**（要装入 CS 的那个 16 位操作数）的 RPL，表示“这次转移请求以什么特权进入目标段”。  
+  - **DPL**：目标代码段描述符的 DPL。  
+  因此 CPL 与 RPL 不是重复：一个来自 **CS 寄存器（当前）**，一个来自 **指令操作数（目标）**。例如当前 CS=0x10（CPL=0），执行 `jmp 0x23:label` 时，0x23 的 RPL=3 就是图里的 “RPL”，与当前 CPL=0 不同；检查会同时用 (CPL, 目标选择子 RPL, 目标段 DPL)。
+
 【权限检查规则】
 保护模式：max(CPL, RPL) ≤ DPL
 长模式：  max(CPL, RPL) ≤ DPL
