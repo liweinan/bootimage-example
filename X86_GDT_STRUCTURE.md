@@ -107,6 +107,22 @@ struct desc_struct {
 | `DESC_USER` | DPL=3 | 用户态段 |
 | `DESC_TSS` / `DESC_LDT` | 系统描述符类型 | System type 9 / 2 |
 
+**DPL 相关宏的源码**（`arch/x86/include/asm/desc_defs.h`）：
+
+```c
+/* Common flags */
+#define _DESC_S			0x0010
+#define _DESC_DPL(dpl)		((dpl) << 5)   /* DPL 在 Access Byte 的 bit 6-5 */
+#define _DESC_PRESENT		0x0080
+/* ... */
+#define DESC_CODE64		(_DESC_CODE | _DESC_GRANULARITY_4K | _DESC_LONG_CODE)
+#define DESC_DATA64		(_DESC_DATA | _DESC_GRANULARITY_4K | _DESC_DB)
+#define DESC_USER		(_DESC_DPL(3))   /* 用户态段：DPL=3 */
+```
+
+- `_DESC_DPL(dpl)`：将 DPL 值（0–3）左移 5 位，写入描述符 Access Byte 的 DPL 域；内核段不包含该宏，故 DPL=0。
+- `DESC_USER`：即 `_DESC_DPL(3)`，与 `DESC_CODE64`/`DESC_DATA64` 等按位或后得到“用户态代码/数据段”的 flags，写入 GDT 时该描述符的 DPL 即为 3。
+
 **GDT_ENTRY_INIT(flags, base, limit)** 用 `(flags, base, limit)` 填满一个 `struct desc_struct`，与 SDM 的 Base/Limit/Access/Flags 布局一致。
 
 ### 2.4 汇编中的 GDT 条目构造
@@ -219,7 +235,9 @@ DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = { .gdt = {
 
 - **Limit** 使用 `0xfffff` 且配合 `DESC_*` 中的 G 位，表示 4KB 粒度、满 4GB。  
 - **Base** 为 0（长模式下代码/数据段基址被忽略；TSS/LDT 的 Base 在运行时由 `write_gdt_entry` / `set_tss_desc` 等写入）。  
-- **DESC_USER** 即 DPL=3，用于用户态段。
+- **DPL 的初始化值**：
+  - 内核段（`GDT_ENTRY_KERNEL32_CS`、`GDT_ENTRY_KERNEL_CS`、`GDT_ENTRY_KERNEL_DS`）：仅使用 `DESC_CODE32`/`DESC_CODE64`/`DESC_DATA64`，这些宏不含 `_DESC_DPL`，故描述符 **DPL=0**。
+  - 用户段（`GDT_ENTRY_DEFAULT_USER32_CS`、`GDT_ENTRY_DEFAULT_USER_DS`、`GDT_ENTRY_DEFAULT_USER_CS`）：使用 `DESC_* | DESC_USER`；`DESC_USER` 在 **arch/x86/include/asm/desc_defs.h** 中定义为 `#define DESC_USER (_DESC_DPL(3))`，即 **DPL=3**。见 §2.3 中“DPL 相关宏的源码”。
 
 TSS、LDT、TLS、PERCPU、CPUNODE 等条目在启动或进程切换时由 `arch/x86/kernel/cpu/common.c` 和 `arch/x86/include/asm/desc.h` 中的接口写入，而不是全部在静态初始化中填满。
 

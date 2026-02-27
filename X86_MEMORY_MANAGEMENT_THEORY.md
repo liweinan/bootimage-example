@@ -396,6 +396,7 @@ GS             = 0x0000
 
 步骤 4：从描述符缓存读取段基址（在长模式下为0）
   Base = Descriptor.Base;  // = 0（长模式强制）
+  // 该缓存即段寄存器的“隐藏部分”，SDM Vol 3A Section 3.4.3、Figure 3-7
 
 步骤 5：计算线性地址
   Linear = Base + Offset;  // = 0 + Offset = Offset
@@ -817,6 +818,7 @@ GDT[2] (KERNEL_CS): Base=0x00000000, Limit=0xfffff, DPL=0, L=1
     - **隐藏部分（描述符缓存）**：加载选择子时 CPU 从 GDT/LDT 读入的段描述符副本，
       内含 **DPL**、Base、Limit、Type 等；后续访问可只用缓存不必每次访存，但权限检查
       仍以「当前用选择子查 GDT 得到之 DPL」为准（缓存与表一致）。
+      **SDM 引述**（Intel® 64 and IA-32 Architectures Software Developer's Manual, Volume 3A, **Section 3.4.3 Segment Registers**, **Figure 3-7**）：*“Every segment register has a ‘visible’ part and a ‘hidden’ part. (The hidden part is sometimes referred to as a ‘descriptor cache’ or a ‘shadow register.’) When a segment selector is loaded into the visible part of a segment register, the processor also loads the hidden part of the segment register with the base address, segment limit, and access control information from the segment descriptor pointed to by the segment selector. The information cached in the segment register (visible and hidden) allows the processor to translate addresses without taking extra bus [cycles]. ... it is the responsibility of software to reload the segment registers when the descriptor tables are modified. If this is not done, an old segment descriptor cached in a segment register might [be used].”*
   - **IDT（内存）**：门描述符中的 **DPL**，表示「谁可以通过 INT n 触发该向量」
     （如 DPL=3 表示用户态可触发）。
   - **MSR**（如 IA32_STAR）：保存 SYSCALL/SYSRET 使用的段选择子（内核/用户 CS、SS），
