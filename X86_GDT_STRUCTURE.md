@@ -125,6 +125,8 @@ struct desc_struct {
 
 **GDT_ENTRY_INIT(flags, base, limit)** 用 `(flags, base, limit)` 填满一个 `struct desc_struct`，与 SDM 的 Base/Limit/Access/Flags 布局一致。
 
+**Linux 与 Conforming 代码段**：内核 GDT 中所有代码段均为 **non-conforming**（`DESC_CODE32`、`DESC_CODE64` 等基于 `_DESC_CODE`，不包含 `_DESC_CODE_CONFORMING`）。因此运行中 **CS.RPL 恒等于当前代码段描述符的 DPL**。`_DESC_CODE_CONFORMING` 在 `desc_defs.h` 中有定义，但主 GDT 初始化不使用；仅 KVM 在模拟客户机段加载（`arch/x86/kvm/emulate.c`）时按 SDM 区分 conforming/non-conforming。Linux 没有用 conforming 段实现任何上层功能。
+
 ### 2.4 汇编中的 GDT 条目构造
 
 **arch/x86/include/asm/segment.h**：

@@ -830,6 +830,36 @@ GDT[2] (KERNEL_CS): Base=0x00000000, Limit=0xfffff, DPL=0, L=1
   （段寄存器可见部分、MSR 中的选择子、TSS 中的选择子、栈上保存的选择子）中；**CPL**
   不单独存储，等于当前 CS.RPL。
 
+【SDM 对 CPL 与 CS、DPL 的说明】
+
+  - **CPL（Current Privilege Level）**（SDM Vol 3A, **Section 5.5 Privilege Levels**）：  
+    *“Current privilege level (CPL) field — **(Bits 0 and 1 of the CS segment register.)**  
+    Indicates the privilege level of the currently executing program or procedure.  
+    The term current privilege level (CPL) refers to the setting of this field.”*  
+    即：CPL 即 **CS 寄存器中段选择子的 bit 0–1（RPL）**，不是描述符缓存（hidden part）里的 DPL；  
+    **Figure 3-6** 标明 RPL/CPL 在选择子（及 CS 寄存器）中的位置。
+
+  - **RPL 与 DPL 的关系**（SDM **Section 3.4.2 Segment Selectors**）：  
+    RPL 表示选择子的请求特权级；Section 5.5 描述 RPL 与 CPL、以及**描述符的 DPL** 的关系。  
+    **DPL** 在段描述符中，表示访问该段所需的特权门槛；**加载 CS 时**由软件/CPU 提供的选择子带有 RPL，  
+    通常设为与目标段 DPL 一致，使进入该段后 CPL = 该段 DPL（non-conforming 段）。
+
+【CPU 进行特权检查的时机（查询条件）】
+
+  并非每条指令都做特权检查。CPU 仅在下列情况使用 CPL（读 CS.RPL）或进行与 DPL 的比较（SDM 相应章节）：
+
+  | 时机             | 检查内容概要                     | SDM 参考              |
+  |------------------|----------------------------------|------------------------|
+  | 加载段寄存器     | max(CPL, RPL) ≤ 目标描述符 DPL   | Section 5.5, 5.10      |
+  | 加载 SS          | CPL、SS 选择子 RPL、栈段 DPL 一致 | Section 5.7             |
+  | 控制转移（far jmp/call 等） | CPL/RPL 与目标代码段 DPL、类型（conforming 等） | Section 5.8, 5.8.1 |
+  | 特权指令         | CPL = 0（如 LGDT、写 CR0、CLI 等）| Section 2.5 等          |
+  | I/O（in/out）    | CPL ≤ IOPL 或 CPL = 0            | EFLAGS.IOPL            |
+  | INT n / 门描述符 | CPL ≤ 门描述符 DPL                | Chapter 6              |
+
+  **不触发特权检查的指令**：add、sub、near jmp、对已加载段的普通 mov 等；  
+  这些指令执行时不会“查”CS.RPL 或做 DPL 比较。
+
 【权限检查规则】
 保护模式：max(CPL, RPL) ≤ DPL
 长模式：  max(CPL, RPL) ≤ DPL
@@ -881,6 +911,37 @@ GDT[2] (KERNEL_CS): Base=0x00000000, Limit=0xfffff, DPL=0, L=1
   - 分页强制（必须 CR0.PG=1）
   - 线性地址必须通过4级页表转换到物理地址
 ```
+
+#### CPL 与 DPL 的区分、何时检查、Linux 的实际情况
+
+**为何 CPL 取 CS.RPL 而非 hidden part 的 DPL**
+
+- 段寄存器**可见部分**存段选择子（含 **RPL**），**隐藏部分**存描述符副本（含 **DPL**）。两者都在“寄存器里”，但语义不同：RPL 表示**当前/请求的特权**（由加载选择子的一方设定），DPL 表示**段要求的特权**（描述符属性）。架构规定 **CPL = CS.RPL**，需要 CPL 时 CPU 读的是 CS 的可见部分（选择子的 RPL），不是隐藏部分的 DPL。这样与 DS/ES/SS 的检查方式一致：都用选择子的 RPL 作为“请求”，描述符的 DPL 作为“门槛”。
+
+**何时会“查”CS.RPL（使用 CPL）**
+
+- 并非每条指令都做特权检查。**只有涉及特权的操作**才会使用 CPL（读 CS.RPL）：
+  - 执行**特权指令**（如写 CR、LGDT、CLI 等）→ 要求 CPL=0；
+  - **加载段寄存器**（如 mov ds, ax）→ 检查 max(CPL, RPL) ≤ DPL；
+  - **far jmp / far call**（跨段控制转移）→ 检查 CPL 与目标段 DPL；
+  - **I/O**（in/out）→ 检查 CPL 与 IOPL；
+  - syscall/iret 等与特权级切换相关的机制。
+- **add、sub、near jmp**（同段内跳转）、普通 mov 访问已加载段等**不触发**特权检查，不“查”CPL。
+
+**用户态↔内核态切换前后 CS.RPL 与 hidden part DPL**
+
+- **切换前（用户态）**：CS = __USER_CS（如 0x33），**CS.RPL = 3**，CS 的 hidden part 为 GDT[6] 的副本，**DPL = 3**。
+- **切换后（内核态）**：CS = __KERNEL_CS（如 0x10），**CS.RPL = 0**，hidden part 为 GDT[2] 的副本，**DPL = 0**。  
+  即：切换时 CS 的可见部分与隐藏部分一起被更新，数值上 CS.RPL 与当前段 DPL 始终一致。
+
+**CPL ≠ DPL 的场景：Conforming 代码段**
+
+- **Conforming 段**（描述符 Type 中“一致”位为 1）：进入该段后 **CPL 不变**，不采用段的 DPL 作为新 CPL。例如用户态（CPL=3）far jump 到 DPL=0 的 conforming 段时，跳转允许（CPL ≥ DPL），但进入后 **CPL 仍为 3**，段描述符 DPL=0，此时 **CS.RPL(CPL)=3 ≠ 段 DPL=0**。用途多为“可被多特权级调用的共享代码、且以调用者特权执行”（如某些系统库）；**与 sudo 等 setuid 提权无关**，sudo 是 OS 层权限，不依赖 conforming 段。
+
+**Linux 的实际情况**
+
+- Linux 的 GDT 中**所有代码段均为 non-conforming**（`DESC_CODE32`/`DESC_CODE64` 等均不包含 `_DESC_CODE_CONFORMING`）。因此在内核态或用户态下，**CS.RPL 恒等于当前代码段描述符的 DPL**；用 CPL 还是用 hidden part 的 DPL 在数值上无差别。
+- **Linux 未使用 conforming 段**：主 GDT 初始化不建 conforming 代码段；`_DESC_CODE_CONFORMING` 仅在 `arch/x86/include/asm/desc_defs.h` 中定义，供 KVM 等需要按 SDM 区分类型时使用。KVM 在**模拟客户机**段加载（`arch/x86/kvm/emulate.c`）时会区分 conforming/non-conforming 以正确检查权限，并非宿主用 conforming 段实现某功能。因此 **conforming 段在 Linux 下没有对应的具体上层应用**（如 sudo、某系统调用或驱动）。
 
 #### 完整示例对比
 
