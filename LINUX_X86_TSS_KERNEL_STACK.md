@@ -62,6 +62,8 @@ static inline void native_load_sp0(unsigned long sp0)
 - 发生系统调用/中断时：**用户 RSP** 被保存进内核栈上的 **pt_regs**；CPU 通过 TSS.sp0 切到**内核栈**，内核在内核栈上继续执行。
 - 因此：用户空间有自己独立的栈和 stack frame；内核栈上通过 pt_regs 保存的是“用户态 RSP/现场”的副本，而不是把用户栈搬进内核。
 
+**用户栈“内容”与 pt_regs 里保存的“内容”有何区别？** 有区别。**用户栈上的内容**指用户空间里从用户 RSP 往下那一整块内存（stack frame、局部变量、返回地址等）；这些**不会**被拷进内核，始终留在进程的用户态地址空间。**pt_regs 里保存的**是进内核那一刻的 **CPU 寄存器快照**：包括**用户 RSP 的值**（一个指针，指向用户栈顶）以及 RIP、段寄存器、通用寄存器等。也就是说 pt_regs 存的是**指向用户栈顶的指针和寄存器状态**，**不包含**用户栈上那段内存的副本。因此“用户态 RSP/现场”的副本 = 寄存器状态的副本，不是用户栈内存块的副本；文档所说“不是把用户栈搬进内核”即指用户栈上的内容仍只在用户空间，内核没有其拷贝。
+
 **对应内核代码**：用户 RSP 在入口被压入 pt_regs 的 `sp` 字段。64 位 syscall（`arch/x86/entry/entry_64.S`）中先把用户 `%rsp` 暂存到 `TSS_sp2`，再 `pushq PER_CPU_VAR(cpu_tss_rw + TSS_sp2)` 作为 `pt_regs->sp`；C 里用 `user_stack_pointer(regs)`（`arch/x86/include/asm/ptrace.h`）或 `regs->sp` 访问。返回用户态时用该值恢复 RSP，再 iret/sysret。
 
 ### Q5. 每个 task 自己的内核栈里，内容有什么区别？
@@ -76,6 +78,12 @@ static inline void native_load_sp0(unsigned long sp0)
 - 所以：**每个 task 的内核栈“布局类型”相同（都是内核栈 + pt_regs/switch 帧等），但具体内容 = 该任务自己的用户态现场 + 该任务自己的内核调用栈**，任务之间互不相同。
 
 **对应内核代码**：调度切换时下一任务的“栈顶”和返回地址由 `arch/x86/include/asm/switch_to.h` 里的 `struct inactive_task_frame`（含 `ret_addr`、`bp` 等）与 `__switch_to_asm()` 配合保存；`struct pt_regs` 在栈上对应一次从用户态进入内核时压入的现场。每个任务的 `thread.sp0`（`arch/x86/include/asm/processor.h` 的 `struct thread_struct`）记录该任务内核栈顶，用于 32 位或与 TSS.sp0 同步。
+
+**调度切换帧、内核调用链与内核栈对应的数据结构**：
+
+- **调度切换帧**：对应 `struct inactive_task_frame`（`arch/x86/include/asm/switch_to.h` 第 23–41 行）。注释写明 *“This is the structure pointed to by thread.sp for an inactive task”*；字段顺序须与 `__switch_to_asm()` 中保存/恢复的布局一致（r15～r12、bx、bp、ret_addr 等）。表示“从内核返回用户态前”的初始栈时，用 `struct fork_frame`（同文件 44–47 行）：内嵌一个 `inactive_task_frame` 和一个 `pt_regs`。
+- **内核调用链**：不是一块整体内容，而是多级栈帧。每一级在 x86 上对应 **`struct stack_frame`**（`arch/x86/include/asm/stacktrace.h` 第 102–105 行）：`next_frame`（即保存的 RBP）、`return_address`。栈回溯（unwinder）按该布局逐层解析；调用链即栈上多段按此形式排列的帧。
+- **内核栈的“完整”定义**：内核栈**没有**一个总体的 struct 定义。`task_struct->stack`（`include/linux/sched.h`，`void *stack`）指向大小为 THREAD_SIZE 的那块内存的起始地址；栈上**各段的布局**由不同结构体描述：**pt_regs**（`arch/x86/include/asm/ptrace.h`）、**inactive_task_frame** / **fork_frame**（`switch_to.h`）、**stack_frame**（`stacktrace.h`）。未选 CONFIG_THREAD_INFO_IN_TASK 时，栈底还有 **thread_info**（`arch/x86/include/asm/thread_info.h`）。整体上是一块连续内存 + 多处约定好的布局，而非一个“完整 struct”。
 
 ### Q6. pt_regs 是从用户空间“拷贝”进内核的吗？切换任务时再“拷贝回”用户空间？
 
