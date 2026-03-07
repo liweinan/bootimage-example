@@ -18,6 +18,14 @@ SDM Vol 3A §7.2.3（“TSS in 32-Bit Mode”）写明：*“When a call to a mo
 - 从用户态进内核（系统调用、中断、异常）时，CPU 用 TSS.sp0 把 RSP 切到这条内核栈上；内核再在这条栈上保存 **pt_regs**（里面才有用户态的 RSP、RIP、通用寄存器等）。
 - 因此：**TSS** 只负责“切到哪条内核栈”；**用户态现场的快照** 在内核栈上的 **pt_regs** 里。
 
+**对应内核代码**：入口从 TSS 取栈顶、切到内核栈的汇编（`arch/x86/entry/entry_64.S`）例如：
+
+```asm
+	movq	PER_CPU_VAR(cpu_tss_rw + TSS_sp0), %rsp
+```
+
+32 位入口（`arch/x86/entry/entry_32.S`）中也有 `movl PER_CPU_VAR(cpu_tss_rw + TSS_sp0), %edi` 等，用 TSS.sp0 作为内核栈指针。
+
 ### Q2. TSS.sp0 指向的“当前要用的内核栈顶”是 per-task 还是 per-CPU？
 
 **答：存储位置是 per-CPU，语义上是“当前在该 CPU 上运行的那个 task 的内核栈顶”（即 per-task 的栈顶）。**
@@ -42,6 +50,8 @@ static inline void native_load_sp0(unsigned long sp0)
 - **每个 task_struct 有一条自己的内核栈**：`task_stack_page(task)` 即 `task->stack`（`include/linux/sched/task_stack.h`），大小 `THREAD_SIZE`（x86_64 见 `arch/x86/include/asm/page_64_types.h`）。调度切到某任务时在 `switch_to.h` 中调用 `load_sp0(task_top_of_stack(next))`，使 TSS.sp0 指向该任务的内核栈顶。
 - **Per-CPU 的栈**：**entry stack**、**IRQ stack**、**IST 栈**（NMI、Double Fault、MCE 等，见 `arch/x86/kernel/cpu/common.c` 中 `tss_setup_ist()`）。SDM §7.7 中 64-bit TSS 的 IST 指针即用于异常时切换栈；这些栈每 CPU 一份，用于入口或异常，不是“当前进程”的日常执行栈。
 
+**对应内核代码**：per-task 栈顶在切换时写入 TSS（`arch/x86/include/asm/switch_to.h`）的 `update_task_stack()` 中，x86_64 下调用 `load_sp0(task_top_of_stack(task))`；IST 栈在 `arch/x86/kernel/cpu/common.c` 的 `tss_setup_ist()` 里对 `tss->x86_tss.ist[IST_INDEX_*]` 赋值（DF/NMI/DB/MCE/VC）。
+
 小结：**“当前跑进程上下文时用的那条栈” = per-task 的内核栈；TSS.sp0 指向的就是这条栈的栈顶。**
 
 ### Q4. 用户态有没有自己的 stack / stack frame？
@@ -51,6 +61,8 @@ static inline void native_load_sp0(unsigned long sp0)
 - 每个用户态任务在**用户虚拟地址空间**里有一条**用户态栈**，用户态 RSP 指向这条栈；上面有正常的函数调用 stack frame（返回地址、局部变量等）。
 - 发生系统调用/中断时：**用户 RSP** 被保存进内核栈上的 **pt_regs**；CPU 通过 TSS.sp0 切到**内核栈**，内核在内核栈上继续执行。
 - 因此：用户空间有自己独立的栈和 stack frame；内核栈上通过 pt_regs 保存的是“用户态 RSP/现场”的副本，而不是把用户栈搬进内核。
+
+**对应内核代码**：用户 RSP 在入口被压入 pt_regs 的 `sp` 字段。64 位 syscall（`arch/x86/entry/entry_64.S`）中先把用户 `%rsp` 暂存到 `TSS_sp2`，再 `pushq PER_CPU_VAR(cpu_tss_rw + TSS_sp2)` 作为 `pt_regs->sp`；C 里用 `user_stack_pointer(regs)`（`arch/x86/include/asm/ptrace.h`）或 `regs->sp` 访问。返回用户态时用该值恢复 RSP，再 iret/sysret。
 
 ### Q5. 每个 task 自己的内核栈里，内容有什么区别？
 
@@ -63,6 +75,8 @@ static inline void native_load_sp0(unsigned long sp0)
   - **内核调用链**：该任务在内核里执行的函数调用（syscall 处理、VFS、驱动等）会在栈上形成不同的调用栈；不同任务可能处于不同的调用深度、不同的代码路径，因此栈上的帧数量和内容都不同。
 - 所以：**每个 task 的内核栈“布局类型”相同（都是内核栈 + pt_regs/switch 帧等），但具体内容 = 该任务自己的用户态现场 + 该任务自己的内核调用栈**，任务之间互不相同。
 
+**对应内核代码**：调度切换时下一任务的“栈顶”和返回地址由 `arch/x86/include/asm/switch_to.h` 里的 `struct inactive_task_frame`（含 `ret_addr`、`bp` 等）与 `__switch_to_asm()` 配合保存；`struct pt_regs` 在栈上对应一次从用户态进入内核时压入的现场。每个任务的 `thread.sp0`（`arch/x86/include/asm/processor.h` 的 `struct thread_struct`）记录该任务内核栈顶，用于 32 位或与 TSS.sp0 同步。
+
 ### Q6. pt_regs 是从用户空间“拷贝”进内核的吗？切换任务时再“拷贝回”用户空间？
 
 **答：不是。pt_regs 存的是“进内核那一刻 CPU 寄存器里的值”，是保存（store）到内核栈上，不是从用户空间内存拷数据；返回时是把这些值从 pt_regs 恢复到 CPU 寄存器，再 iret/sysret，也没有“拷贝回用户空间”。**
@@ -70,6 +84,8 @@ static inline void native_load_sp0(unsigned long sp0)
 - **进内核时**：发生 syscall/中断时，**当前 CPU 的寄存器**里就是用户态现场（RSP 指向用户栈、RIP 指向用户代码等）。entry 汇编把这些**寄存器的值**按 pt_regs 布局**写进当前内核栈**（push 或 mov 到栈上）。并没有从用户虚拟地址空间“拷贝一块内存”到内核；只是把**寄存器内容**存到内核栈上的 pt_regs 里。用户态栈本身始终在用户空间，没有被搬动。
 - **返回用户态时**：退出路径从该任务内核栈上的 pt_regs 里**读出**保存的 RIP、RSP、段寄存器、通用寄存器等，**装回 CPU 寄存器**，然后 iret 或 sysret 切回用户态。CPU 用恢复后的 RSP 继续访问用户栈。同样没有“把 pt_regs 拷贝回用户空间”——用户空间只是普通内存；我们只是**恢复 CPU 寄存器**，让 RSP 再次指向用户栈、RIP 指向用户代码。
 - **任务切换时**：被换下的任务的内核栈（连同上面的 pt_regs）原样留在内核；不会把 pt_regs “拷回”该任务的用户空间。等该任务再次被调度到时，先恢复其内核栈（TSS.sp0 / thread.sp0），若它要从内核返回用户态，再按上面一步从**该任务自己的 pt_regs** 恢复寄存器并 iret。
+
+**对应内核代码**：进内核时由 entry 汇编按 pt_regs 布局压栈（见 Q9 的 `entry_64.S` 片段）。返回用户态时由退出路径（如 `swapgs_restore_regs_and_return_to_usermode`）从栈上 pt_regs 弹出并恢复寄存器，最后 `iretq` 或 `sysretq`（`arch/x86/entry/entry_64.S`）。C 层通过 `struct pt_regs *regs` 读写的都是该任务内核栈上的同一块内存，无与用户空间之间的拷贝。
 
 小结：**pt_regs = 进内核时把 CPU 寄存器保存到内核栈；返回时从内核栈上的 pt_regs 恢复到 CPU 寄存器**。没有“用户空间↔内核空间”的数据拷贝。
 
@@ -96,6 +112,8 @@ static inline void native_load_sp0(unsigned long sp0)
 
 **答：是的。** TSS 在源码里是 per-CPU 变量（`arch/x86/include/asm/processor.h`）：`DECLARE_PER_CPU_PAGE_ALIGNED(struct tss_struct, cpu_tss_rw)`；**pt_regs 并不在 TSS 里**，而是在**当前任务的内核栈**上。TSS.sp0 指向当前在该 CPU 上运行的任务的内核栈顶，故每个 CPU 同一时刻只有一个“当前任务”、只在使用这一份 pt_regs。其它任务的 pt_regs 留在各自内核栈上，等被调度到时再使用。
 
+**对应内核代码**：每 CPU 仅有一份 TSS（同上 `processor.h`）；当前任务的 pt_regs 由 `current_pt_regs()` 得到，即当前内核栈顶附近的 `struct pt_regs`（定义在 `arch/x86/include/asm/ptrace.h`，通过 `current_top_of_stack()` 等与 TSS.sp0 指向的栈一致）。
+
 ### Q9. pt_regs 的保存能替代手工的 push/pop 吗？（例如实模式下需要自己 push/pop regs）
 
 **答：不能替代；pt_regs 只是“保存成什么样”的标准布局，真正往里面填的还是入口汇编。** SDM 对 SYSCALL 的说明是 CPU 会切换 RSP 等，但不会自动保存通用寄存器；中断/异常时 CPU 会压部分帧（如 RIP/CS/RFLAGS/SS/RSP），GPR 仍由软件保存。入口代码必须**按 pt_regs 的布局**把寄存器写进当前内核栈。
@@ -119,7 +137,14 @@ static inline void native_load_sp0(unsigned long sp0)
 
 **答：更准确地说，每个 task_struct（每个调度单位）都有自己的一条内核栈。** 与 [LINUX_KERNEL_PROCESS_AND_THREAD_STRUCT.md](LINUX_KERNEL_PROCESS_AND_THREAD_STRUCT.md) 一致：用户态“进程”若只有主线程，则一个进程对应一个 task_struct、一条内核栈；若为多线程进程，则同一进程内有多个 task_struct（同组线程），**每个线程一条内核栈**。
 
-内核实现（`include/linux/sched/task_stack.h`）：*“task->stack (kernel stack)”*，`task_stack_page(task)` 返回 `task->stack`。栈大小为 `THREAD_SIZE`（x86_64：`arch/x86/include/asm/page_64_types.h` 中 `#define THREAD_SIZE (PAGE_SIZE << THREAD_SIZE_ORDER)`）。`task_top_of_stack(task)` 与 `task_pt_regs(task)` 均基于 `task_stack_page(task)` 与 `THREAD_SIZE` 计算（`arch/x86/include/asm/processor.h`）。
+**对应内核代码**（`include/linux/sched/task_stack.h`）：注释 *“task->stack (kernel stack)”*，`task_stack_page(task)` 返回 `task->stack`。栈大小（x86_64，`arch/x86/include/asm/page_64_types.h`）：
+
+```c
+#define THREAD_SIZE_ORDER	(2 + KASAN_STACK_ORDER)
+#define THREAD_SIZE  (PAGE_SIZE << THREAD_SIZE_ORDER)
+```
+
+`task_top_of_stack(task)` 与 `task_pt_regs(task)` 在 `arch/x86/include/asm/processor.h` 中基于 `task_stack_page(task)` 与 `THREAD_SIZE` 计算（见 Q7 的宏定义）。
 
 ---
 
@@ -136,6 +161,16 @@ static inline void native_load_sp0(unsigned long sp0)
 | **sp1** | 仅 32 位 | 内核在此保存当前任务的 `thread.sp0`（`switch_to.h` 中 `this_cpu_write(cpu_tss_rw.x86_tss.sp1, task->thread.sp0)`），供 entry 取“当前任务内核栈顶”；不用于 ring 1 栈。 |
 | **ist[0..4]** | 仅 64 位 | Double Fault、NMI、Debug、MCE、#VC 的 IST 栈顶；在 `arch/x86/kernel/cpu/common.c` 的 `tss_setup_ist()` 中设置；对应异常时 CPU 用其切换栈（SDM §7.7）。 |
 
+**对应内核代码**：entry 从 TSS.sp0 取栈（`arch/x86/entry/entry_64.S`）：`movq PER_CPU_VAR(cpu_tss_rw + TSS_sp0), %rsp`。sp1 的写入见 `switch_to.h` 中 `this_cpu_write(cpu_tss_rw.x86_tss.sp1, task->thread.sp0)`。IST 设置（`arch/x86/kernel/cpu/common.c`）：
+
+```c
+tss->x86_tss.ist[IST_INDEX_DF] = __this_cpu_ist_top_va(DF);
+tss->x86_tss.ist[IST_INDEX_NMI] = __this_cpu_ist_top_va(NMI);
+tss->x86_tss.ist[IST_INDEX_DB] = __this_cpu_ist_top_va(DB);
+tss->x86_tss.ist[IST_INDEX_MCE] = __this_cpu_ist_top_va(MCE);
+tss->x86_tss.ist[IST_INDEX_VC] = __this_cpu_ist_top_va(VC);
+```
+
 ### Q12. TSS 里哪些字段不再用于任务/栈切换？
 
 **答：** SDM Figure 7-2 中 32 位 TSS 还包含 back_link、ESP2/SS2、CR3、EIP、EFLAGS、通用寄存器、段选择子、LDT、I/O bitmap base 等；在 32 位模式下硬件任务切换可据此保存/恢复状态，但 Linux 不使用硬件任务切换，故这些字段不参与栈切换。
@@ -143,6 +178,16 @@ static inline void native_load_sp0(unsigned long sp0)
 - **32 位**：back_link；sp2/ss2（不用 ring 2）；__cr3、ip、flags、通用寄存器、段寄存器、ldt、trace（硬件任务切换未用）；ss1 仅作 MSR_IA32_SYSENTER_CS 缓存（见 `processor.h` 中 `struct x86_hw_tss` 注释）。
 - **64 位**：sp1（不用 ring 1）；sp2 仅作 `entry_SYSCALL_64` 的 scratch（存用户 RSP，见 `entry_64.S` 注释 *“tss.sp2 is scratch space”*）；reserved*；ist[5]、ist[6] 未用。
 - **与栈无关但在用**：io_bitmap_base（SDM 中 I/O Map Base；内核在 `tss_setup_io_bitmap()` 等处使用）。
+
+**对应内核代码**：32 位 TSS 中未用于栈切换的字段见 `arch/x86/include/asm/processor.h` 的 `struct x86_hw_tss`（262–305 行，含 `back_link`、`sp2`/`ss2`、`__cr3`、`ip`、`flags`、通用寄存器、段选择子、`ldt`、`trace`）。sp2 的 scratch 用法见 `entry_64.S` 注释 *“tss.sp2 is scratch space”* 及 `movq %rsp, PER_CPU_VAR(cpu_tss_rw + TSS_sp2)`。io_bitmap_base 的初始化（`arch/x86/kernel/cpu/common.c`）：
+
+```c
+static inline void tss_setup_io_bitmap(struct tss_struct *tss)
+{
+	tss->x86_tss.io_bitmap_base = IO_BITMAP_OFFSET_INVALID;
+	/* ... */
+}
+```
 
 ### Q13. 内核里的 TSS 结构长什么样？
 
