@@ -12,7 +12,7 @@
 
 **答：是内核自己的栈的栈顶指针，不是用户态栈的快照。**
 
-SDM Vol 3A §7.2.3（“TSS in 32-Bit Mode”）写明：*“When a call to a more privileged level occurs, the new stack pointer is loaded from the TSS. For privilege level 0, the stack pointer is loaded from the SS0 and ESP0 fields.”* 即从低特权级进入 ring 0 时，CPU 从 TSS 的 **ESP0/SS0**（64 位为 RSP0）读出新栈指针，而不是从用户空间拷贝任何内存。
+SDM Vol 3A Chapter 5 “Stack Switching”（约 5-17 页）写明：*“Pointers to the privilege level 0, 1, and 2 stacks are stored in the TSS for the currently running task (see Figure 7-2). Each of these pointers consists of a segment selector and a stack pointer (loaded into the ESP register). … They are used only to create new stacks when calls are made to more privileged levels.”* 当发生向更高特权级的调用时，处理器从当前 TSS 读取新栈的段选择子与栈指针并装入 SS/ESP（步骤 2：“Reads the segment selector and stack pointer for the stack to be switched to from the current TSS”；步骤 5：“Loads the segment selector and stack pointer for the new stack in the SS and ESP registers.”）。即从低特权级进入 ring 0 时，CPU 从 TSS 的 **ESP0/SS0**（64 位为 RSP0）读出新栈指针，而不是从用户空间拷贝任何内存。§7.2.3 为 “TSS Descriptor in 64-bit mode”，描述 64 位下 TSS 描述符格式，非栈切换行为。
 
 - **TSS.sp0** 存的是：**当前要用的内核栈的栈顶**（RSP 将要被设成的值）。
 - 从用户态进内核（系统调用、中断、异常）时，CPU 用 TSS.sp0 把 RSP 切到这条内核栈上；内核再在这条栈上保存 **pt_regs**（里面才有用户态的 RSP、RIP、通用寄存器等）。
