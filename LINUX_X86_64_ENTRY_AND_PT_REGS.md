@@ -142,8 +142,29 @@ SYM_CODE_END(irq_entries_start)
 | **64 位 `syscall`** | 用户执行 `syscall`，`MSR_IA32_LSTAR` 指向入口 | `entry_SYSCALL_64`（`arch/x86/entry/entry_64.S`） | `do_syscall_64`（`arch/x86/entry/syscall_64.c`） | **是**：在线程内核栈上按布局 `push` + `PUSH_AND_CLEAR_REGS`，无 CPU 自动压完整 IRET 帧 |
 | **`int 0x80`（64 位内核 + `CONFIG_IA32_EMULATION`）** | 向量 `0x80`，走 IDT | IDT 登记 **`asm_int80_emulation`**（由 `DECLARE_IDTENTRY_RAW(IA32_SYSCALL_VECTOR, int80_emulation)` 展开，`asm/idtentry.h`）；另有跳板 **`int80_emulation`** → `jmp do_int80_emulation`（`entry_64_compat.S`） | **`do_int80_emulation`**（`arch/x86/entry/syscall_32.c`）；启用 FRED 时另有 `fred_int80_emulation` / `DEFINE_FREDENTRY_RAW(int80_emulation)` 分支 | **是**：走 **`idtentry` → `error_entry` → `PUSH_AND_CLEAR_REGS` 等**；用户态通常经 **`sync_regs`** 落到线程栈上标准 `pt_regs` |
 | **`int 0x80`（仅 32 位内核）** | 向量 `0x80` | **`entry_INT80_32`**（`arch/x86/entry/entry_32.S`） | **`do_int80_syscall_32`**（`syscall_32.c`） | **是**：由 32 位 entry 建栈帧后向 C 传入 `pt_regs` |
-| **外部 IRQ** | PIC/MSI/APIC 等，向量 ≥ `FIRST_EXTERNAL_VECTOR` | **`irq_entries_start`**（`.byte 0x6a, vector` + `jmp asm_common_interrupt`）→ **`asm_common_interrupt`** | **`common_interrupt`**（`DEFINE_IDTENTRY_IRQ`，`arch/x86/kernel/irq.c`） | **是** |
+| **外部 IRQ** | PIC/MSI/APIC 等，向量 ≥ `FIRST_EXTERNAL_VECTOR` | **`irq_entries_start`**（`arch/x86/include/asm/idtentry.h`，由 `arch/x86/entry/entry_64.S` `#include` 展开）→ **`asm_common_interrupt`**（同头文件 `DECLARE_IDTENTRY_IRQ(common_interrupt)` 经 `idtentry` 宏生成，汇编进 `entry_64.S`；见下节） | **`common_interrupt`** → **`call_irq_handler`**（`arch/x86/kernel/irq.c`） | **是** |
 | **CPU 异常（#PF/#DE/…）** | CPU 查 IDT | **`asm_exc_*`**（`idtentry` 等在 `entry_64.S` + `idtentry.h` 生成；IDT 在 `idt.c`） | 如 **`exc_page_fault`** → `handle_page_fault`（`fault.c`），**`exc_divide_error`** → `do_error_trap`（`traps.c`）等 | **是**：硬件先压 IRET 帧（± error code），再 **`error_entry` + `PUSH_AND_CLEAR_REGS`**；用户态常见 **`sync_regs`**（IST/paranoid 等路径例外） |
+
+#### 外部 IRQ：源码路径（与上表「外部 IRQ」行对应）
+
+1. **IDT 填门（每个外部向量指向不同短桩）**  
+   `idt_setup_apic_and_irq_gates()`（`arch/x86/kernel/idt.c`）对满足条件的向量 `i` 调用 `set_intr_gate(i, entry)`，其中  
+   `entry = irq_entries_start + IDT_ALIGN * (i - FIRST_EXTERNAL_VECTOR)`（同文件约 291–294 行）。即 **每个设备向量各自落在 `irq_entries_start` 数组里的一段对齐 stub**，再统一跳到 **`asm_common_interrupt`**。
+
+2. **每个向量 stub（压向量号 + 跳转）**  
+   `SYM_CODE_START(irq_entries_start)`（`arch/x86/include/asm/idtentry.h`，由 `entry_64.S` `#include <asm/idtentry.h>` 展开）对每个向量生成 **单字节 `push imm8`**（汇编写作 `.byte 0x6a, vector`，避免 GCC 把 `pushq $vector` 扩成 5 字节）和 **`jmp asm_common_interrupt`**；`.rept NR_EXTERNAL_VECTORS` 覆盖外部向量范围。注释说明：该 push **符号扩展**，C 入口用 **`(u32)(u8)error_code`** 还原向量号（见下第 4 步 `DEFINE_IDTENTRY_IRQ`）。
+
+3. **统一汇编入口 `asm_common_interrupt`（由宏生成，非手写单文件）**  
+   `DECLARE_IDTENTRY_IRQ(X86_TRAP_OTHER, common_interrupt)`（`idtentry.h` 约 692–693 行）在汇编侧经 `idtentry_irq` → `idtentry` 生成 **`SYM_CODE_START(asm_common_interrupt)`**。占位向量 **`X86_TRAP_OTHER (0xFFFF)`** 使宏不套用 #BP 等特殊分支，得到「通用」`idtentry` 体；**`has_error_code=1`** 与 stub 压入的「伪 error_code」在栈布局上与 `pt_regs.orig_ax` 槽对齐。
+
+4. **`idtentry_body`（`arch/x86/entry/entry_64.S`）**  
+   调用 **`error_entry`**（原生路径；Xen PV 走 `xen_error_entry` 替代）→ 此时 **`%rsp` 指向完整 `pt_regs`** → `movq %rsp, %rdi`；若 `has_error_code==1`，从 **`ORIG_RAX(%rsp)`** 取第二参数（此处即向量号）到 **`%rsi`**，并把 **`orig_ax` 置 `-1`**（表示非 syscall 重启语义）→ **`call common_interrupt`** → **`jmp error_return`**（约 289–316 行宏展开）。
+
+5. **C 层封装与设备处理**  
+   `DEFINE_IDTENTRY_IRQ(common_interrupt)`（`arch/x86/include/asm/idtentry.h` 约 206–220 行）展开为：先 **`irqentry_enter(regs)`**，再 **`run_irq_on_irqstack_cond(__common_interrupt, regs, vector)`**，其中 **`vector = (u32)(u8)error_code`**。  
+   实际处理体在 **`arch/x86/kernel/irq.c`**：`DEFINE_IDTENTRY_IRQ(common_interrupt)` 的内联函数体（约 285–296 行）里 **`set_irq_regs(regs)`** → **`call_irq_handler(vector, regs)`**（同文件约 259–278 行：按 **`vector_irq[vector]`** 取 **`irq_desc`**，再 **`handle_irq` → `generic_handle_irq_desc`**）→ 必要时 **`apic_eoi()`** → **`set_irq_regs` 恢复**。
+
+**小结**：硬件先压 **IRET 帧**；stub 再压 **向量号**；**`error_entry`** 补全 **`PUSH_AND_CLEAR_REGS`** 等并得到 **`pt_regs *`**；**`common_interrupt`** 只在 **已构造好的 `regs`** 上做 **RCU/IRQ 栈/具体 IRQ 分发**。
 
 ### 8.2 补充：SYSCALL / 设备 IRQ / 典型异常（维度对比）
 
