@@ -145,6 +145,21 @@ SYM_CODE_END(irq_entries_start)
 | **外部 IRQ** | PIC/MSI/APIC 等，向量 ≥ `FIRST_EXTERNAL_VECTOR` | **`irq_entries_start`**（`arch/x86/include/asm/idtentry.h`，由 `arch/x86/entry/entry_64.S` `#include` 展开）→ **`asm_common_interrupt`**（同头文件 `DECLARE_IDTENTRY_IRQ(common_interrupt)` 经 `idtentry` 宏生成，汇编进 `entry_64.S`；见下节） | **`common_interrupt`** → **`call_irq_handler`**（`arch/x86/kernel/irq.c`） | **是** |
 | **CPU 异常（#PF/#DE/…）** | CPU 查 IDT | **`asm_exc_*`**（`idtentry` 等在 `entry_64.S` + `idtentry.h` 生成；IDT 在 `idt.c`） | 如 **`exc_page_fault`** → `handle_page_fault`（`fault.c`），**`exc_divide_error`** → `do_error_trap`（`traps.c`）等 | **是**：硬件先压 IRET 帧（± error code），再 **`error_entry` + `PUSH_AND_CLEAR_REGS`**；用户态常见 **`sync_regs`**（IST/paranoid 等路径例外） |
 
+### 8.2 返回用户态（出口）总览表
+
+以下与 **§8.1** 各行对应；**C 侧**在返回汇编前统一做完 signal/调度/TIF 等（`syscall_exit_to_user_mode()` 见 `include/linux/entry-common.h`；**IDT 路径**上返回到用户时多为 `irqentry_exit()` → `irqentry_exit_to_user_mode()`，实现见 `kernel/entry/common.c`）。**汇编**侧：系统调用可走 **`sysretq`** 快路径或汇入与中断共用的 **`swapgs_restore_regs_and_return_to_usermode`**；凡经 `idtentry_body` 的 IDT 处理函数 **`ret` 后**都会执行 **`jmp error_return`**（`arch/x86/entry/entry_64.S` 中 `.macro idtentry_body` 展开）。
+
+| 类型 | 主要 C 出口路径（函数） | 汇编符号 / 指令 | 文件 |
+|------|-------------------------|-----------------|------|
+| **64 位 `syscall`** | `do_syscall_64()`（`arch/x86/entry/syscall_64.c`）内调用 **`syscall_exit_to_user_mode()`**；通用出口逻辑在 **`exit_to_user_mode()`** / **`exit_to_user_mode_prepare()`**（`kernel/entry/common.c`，经 `entry-common.h` 内联） | 若 `do_syscall_64` 返回真：进入 **`syscall_return_via_sysret`** → **`POP_REGS`**（`arch/x86/entry/calling.h`）→ trampoline 栈 → **`swapgs`** → **`sysretq`**；若返回假：**`swapgs_restore_regs_and_return_to_usermode`**（`SYM_CODE_START_LOCAL(common_interrupt_return)` 内全局标签）→ **`POP_REGS`** → **`iretq`**（经 **`.Lnative_iret`** / **`native_irq_return_iret`**） | `syscall_64.c`，`entry_64.S`，`calling.h`，`entry-common.h`，`kernel/entry/common.c` |
+| **`int 0x80`（64 位内核 + `CONFIG_IA32_EMULATION`）** | **`do_int80_emulation()`**（`arch/x86/entry/syscall_32.c`）末尾 **`syscall_exit_to_user_mode()`** | **`asm_int80_emulation`**（`idtentry` 在 `entry_64.S` 展开）：**`idtentry_body`** 内 **`call int80_emulation`**（跳板在 **`arch/x86/entry/entry_64_compat.S`**：`jmp do_int80_emulation`）→ C **`ret` 后** 落到 **`jmp error_return`** → **`swapgs_restore_regs_and_return_to_usermode`** → **`iretq`** | `syscall_32.c`，`entry_64_compat.S`，`entry_64.S`，`idtentry.h` |
+| **`int 0x80`（仅 32 位内核）** | **`do_int80_syscall_32()`**（`arch/x86/entry/syscall_32.c`）末尾 **`syscall_exit_to_user_mode()`** | **`entry_INT80_32`** 中 **`restore_all_switch_stack`** → **`.Lirq_return`** → **`iret`** | `syscall_32.c`，`arch/x86/entry/entry_32.S` |
+| **外部 IRQ** | **`common_interrupt()`**（`arch/x86/kernel/irq.c`，`DEFINE_IDTENTRY_IRQ` 展开）内 **`irqentry_exit()`** → 若 `user_mode(regs)` 则 **`irqentry_exit_to_user_mode()`**（`kernel/entry/common.c`） | **`idtentry_body`**：`call common_interrupt` → **`jmp error_return`** → **`swapgs_restore_regs_and_return_to_usermode`** → **`iretq`** | `irq.c`，`idtentry.h`（宏），`kernel/entry/common.c`，`entry_64.S` |
+| **CPU 异常（#PF/#DE/…）** | 视宏而定：`DEFINE_IDTENTRY` 包装体内 **`irqentry_exit()`**；**`DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)`** 在 **`exc_page_fault()`**（`arch/x86/mm/fault.c`）内显式 **`irqentry_enter()` / `irqentry_exit()`** | 典型：**`jmp error_return`** → 返用户：**`swapgs_restore_regs_and_return_to_usermode`** → **`iretq`**；返内核：**`restore_regs_and_return_to_kernel`** → **`iretq`**（**`error_return`** 依 **`CS(%rsp)`** 选择） | `fault.c`，`traps.c`，`idtentry.h`，`kernel/entry/common.c`，`entry_64.S` |
+| **补充：IST/paranoid、PTI** | 与普通 IDT 相同由 C 侧 **`irqentry_exit()`** 等收尾 | 从异常栈返内核：**`paranoid_exit`**（`entry_64.S`）→ **`restore_regs_and_return_to_kernel`**；开 PTI 返用户可先 **`jmp .Lpti_restore_regs_and_return_to_usermode`** 再汇入 **`swapgs`** + **`iretq`** | `entry_64.S` |
+
+**`error_return`**（`entry_64.S`）：若 **`CS`** 表明返内核，跳 **`restore_regs_and_return_to_kernel`**；否则 **`jmp swapgs_restore_regs_and_return_to_usermode`**。
+
 #### 外部 IRQ：源码路径（与上表「外部 IRQ」行对应）
 
 1. **IDT 填门（每个外部向量指向不同短桩）**  
@@ -166,7 +181,7 @@ SYM_CODE_END(irq_entries_start)
 
 **小结**：硬件先压 **IRET 帧**；stub 再压 **向量号**；**`error_entry`** 补全 **`PUSH_AND_CLEAR_REGS`** 等并得到 **`pt_regs *`**；**`common_interrupt`** 只在 **已构造好的 `regs`** 上做 **RCU/IRQ 栈/具体 IRQ 分发**。
 
-### 8.2 补充：SYSCALL / 设备 IRQ / 典型异常（维度对比）
+### 8.3 补充：SYSCALL / 设备 IRQ / 典型异常（维度对比）
 
 | 项目 | SYSCALL | 设备 IRQ（`irq_entries_start`） | 典型异常（如 #PF / #DE） |
 |------|---------|--------------------------------|--------------------------|
@@ -206,6 +221,7 @@ cat /proc/interrupts
 | IDT 安装 | `arch/x86/kernel/idt.c` |
 | IRQ stub 生成、`irq_entries_start` | `arch/x86/include/asm/idtentry.h` |
 | `common_interrupt` C | `arch/x86/kernel/irq.c` |
+| `syscall_exit_to_user_mode` / `irqentry_exit`（通用出口） | `include/linux/entry-common.h`，`include/linux/irq-entry-common.h`，`kernel/entry/common.c` |
 | 上下文切换写栈顶 | `arch/x86/kernel/process_64.c` |
 | `sp0`、TSS、load_sp0 | `arch/x86/kernel/cpu/common.c`，`arch/x86/include/asm/processor.h` |
 | `update_task_stack` | `arch/x86/include/asm/switch_to.h` |
