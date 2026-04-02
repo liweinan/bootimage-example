@@ -12,7 +12,7 @@
 | `cpu_current_top_of_stack` 声明 | `arch/x86/include/asm/processor.h`：`DECLARE_PER_CPU_CACHE_HOT` |
 | `entry_SYSCALL_64` 汇编入口 | `arch/x86/entry/entry_64.S`：`SYM_CODE_START(entry_SYSCALL_64)` |
 | `entry_SYSCALL_64` 声明 | `arch/x86/include/asm/proto.h` |
-| MSR `LSTAR` 指向 syscall 入口 | `arch/x86/kernel/cpu/common.c`：`wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64)` |
+| MSR `LSTAR` 指向 syscall 入口 | `arch/x86/kernel/cpu/common.c`：`idt_syscall_init()` 内 `wrmsrq(MSR_LSTAR, …)`（由 `cpu_init()` 调用） |
 | Xen 包装 | `arch/x86/xen/xen-asm.S`：`xen_entry_SYSCALL_64`，可跳到 `entry_SYSCALL_64_after_hwframe` |
 | `__switch_to`（x86_64 C 实现） | `arch/x86/kernel/process_64.c` |
 | `__switch_to`（i386 C 实现） | `arch/x86/kernel/process_32.c` |
@@ -92,17 +92,21 @@
 
 ### 5.1 定义（x86）
 
-```c
+见 **`arch/x86/include/asm/processor.h`**：
+
+```643:653:arch/x86/include/asm/processor.h
+#define TOP_OF_INIT_STACK ((unsigned long)&init_stack + sizeof(init_stack) - \
+			   TOP_OF_KERNEL_STACK_PADDING)
+
 #define task_top_of_stack(task) ((unsigned long)(task_pt_regs(task) + 1))
 
-#define task_pt_regs(task) ({						\
+#define task_pt_regs(task) \
+({									\
 	unsigned long __ptr = (unsigned long)task_stack_page(task);	\
 	__ptr += THREAD_SIZE - TOP_OF_KERNEL_STACK_PADDING;		\
 	((struct pt_regs *)__ptr) - 1;					\
 })
 ```
-
-位置：**`arch/x86/include/asm/processor.h`**。
 
 含义：由 **`task_stack_page(task)`（即 `task->stack`）** 与固定 **`THREAD_SIZE` / `TOP_OF_KERNEL_STACK_PADDING`** **当场计算**；**没有**单独的存储单元在“某一刻被写入 `task_top_of_stack`”。
 
@@ -140,44 +144,135 @@
 
 ### 8.1 写入链（软件把新值放进 `x86_tss.sp0`）
 
+**最终写内存（原生、非 `CONFIG_PARAVIRT_XXL`）：** `load_sp0()` → `native_load_sp0()`：
+
+```533:537:arch/x86/include/asm/processor.h
+static inline void
+native_load_sp0(unsigned long sp0)
+{
+	this_cpu_write(cpu_tss_rw.x86_tss.sp0, sp0);
+}
 ```
-load_sp0(sp0)                         [paravirt 时经 PVOP → xen_load_sp0]
-    → native_load_sp0(sp0)          arch/x86/include/asm/processor.h
-        → this_cpu_write(cpu_tss_rw.x86_tss.sp0, sp0)
+
+```569:572:arch/x86/include/asm/processor.h
+static inline void load_sp0(unsigned long sp0)
+{
+	native_load_sp0(sp0);
+}
 ```
 
-**谁调用 `load_sp0`（典型）：**
+若开启 **`CONFIG_PARAVIRT_XXL`**，`load_sp0()` 走 paravirt 间接调用：
 
-1. **每 CPU 初始化（BSP/AP）**  
-   `cpu_init()`（`arch/x86/kernel/cpu/common.c`）  
-   → `load_sp0((unsigned long)(cpu_entry_stack(cpu) + 1))`  
-   注释含义：**sp0 恒为当前 CPU 的 entry trampoline 栈顶**，与当前 `task` 无关（原生 x86_64 常见形态）。
+```116:119:arch/x86/include/asm/paravirt.h
+static inline void load_sp0(unsigned long sp0)
+{
+	PVOP_VCALL1(cpu.load_sp0, sp0);
+}
+```
 
-2. **上下文切换里（条件极窄）**  
-   `__switch_to()`（`arch/x86/kernel/process_64.c`）  
-   → `update_task_stack(next_p)`（`arch/x86/include/asm/switch_to.h`）  
-   → 当 **`X86_FEATURE_XENPV` 且未启用 FRED** 时：`load_sp0(task_top_of_stack(task))`  
-   即 **Xen PV** 下会把 **sp0 设成即将运行线程的内核栈顶**。
+后端可为 Xen 的 `xen_load_sp0` 等，不再保证等价于内联的 `native_load_sp0`。
 
-3. **Xen paravirt 后端**  
-   `load_sp0` 可落到 **`xen_load_sp0()`**（`arch/x86/xen/enlighten_pv.c`）  
-   → 同样写 `cpu_tss_rw.x86_tss.sp0`。
+**调用 `load_sp0` 的典型路径：**
 
-**静态初值（随后仍会被 `cpu_init` 等覆盖）：**  
-`DEFINE_PER_CPU_PAGE_ALIGNED(cpu_tss_rw)`（`arch/x86/kernel/process.c`）里对 `.x86_tss.sp0` 的毒化初值。
+1. **每 CPU 初始化（BSP/AP）** — `cpu_init()`：
+
+```2420:2424:arch/x86/kernel/cpu/common.c
+	/*
+	 * sp0 points to the entry trampoline stack regardless of what task
+	 * is running.
+	 */
+	load_sp0((unsigned long)(cpu_entry_stack(cpu) + 1));
+```
+
+2. **上下文切换（仅 Xen PV + 非 FRED 的 x86_64）** — `__switch_to` → `update_task_stack`：
+
+```668:675:arch/x86/kernel/process_64.c
+	/*
+	 * Switch the PDA and FPU contexts.
+	 */
+	raw_cpu_write(current_task, next_p);
+	raw_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p));
+
+	/* Reload sp0. */
+	update_task_stack(next_p);
+```
+
+```69:78:arch/x86/include/asm/switch_to.h
+static inline void update_task_stack(struct task_struct *task)
+{
+	/* sp0 always points to the entry trampoline stack, which is constant: */
+#ifdef CONFIG_X86_32
+	this_cpu_write(cpu_tss_rw.x86_tss.sp1, task->thread.sp0);
+#else
+	if (!cpu_feature_enabled(X86_FEATURE_FRED) && cpu_feature_enabled(X86_FEATURE_XENPV))
+		/* Xen PV enters the kernel on the thread stack. */
+		load_sp0(task_top_of_stack(task));
+#endif
+}
+```
+
+3. **Xen PV 后端**（在 paravirt 表项指向时由 `load_sp0` 间接调用）：
+
+```1010:1017:arch/x86/xen/enlighten_pv.c
+static void xen_load_sp0(unsigned long sp0)
+{
+	struct multicall_space mcs;
+
+	mcs = xen_mc_entry(0);
+	MULTI_stack_switch(mcs.mc, __KERNEL_DS, sp0);
+	xen_mc_issue(XEN_LAZY_CPU);
+	this_cpu_write(cpu_tss_rw.x86_tss.sp0, sp0);
+}
+```
+
+**静态初值（启动早期，随后由 `cpu_init` 等覆盖）：**
+
+```67:75:arch/x86/kernel/process.c
+__visible DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_struct, cpu_tss_rw) = {
+	.x86_tss = {
+		/*
+		 * .sp0 is only used when entering ring 0 from a lower
+		 * privilege level.  Since the init task never runs anything
+		 * but ring 0 code, there is no need for a valid value here.
+		 * Poison it.
+		 */
+		.sp0 = (1UL << (BITS_PER_LONG-1)) + 1,
+```
 
 ### 8.2 读取链（软件从 `x86_tss.sp0` 取到寄存器或 C 变量）
 
-1. **syscall 返回：切到 trampoline 栈（x86_64）**  
-   `entry_SYSCALL_64`（`arch/x86/entry/entry_64.S`）  
-   - `syscall_return_via_sysret`：`movq PER_CPU_VAR(cpu_tss_rw + TSS_sp0), %rsp`  
-   - PTI 慢路径 `.Lpti_restore_regs_and_return_to_usermode`：同上指令。
+1. **x86_64：`entry_SYSCALL_64` 返回用户态前切到 trampoline 栈**（`syscall_return_via_sysret`）：
 
-2. **32 位入口汇编**  
-   `arch/x86/entry/entry_32.S` 中多处 `PER_CPU_VAR(cpu_tss_rw + TSS_sp0)` 装入寄存器。
+```137:146:arch/x86/entry/entry_64.S
+syscall_return_via_sysret:
+	IBRS_EXIT
+	POP_REGS pop_rdi=0
 
-3. **C 里按址当栈用（示例）**  
-   `arch/x86/kernel/traps.c`：`this_cpu_read(cpu_tss_rw.x86_tss.sp0)` 等，用于在特定异常路径下构造/借用栈帧。
+	/*
+	 * Now all regs are restored except RSP and RDI.
+	 * Save old stack pointer and switch to trampoline stack.
+	 */
+	movq	%rsp, %rdi
+	movq	PER_CPU_VAR(cpu_tss_rw + TSS_sp0), %rsp
+```
+
+2. **x86_64：PTI 下经 IRET 回用户态的慢路径**（`.Lpti_restore_regs_and_return_to_usermode`）：
+
+```582:591:arch/x86/entry/entry_64.S
+.Lpti_restore_regs_and_return_to_usermode:
+	POP_REGS pop_rdi=0
+
+	/*
+	 * The stack is now user RDI, orig_ax, RIP, CS, EFLAGS, RSP, SS.
+	 * Save old stack pointer and switch to trampoline stack.
+	 */
+	movq	%rsp, %rdi
+	movq	PER_CPU_VAR(cpu_tss_rw + TSS_sp0), %rsp
+```
+
+3. **C 侧读取（示例，`#DF` 等路径借用栈顶）：** `arch/x86/kernel/traps.c` 约 530、986 行：`this_cpu_read(cpu_tss_rw.x86_tss.sp0)` / `__this_cpu_read(cpu_tss_rw.x86_tss.sp0)`。
+
+4. **i386：** `arch/x86/entry/entry_32.S` 中多处 `PER_CPU_VAR(cpu_tss_rw + TSS_sp0)`（如约 530、576、849 行，以文件为准）。
 
 ---
 
@@ -185,49 +280,249 @@ load_sp0(sp0)                         [paravirt 时经 PVOP → xen_load_sp0]
 
 ### 9.1 写入链（谁在更新 per-CPU 的 `cpu_current_top_of_stack`）
 
+**调度切换（常见入口：`schedule()`）：**  
+`schedule()` → `__schedule_loop()` → `__schedule()` → `context_switch()` → **`switch_to`** → **`__switch_to_asm`** → **`__switch_to`**。
+
+```6869:6881:kernel/sched/core.c
+asmlinkage __visible void __sched schedule(void)
+{
+	struct task_struct *tsk = current;
+
+#ifdef CONFIG_RT_MUTEXES
+	lockdep_assert(!tsk->sched_rt_mutex);
+#endif
+
+	if (!task_is_running(tsk))
+		sched_submit_work(tsk);
+	__schedule_loop(SM_NONE);
+	sched_update_worker(tsk);
+}
 ```
-__schedule() …
-  → context_switch()                    kernel/sched/core.c
-      → switch_to(prev, next, prev)      arch/x86/include/asm/switch_to.h
-          → __switch_to_asm(prev, next)  arch/x86/entry/entry_64.S
-              → __switch_to()            arch/x86/kernel/process_64.c
-                  → raw_cpu_write(cpu_current_top_of_stack,
-                                  task_top_of_stack(next_p))
+
+```6860:6866:kernel/sched/core.c
+static __always_inline void __schedule_loop(int sched_mode)
+{
+	do {
+		preempt_disable();
+		__schedule(sched_mode);
+		sched_preempt_enable_no_resched();
+	} while (need_resched());
 ```
 
-**其它写入：**
+```6783:6787:kernel/sched/core.c
+		trace_sched_switch(preempt, prev, next, prev_state);
 
-- **per-CPU 初值**：`DEFINE_PER_CPU_CACHE_HOT(..., cpu_current_top_of_stack) = TOP_OF_INIT_STACK`（`arch/x86/kernel/cpu/common.c`）。
-- **仅 `CONFIG_X86_32`**：`common_cpu_up()`（`arch/x86/kernel/smpboot.c`）里  
-  `per_cpu(cpu_current_top_of_stack, cpu) = task_top_of_stack(idle)`（64 位 AP 路径无此赋值，依赖后续第一次 `__switch_to` 等到 idle/任务时写入）。
+		/* Also unlocks the rq: */
+		rq = context_switch(rq, prev, next, &rf);
+```
 
-**32 位 `__switch_to`：** `arch/x86/kernel/process_32.c` 内 `this_cpu_write(cpu_current_top_of_stack, task_stack_page(...) + THREAD_SIZE)`，调用关系同样是调度 → `context_switch` → `switch_to` → `__switch_to_asm` → `__switch_to`。
+```5394:5397:kernel/sched/core.c
+	prepare_lock_switch(rq, next, rf);
+
+	/* Here we just switch the register state and the stack. */
+	switch_to(prev, next, prev);
+```
+
+```49:52:arch/x86/include/asm/switch_to.h
+#define switch_to(prev, next, last)					\
+do {									\
+	((last) = __switch_to_asm((prev), (next)));			\
+} while (0)
+```
+
+```177:217:arch/x86/entry/entry_64.S
+SYM_FUNC_START(__switch_to_asm)
+	ANNOTATE_NOENDBR
+	/*
+	 * Save callee-saved registers
+	 * This must match the order in inactive_task_frame
+	 */
+	pushq	%rbp
+	pushq	%rbx
+	pushq	%r12
+	pushq	%r13
+	pushq	%r14
+	pushq	%r15
+
+	/* switch stack */
+	movq	%rsp, TASK_threadsp(%rdi)
+	movq	TASK_threadsp(%rsi), %rsp
+
+#ifdef CONFIG_STACKPROTECTOR
+	movq	TASK_stack_canary(%rsi), %rbx
+	movq	%rbx, PER_CPU_VAR(__stack_chk_guard)
+#endif
+
+	/*
+	 * When switching from a shallower to a deeper call stack
+	 * the RSB may either underflow or use entries populated
+	 * with userspace addresses. On CPUs where those concerns
+	 * exist, overwrite the RSB with entries which capture
+	 * speculative execution to prevent attack.
+	 */
+	FILL_RETURN_BUFFER %r12, RSB_CLEAR_LOOPS, X86_FEATURE_RSB_CTXSW
+
+	/* restore callee-saved registers */
+	popq	%r15
+	popq	%r14
+	popq	%r13
+	popq	%r12
+	popq	%rbx
+	popq	%rbp
+
+	jmp	__switch_to
+SYM_FUNC_END(__switch_to_asm)
+```
+
+**在 `__switch_to` 中写入 `cpu_current_top_of_stack`（x86_64）：**
+
+```671:675:arch/x86/kernel/process_64.c
+	raw_cpu_write(current_task, next_p);
+	raw_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p));
+
+	/* Reload sp0. */
+	update_task_stack(next_p);
+```
+
+说明：`__schedule()` 也可由抢占、`cond_resched` 等路径调用，不一定经过 `schedule()`；但只要发生**真正的上下文切换**，仍会落到 **`context_switch` → `switch_to` → `__switch_to_asm` → `__switch_to`**。
+
+**per-CPU 初值：**
+
+```2176:2176:arch/x86/kernel/cpu/common.c
+DEFINE_PER_CPU_CACHE_HOT(unsigned long, cpu_current_top_of_stack) = TOP_OF_INIT_STACK;
+```
+
+**仅 `CONFIG_X86_32`：AP 启动 idle 时额外赋值**（整段在 `#ifdef CONFIG_X86_32` 内；**x86_64 无此赋值**）：
+
+```832:835:arch/x86/kernel/smpboot.c
+#ifdef CONFIG_X86_32
+	/* Stack for startup_32 can be just as for start_secondary onwards */
+	per_cpu(cpu_current_top_of_stack, cpu) = task_top_of_stack(idle);
+#endif
+```
+
+**i386 `__switch_to` 中的写入：**
+
+```196:200:arch/x86/kernel/process_32.c
+	update_task_stack(next_p);
+	refresh_sysenter_cs(next);
+	this_cpu_write(cpu_current_top_of_stack,
+		       (unsigned long)task_stack_page(next_p) +
+		       THREAD_SIZE);
+```
 
 ### 9.2 读取链（syscall 相关：进入内核时把该 per-CPU 值装进 RSP）
 
-**主路径（64 位用户态 syscall）：**
+**MSR `LSTAR` 与 64 位入口**（调用链：`cpu_init()` → `syscall_init()` →（非 FRED 时）`idt_syscall_init()`）：
 
+```2400:2403:arch/x86/kernel/cpu/common.c
+	if (IS_ENABLED(CONFIG_X86_64)) {
+		loadsegment(fs, 0);
+		memset(cur->thread.tls_array, 0, GDT_ENTRY_TLS_ENTRIES * 8);
+		syscall_init();
 ```
-用户态 syscall 指令
-  → CPU 根据 STAR/LSTAR 等进入内核 RIP
-      → entry_SYSCALL_64                 arch/x86/entry/entry_64.S
-          → movq PER_CPU_VAR(cpu_current_top_of_stack), %rsp
-          → … 随后在栈上构建 pt_regs，进入 C：`do_syscall_64` 等
+
+```2234:2247:arch/x86/kernel/cpu/common.c
+void syscall_init(void)
+{
+	/* The default user and kernel segments */
+	wrmsr(MSR_STAR, 0, (__USER32_CS << 16) | __KERNEL_CS);
+
+	/*
+	 * Except the IA32_STAR MSR, there is NO need to setup SYSCALL and
+	 * SYSENTER MSRs for FRED, because FRED uses the ring 3 FRED
+	 * entrypoint for SYSCALL and SYSENTER, and ERETU is the only legit
+	 * instruction to return to ring 3 (both sysexit and sysret cause
+	 * #UD when FRED is enabled).
+	 */
+	if (!cpu_feature_enabled(X86_FEATURE_FRED))
+		idt_syscall_init();
 ```
 
-**IA-32 兼容 syscall（若配置启用）：**  
-`entry_64_compat.S` 中同样 `movq PER_CPU_VAR(cpu_current_top_of_stack), %rsp`（与 `entry_SYSCALL_64` 平行的一条 compat 入口线）。
+```2198:2203:arch/x86/kernel/cpu/common.c
+static inline void idt_syscall_init(void)
+{
+	wrmsrq(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);
 
-**32 位内核：** `entry_32.S` 中 `PER_CPU_VAR(cpu_current_top_of_stack)` → `%esp` / `%esi`（依具体标签分支而定）。
+	if (ia32_enabled()) {
+		wrmsrq_cstar((unsigned long)entry_SYSCALL_compat);
+```
 
-**与「syscall 返回」的衔接：** 从用户线程栈退回时，常见会先 **`movq … TSS_sp0, %rsp`** 切到 **trampoline**（见第 8.2 节），再通过 `SYSRET`/`IRET` 回用户态；**读 `cpu_current_top_of_stack` 发生在「进内核」一侧**，**读 `TSS_sp0` 常发生在「准备回用户态」一侧**（x86_64 原生）。
+**64 位用户态 `syscall` → `entry_SYSCALL_64`：**
 
-**C 代码侧读（非 entry 汇编主路径，但同属该变量语义）：**  
-`current_top_of_stack()`（`arch/x86/include/asm/processor.h`）→ `this_cpu_read(_stable/const)(cpu_current_top_of_stack)`，用于判断是否在线程栈上等。
+```87:95:arch/x86/entry/entry_64.S
+SYM_CODE_START(entry_SYSCALL_64)
+	UNWIND_HINT_ENTRY
+	ENDBR
+
+	swapgs
+	/* tss.sp2 is scratch space. */
+	movq	%rsp, PER_CPU_VAR(cpu_tss_rw + TSS_sp2)
+	SWITCH_TO_KERNEL_CR3 scratch_reg=%rsp
+	movq	PER_CPU_VAR(cpu_current_top_of_stack), %rsp
+```
+
+随后在同文件中 `call do_syscall_64`（约 121 行）。
+
+**IA-32 兼容 64 位 syscall 入口 `entry_SYSCALL_compat`：**
+
+```183:196:arch/x86/entry/entry_64_compat.S
+SYM_CODE_START(entry_SYSCALL_compat)
+	UNWIND_HINT_ENTRY
+	ENDBR
+	/* Interrupts are off on entry. */
+	swapgs
+
+	/* Stash user ESP */
+	movl	%esp, %r8d
+
+	/* Use %rsp as scratch reg. User ESP is stashed in r8 */
+	SWITCH_TO_KERNEL_CR3 scratch_reg=%rsp
+
+	/* Switch to the kernel stack */
+	movq	PER_CPU_VAR(cpu_current_top_of_stack), %rsp
+```
+
+**32 位兼容 SYSENTER 入口 `entry_SYSENTER_compat`（同样加载 `cpu_current_top_of_stack`）：**
+
+```50:60:arch/x86/entry/entry_64_compat.S
+SYM_CODE_START(entry_SYSENTER_compat)
+	UNWIND_HINT_ENTRY
+	ENDBR
+	/* Interrupts are off on entry. */
+	swapgs
+
+	pushq	%rax
+	SWITCH_TO_KERNEL_CR3 scratch_reg=%rax
+	popq	%rax
+
+	movq	PER_CPU_VAR(cpu_current_top_of_stack), %rsp
+```
+
+**i386 内核：** `arch/x86/entry/entry_32.S` 中 `PER_CPU_VAR(cpu_current_top_of_stack)`（如约 1156、1220 行）。
+
+**与返回用户态的衔接：** 进内核时读 **`cpu_current_top_of_stack`**；返回前常先 **`movq … TSS_sp0, %rsp`** 切到 trampoline（第 8.2 节），再 `SYSRET`/`IRET`。
+
+**C 侧读 `cpu_current_top_of_stack`：** `current_top_of_stack()`：
+
+```546:557:arch/x86/include/asm/processor.h
+static __always_inline unsigned long current_top_of_stack(void)
+{
+	/*
+	 *  We can't read directly from tss.sp0: sp0 on x86_32 is special in
+	 *  and around vm86 mode and sp0 on x86_64 is special because of the
+	 *  entry trampoline.
+	 */
+	if (IS_ENABLED(CONFIG_USE_X86_SEG_SUPPORT))
+		return this_cpu_read_const(const_cpu_current_top_of_stack);
+
+	return this_cpu_read_stable(cpu_current_top_of_stack);
+}
+```
 
 ---
 
 ## 10. 文档说明
 
-- 本文仅作内核阅读索引与概念对齐，**具体行为以当前配置（`CONFIG_XEN_PV`、`CONFIG_X86_FRED`、`CONFIG_VMAP_STACK` 等）下的源码为准**。
-- 若升级内核版本，请以 `grep` / 阅读上述路径为准核对行号与条件编译分支。
+- 本文仅作内核阅读索引与概念对齐，**具体行为以当前配置（`CONFIG_XEN_PV`、`CONFIG_X86_FRED`、`CONFIG_VMAP_STACK`、`CONFIG_STACKPROTECTOR` 等）下的源码为准**。
+- 文中 **行号均按本仓库当前文件** 校对；换分支或版本后请以实际文件为准。
