@@ -9,6 +9,7 @@
 > - **[X86_MEMORY_MANAGEMENT_THEORY.md](X86_MEMORY_MANAGEMENT_THEORY.md)** - x86-64 分页硬件机制（4级页表、TLB、MMU）
 > - **[LINUX_MEMORY_MANAGEMENT_EVOLUTION.md](LINUX_MEMORY_MANAGEMENT_EVOLUTION.md)** - 内核启动过程的内存管理演化
 > - **[LINUX_USERSPACE_MEMORY_GUIDE.md](LINUX_USERSPACE_MEMORY_GUIDE.md)** - 用户空间内存模型
+> - **[LINUX_TASK_MM_THREAD_STRUCTS.md](LINUX_TASK_MM_THREAD_STRUCTS.md)** - `task_struct` / `mm_struct` / `thread_struct` 组织关系
 
 ## 概述
 
@@ -31,6 +32,138 @@
 - Linux Kernel Source Code (v6.x)
   - `/Users/weli/works/linux/arch/x86/mm/fault.c` - 缺页异常处理
   - `/Users/weli/works/linux/mm/memory.c` - 内存管理核心函数
+  - `include/linux/sched.h` — `struct task_struct`（含内嵌 `thread`）
+  - `include/linux/mm_types.h` — `struct mm_struct`、`struct vm_area_struct`
+
+## `task_struct` 与 `thread_struct`：和缺页有什么关系
+
+Linux **没有**单独的 `struct process`；**用户态的一条线程**在内核里通常对应 **一个 `struct task_struct`**。缺页路径里首先要分清：**谁管页表与 VMA，谁只管 CPU/架构现场**。
+
+| 对象 | 在内核里的位置 | 与缺页（Demand Paging）的关系 |
+|------|----------------|------------------------------|
+| **`task_struct`** | 调度实体；`current` 即指向当前 CPU 上正在跑的 **`task_struct *`** | `do_user_addr_fault` 里 `tsk = current`，用 **`tsk->mm`** 拿到 **`mm_struct`**，再 **`lock_mm_and_find_vma` / `handle_mm_fault`**——**缺页处理围绕 `mm` 与 `VMA` 展开** |
+| **`thread_struct`** | **`task_struct` 内嵌成员** `thread`（类型 `struct thread_struct`），布局在 **`arch/.../processor.h`** 等 | 保存 **x86 等架构的 per-task 寄存器、内核栈指针等**；**不**承载用户地址空间的页表根、**不是** `pgd`/`mmap` 的存放处 |
+
+**不要混的两件事：**（1）**调度/上下文切换**会碰 `task_struct`（含 `thread`）；（2）**用户虚拟地址缺页**主要碰 **`mm_struct`（页表、`mmap`）** 与 **`vm_area_struct`**。`thread_struct` 名字里带 “thread”，但**不是**「页表线程」或「内存线程」的意思。
+
+### 图：`task_struct` 内嵌 `thread`，`mm` 指向地址空间
+
+```mermaid
+flowchart TB
+  subgraph TS["struct task_struct（一个 task = 一条可调度的线程）"]
+    direction TB
+    STK["void *stack 等"]
+    MMP["struct mm_struct *mm"]
+    TH["struct thread_struct thread\n（内嵌，非指针）"]
+  end
+
+  MM["mm_struct\npgd / mmap / 用户页表"]
+  THX["架构现场\n见 arch/.../processor.h"]
+
+  MMP --> MM
+  TH -.-> THX
+```
+
+同一进程的多条用户线程：**多个 `task_struct`**，通常 **`mm` 指向同一个 `mm_struct`**（共享地址空间），**每条线程仍各自一份内嵌 `thread_struct`**。
+
+```mermaid
+flowchart LR
+  T1["task_struct #1"]
+  T2["task_struct #2"]
+  MM["mm_struct\n共享"]
+  T1 --> MM
+  T2 --> MM
+```
+
+### 图：缺页软件链主要经过 `mm`，不经过「从 `thread` 取页表」
+
+```mermaid
+flowchart LR
+  PF["#PF"]
+  CUR["current → task_struct"]
+  MM["tsk->mm → mm_struct"]
+  VMA["find_vma / handle_mm_fault"]
+  PF --> CUR --> MM --> VMA
+```
+
+更完整的结构示意与字段说明见 **[LINUX_TASK_MM_THREAD_STRUCTS.md](LINUX_TASK_MM_THREAD_STRUCTS.md)**。
+
+---
+
+## Mermaid 流程图（与当前内核源码路径对照）
+
+下列 **行号** 以 `/Users/weli/works/linux` 树内文件为准；换分支或版本后请以实际文件为准。
+
+### 自 `#PF` 到 `do_user_addr_fault` / `handle_mm_fault`
+
+```mermaid
+flowchart TD
+  PF["#PF: 向量 14\nCR2 / FRED event data = fault address"]
+  EF["exc_page_fault\nDEFINE_IDTENTRY_RAW_ERRORCODE\narch/x86/mm/fault.c ~1488"]
+  HP["handle_page_fault\n~1464"]
+  K{"fault_in_kernel_space(address)?"}
+  KF["do_kern_addr_fault"]
+  UF["do_user_addr_fault\n~1209"]
+  HM["handle_mm_fault\nmm/memory.c ~6346"]
+
+  PF --> EF --> HP --> K
+  K -->|是| KF
+  K -->|否| UF --> HM
+```
+
+### `__handle_mm_fault`：页表逐级到 PTE（主干）
+
+```mermaid
+flowchart TD
+  H["__handle_mm_fault\nmm/memory.c ~6119"]
+  A["pgd_offset → p4d_alloc → pud_alloc"]
+  B["pmd_alloc\n其间可走 THP / huge 分支"]
+  C["handle_pte_fault\n~6025"]
+
+  H --> A --> B --> C
+```
+
+说明：中间存在 **透明大页（PUD/PMD）**、**swap/migration** 等早退分支，上图只保留「落到 PTE 级」的主干。
+
+### `handle_pte_fault`：缺页类型分支（与 `mm/memory.c` 一致）
+
+```mermaid
+flowchart TD
+  H["handle_pte_fault ~6025"]
+  M{"!vmf->pte ?"}
+  MISS["do_pte_missing ~4246\n匿名 → do_anonymous_page\n否则 → do_fault"]
+  PRES{"pte_present(orig_pte)?"}
+  SWAP["do_swap_page"]
+  NUMA{"pte_protnone &&\nvma_is_accessible?"}
+  NU["do_numa_page"]
+  W{"写 fault / UNSHARE\n且 !pte_write?\n（锁内）"}
+  WP["do_wp_page"]
+  ACC["pte_mkdirty / pte_mkyoung\nptep_set_access_flags\nupdate_mmu_cache_range 等"]
+
+  H --> M
+  M -->|是| MISS
+  M -->|否| PRES
+  PRES -->|否| SWAP
+  PRES -->|是| NUMA
+  NUMA -->|是| NU
+  NUMA -->|否| W
+  W -->|是| WP
+  W -->|否| ACC
+```
+
+`do_pte_missing` 内分支：`vma_is_anonymous(vma)` → **`do_anonymous_page`**，否则 **`do_fault`**（`mm/memory.c` ~4246–4251）。  
+**`NUMA` 为否**之后，源码先 **`spin_lock(vmf->ptl)`** 再比对 `pte_same`、处理写保护与 **`do_wp_page`**；上图把锁内逻辑收成节点 **`W`**。另：**`!pte_present`** 路径上还有 **PTE marker**、锁内 **`pte_same` 重试** 等，已省略。
+
+### `do_user_addr_fault` → `handle_mm_fault`（简图）
+
+```mermaid
+flowchart LR
+  U["do_user_addr_fault:\nmm / VMA / access_error"]
+  H["handle_mm_fault(vma, addr, flags, regs)"]
+  U --> H
+```
+
+同文件内对用户路径可先走 **`lock_vma_under_rcu` + `FAULT_FLAG_VMA_LOCK`**（~1327 起），失败再 **`lock_mm_and_find_vma`**（~1358）；上图不展开锁与重试。
 
 ---
 
@@ -100,8 +233,9 @@ CPU首先在TLB（页表缓存）中查找虚拟地址到物理地址的映射�
 2. 跳转到异常处理入口：`asm_exc_page_fault`
 
 相关代码位置：
-- 异常处理入口定义在 `arch/x86/entry/entry_64.S` 或类似位置
-- 最终调用到 `arch/x86/mm/fault.c` 中的处理函数
+- **C 侧入口**：`arch/x86/mm/fault.c` 中 **`DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)`**（约 L1488 起：读故障地址、`irqentry_enter` 后调用 **`handle_page_fault()`**）
+- **用户地址缺页**：同文件 **`do_user_addr_fault()`**（约 L1209 起）→ **`handle_mm_fault()`**（`mm/memory.c`）
+- 汇编仅参与 IDT/向量公共跳板（由 **`idtentry`** 等宏生成，具体以 `arch/x86` 下构建结果为准），**不要**再假定单独在 `entry_64.S` 里手写完整 `asm_exc_page_fault` 主体
 
 > **详细的硬件触发机制见**：[X86_EXCEPTION_HARDWARE_TRIGGER.md](X86_EXCEPTION_HARDWARE_TRIGGER.md)
 
@@ -413,7 +547,7 @@ CPU重新执行 `movb (%rax), %bl`：
     ↓
 CPU硬件: TLB查找失败 → 页表遍历 → PTE无效 → 触发#PF异常
     ↓
-arch/x86/entry/entry_64.S: asm_exc_page_fault
+arch/x86/mm/fault.c: exc_page_fault → handle_page_fault
     ↓
 arch/x86/mm/fault.c: do_user_addr_fault()
     ↓
@@ -810,7 +944,7 @@ buf[0] = 'A'  ← 首次访问
 
 ---
 
-**文档版本**：1.0
-**最后更新**：2026-02-13
+**文档版本**：1.2
+**最后更新**：2026-04-04
 **基于内核版本**：Linux v6.x
 **维护者**：Linux 内核启动文档项目
