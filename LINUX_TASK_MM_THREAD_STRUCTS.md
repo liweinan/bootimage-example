@@ -96,3 +96,31 @@ flowchart TB
 | 打开的文件、信号等 | `files_struct`、`signal_struct` 等，多在同一线程组内共享 |
 
 更细的字段与 `clone()` 标志位有关；读 **`kernel/fork.c`** / **`copy_process()`** 可追踪新建线程时哪些结构是 `dup`、哪些是共享。
+
+---
+
+## 与缺页处理（Page Fault）的关系
+
+用户态访问未映射页触发 **`#PF`** 时，内核在 **`arch/x86/mm/fault.c`** 的 **`do_user_addr_fault()`** 等路径里用 **`current`**（即 **`struct task_struct *`**）取 **`tsk->mm`**，再按故障地址找 **`VMA`**、进入 **`handle_mm_fault()`**（**`mm/memory.c`**）。这里要分清：**页表与 VMA 挂在 `mm_struct` 上**，不是挂在「`thread` 这个名字」所指的 **`thread_struct`** 里。
+
+| 对象 | 在内核里的位置 | 与缺页（Demand Paging）的关系 |
+|------|----------------|------------------------------|
+| **`task_struct`** | 调度实体；`current` 即 **`task_struct *`** | `do_user_addr_fault` 里 **`tsk = current`**，用 **`tsk->mm`** 得到 **`mm_struct`**，再 **`lock_mm_and_find_vma` / `handle_mm_fault`**——**缺页处理围绕 `mm` 与 `VMA` 展开** |
+| **`thread_struct`** | **`task_struct` 内嵌成员** `thread`，布局在 **`arch/.../processor.h`** 等 | 保存 **per-task 架构现场**（寄存器、内核栈指针等）；**不**存放用户地址空间的 **`pgd`** / **`mmap`** |
+
+**不要混的两件事：**（1）**调度 / 上下文切换**会大量碰 **`task_struct`**（含内嵌 **`thread`**）；（2）**用户虚拟地址缺页**主要碰 **`mm_struct`** 与 **`vm_area_struct`**。`thread_struct` 名字里带 “thread”，但**不是**「管用户页表的线程对象」。
+
+**内嵌关系、多线程共享 `mm`** 见上文 **图 1、图 2**。
+
+### 图 4：缺页软件链走 `current->mm`，不从 `thread` 取页表
+
+```mermaid
+flowchart LR
+  PF["#PF"]
+  CUR["current → task_struct"]
+  MM["tsk->mm → mm_struct"]
+  VMA["find_vma / handle_mm_fault"]
+  PF --> CUR --> MM --> VMA
+```
+
+缺页从虚拟地址到 PTE 的完整软件链见 **[LINUX_PAGE_FAULT_DEMAND_PAGING.md](LINUX_PAGE_FAULT_DEMAND_PAGING.md)**。

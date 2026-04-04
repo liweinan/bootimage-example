@@ -32,61 +32,9 @@
 - Linux Kernel Source Code (v6.x)
   - `/Users/weli/works/linux/arch/x86/mm/fault.c` - 缺页异常处理
   - `/Users/weli/works/linux/mm/memory.c` - 内存管理核心函数
-  - `include/linux/sched.h` — `struct task_struct`（含内嵌 `thread`）
   - `include/linux/mm_types.h` — `struct mm_struct`、`struct vm_area_struct`
 
-## `task_struct` 与 `thread_struct`：和缺页有什么关系
-
-Linux **没有**单独的 `struct process`；**用户态的一条线程**在内核里通常对应 **一个 `struct task_struct`**。缺页路径里首先要分清：**谁管页表与 VMA，谁只管 CPU/架构现场**。
-
-| 对象 | 在内核里的位置 | 与缺页（Demand Paging）的关系 |
-|------|----------------|------------------------------|
-| **`task_struct`** | 调度实体；`current` 即指向当前 CPU 上正在跑的 **`task_struct *`** | `do_user_addr_fault` 里 `tsk = current`，用 **`tsk->mm`** 拿到 **`mm_struct`**，再 **`lock_mm_and_find_vma` / `handle_mm_fault`**——**缺页处理围绕 `mm` 与 `VMA` 展开** |
-| **`thread_struct`** | **`task_struct` 内嵌成员** `thread`（类型 `struct thread_struct`），布局在 **`arch/.../processor.h`** 等 | 保存 **x86 等架构的 per-task 寄存器、内核栈指针等**；**不**承载用户地址空间的页表根、**不是** `pgd`/`mmap` 的存放处 |
-
-**不要混的两件事：**（1）**调度/上下文切换**会碰 `task_struct`（含 `thread`）；（2）**用户虚拟地址缺页**主要碰 **`mm_struct`（页表、`mmap`）** 与 **`vm_area_struct`**。`thread_struct` 名字里带 “thread”，但**不是**「页表线程」或「内存线程」的意思。
-
-### 图：`task_struct` 内嵌 `thread`，`mm` 指向地址空间
-
-```mermaid
-flowchart TB
-  subgraph TS["struct task_struct（一个 task = 一条可调度的线程）"]
-    direction TB
-    STK["void *stack 等"]
-    MMP["struct mm_struct *mm"]
-    TH["struct thread_struct thread\n（内嵌，非指针）"]
-  end
-
-  MM["mm_struct\npgd / mmap / 用户页表"]
-  THX["架构现场\n见 arch/.../processor.h"]
-
-  MMP --> MM
-  TH -.-> THX
-```
-
-同一进程的多条用户线程：**多个 `task_struct`**，通常 **`mm` 指向同一个 `mm_struct`**（共享地址空间），**每条线程仍各自一份内嵌 `thread_struct`**。
-
-```mermaid
-flowchart LR
-  T1["task_struct #1"]
-  T2["task_struct #2"]
-  MM["mm_struct\n共享"]
-  T1 --> MM
-  T2 --> MM
-```
-
-### 图：缺页软件链主要经过 `mm`，不经过「从 `thread` 取页表」
-
-```mermaid
-flowchart LR
-  PF["#PF"]
-  CUR["current → task_struct"]
-  MM["tsk->mm → mm_struct"]
-  VMA["find_vma / handle_mm_fault"]
-  PF --> CUR --> MM --> VMA
-```
-
-更完整的结构示意与字段说明见 **[LINUX_TASK_MM_THREAD_STRUCTS.md](LINUX_TASK_MM_THREAD_STRUCTS.md)**。
+**`task_struct` / 内嵌 `thread_struct` 与 `mm` 在缺页路径中的分工**（含对照表与示意图）见 **[LINUX_TASK_MM_THREAD_STRUCTS.md](LINUX_TASK_MM_THREAD_STRUCTS.md)** 中「**与缺页处理的关系**」一节；本文只跟 **`handle_mm_fault` / VMA / PTE** 的软件链。
 
 ---
 
@@ -944,7 +892,7 @@ buf[0] = 'A'  ← 首次访问
 
 ---
 
-**文档版本**：1.2
+**文档版本**：1.3
 **最后更新**：2026-04-04
 **基于内核版本**：Linux v6.x
 **维护者**：Linux 内核启动文档项目
