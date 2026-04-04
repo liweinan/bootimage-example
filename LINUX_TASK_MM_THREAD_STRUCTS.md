@@ -6,6 +6,57 @@
 
 ---
 
+## `task_struct` 与 `thread_struct` 的关系
+
+二者是 **组合（composition）** 关系：**`thread_struct` 不是**与 **`task_struct` 平级的另一个「调度对象」**，而是 **`task_struct` 的成员**：在通用头文件里写作 **`struct thread_struct thread;`**（见 **`include/linux/sched.h`** 中 `struct task_struct` 定义）。
+
+- **`struct thread_struct` 的字段布局**在 **架构头文件**里，例如 x86 为 **`arch/x86/include/asm/processor.h`** 中的 **`struct thread_struct { ... }`**；随架构变化，**不要**把它当成与 `task_struct` 无关的第三张全局表。
+- **生命周期**：与 **所在 `task_struct`** 绑定；释放/回收 **`task_struct`** 时，**内嵌的 `thread` 一并结束**，不存在「单独 `kfree(thread_struct)`」这种常规路径。
+- **分工**：**`task_struct`** = 调度器、信号、`mm`/`files` 等子系统操作的 **task**；**`thread_struct`** = **该 task 的体系结构私有状态**（寄存器片段、内核栈相关字段等），**不**承担「再表示一个可调度实体」的含义。
+
+### 关系图 A：`.thread` 内嵌在 `task_struct` 里（非指针）
+
+```mermaid
+flowchart TB
+  subgraph TS["struct task_struct（每个可调度的 task 一份）"]
+    direction TB
+    head["… mm*、stack*、sched …"]
+    thr["struct thread_struct thread\n成员名 .thread，随 task 布局内嵌"]
+    tail["… files*、signal* …"]
+  end
+
+  thr -.->|字段列表见| ARCH["arch/<cpu>/include/asm/processor.h"]
+```
+
+### 关系图 B：与 `mm` 对比——「指针到外部分对象」vs「内嵌子对象」
+
+```mermaid
+flowchart LR
+  subgraph TSX["struct task_struct 内"]
+    mm["struct mm_struct *mm"]
+    th["struct thread_struct thread\n内嵌值，不是 thread_struct *"]
+  end
+
+  MM["mm_struct\n堆上对象，可被多 task 共享"]
+  mm -->|指针| MM
+```
+
+### 关系图 C：多线程 = 多个 `task_struct`，各自内嵌一份 `thread`
+
+```mermaid
+flowchart LR
+  TA["task_struct #A\n+ 内嵌 thread"]
+  TB["task_struct #B\n+ 内嵌 thread"]
+  MM2["mm_struct\n多线程常共享"]
+
+  TA --> MM2
+  TB --> MM2
+```
+
+**与下文「图 1」的区别**：本节只强调 **`task_struct` ⊃ `thread_struct`** 的**对象关系**；**图 1** 在更大范围上画出 **`mm` / `files` / `signal`** 等指针指向的外部分对象。
+
+---
+
 ## 图 1：单个 `task_struct` 里有什么（内嵌 + 指针）
 
 ```mermaid
@@ -110,7 +161,7 @@ flowchart TB
 
 **不要混的两件事：**（1）**调度 / 上下文切换**会大量碰 **`task_struct`**（含内嵌 **`thread`**）；（2）**用户虚拟地址缺页**主要碰 **`mm_struct`** 与 **`vm_area_struct`**。`thread_struct` 名字里带 “thread”，但**不是**「管用户页表的线程对象」。
 
-**内嵌关系、多线程共享 `mm`** 见上文 **图 1、图 2**。
+**`task_struct` 与 `thread_struct` 谁嵌谁**见上文 **关系图 A/B/C**；**带 `mm`/`files` 的整图**见 **图 1、图 2**。
 
 ### 图 4：缺页软件链走 `current->mm`，不从 `thread` 取页表
 
