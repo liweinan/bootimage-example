@@ -50,6 +50,53 @@
 
 - `arch/x86/kernel/vmlinux.lds.S`：`const_cpu_current_top_of_stack` 与 `cpu_current_top_of_stack` 的别名关系（供 `current_top_of_stack()` 等路径使用，见 `processor.h`）。
 
+### 3.4 写入值的含义：来自「next 的内核栈顶」的虚拟地址
+
+`cpu_current_top_of_stack` 里写入的**数值**表示：**即将在该 CPU 上运行的 `next` 任务的内核栈布局中的「栈顶一侧」虚拟地址**（与 `task_top_of_stack` 的几何定义一致）。该值由架构侧用**固定栈布局**从 `task->stack` **当场宏展开算出**，并不是从别的 per-CPU 变量再拷贝一层。
+
+#### x86_64（`__switch_to`，`arch/x86/kernel/process_64.c`）
+
+```671:672:arch/x86/kernel/process_64.c
+	raw_cpu_write(current_task, next_p);
+	raw_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p));
+```
+
+因此来源就是 `task_top_of_stack(next_p)`。
+
+`task_top_of_stack` 与 `task_pt_regs` 定义在 **`arch/x86/include/asm/processor.h`**（`task_stack_page` 来自 **`include/linux/sched/task_stack.h`**：`task_stack_page(task)` 为 `(task)->stack`）：
+
+```646:653:arch/x86/include/asm/processor.h
+#define task_top_of_stack(task) ((unsigned long)(task_pt_regs(task) + 1))
+
+#define task_pt_regs(task) \
+({									\
+	unsigned long __ptr = (unsigned long)task_stack_page(task);	\
+	__ptr += THREAD_SIZE - TOP_OF_KERNEL_STACK_PADDING;		\
+	((struct pt_regs *)__ptr) - 1;					\
+})
+```
+
+含义：`task_pt_regs(task)` 指向该线程栈末尾附近的 `struct pt_regs`；`task_pt_regs(task) + 1` 为指针算术，指向 **`pt_regs` 对象紧上方** 的地址，即该线程内核栈缓冲区**高地址端**一侧，用作「栈顶」相关的约定地址。`task->stack` 在 **`fork` / `kthread`** 等路径里分配并赋给 `task->stack`（见 **`kernel/fork.c`** 等）。**结论：** 该 per-CPU 值由 **`next` 的 `task->stack` 与 `THREAD_SIZE` / `TOP_OF_KERNEL_STACK_PADDING` 共同决定**，不是从 `thread.sp0` 读入——在 **`CONFIG_X86_64` 下 `struct thread_struct` 根本没有 `sp0` 成员**（仅有 `sp` 等；`sp0` 仅在 **`CONFIG_X86_32`** 分支中存在，见同文件 `thread_struct` 定义）。
+
+#### i386（`__switch_to`，`arch/x86/kernel/process_32.c`）
+
+写的是 **`task_stack_page(next_p) + THREAD_SIZE`**（与 64 位同一思想：指向该线程内核栈缓冲区的上端），见：
+
+```197:200:arch/x86/kernel/process_32.c
+	this_cpu_write(cpu_current_top_of_stack,
+		       (unsigned long)task_stack_page(next_p) +
+		       THREAD_SIZE);
+```
+
+（同函数中 **`update_task_stack`**、`current_task` 的写入顺序与 64 位不同，阅读时注意上下文。）
+
+#### boot 初值与其它写入
+
+- **per-CPU 静态初值**：`TOP_OF_INIT_STACK`（`arch/x86/kernel/cpu/common.c`：`DEFINE_PER_CPU_CACHE_HOT(..., cpu_current_top_of_stack) = TOP_OF_INIT_STACK`）。
+- **仅 32 位、AP 启动路径**：`common_cpu_up()` 里在 **`#ifdef CONFIG_X86_32`** 下执行 `per_cpu(cpu_current_top_of_stack, cpu) = task_top_of_stack(idle)`（`arch/x86/kernel/smpboot.c`）；**x86_64 AP 不经此赋值**（同文件该段在 `#ifdef` 外无对等语句）。
+
+**归纳：** 写入 `cpu_current_top_of_stack` 的值**在语义上**就是当前 CPU 接下来要跑的那个 **`task` 所对应的「内核栈顶一侧」地址**；x86_64 上由 **`task_top_of_stack(next)`** 根据 **`next->stack`** 与线程栈布局计算，**不是**从 **`thread_struct.sp0`** 取得（且 64 位 **`thread_struct` 无 `sp0` 字段**）。
+
 ---
 
 ## 4. TSS（及 FRED）侧：与 RSP0 / 内核入口栈相关的更新
