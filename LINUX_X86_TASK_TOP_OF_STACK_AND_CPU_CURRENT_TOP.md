@@ -53,6 +53,29 @@
 - `__ptr = stack + THREAD_SIZE - TOP_OF_KERNEL_STACK_PADDING`：指向「栈顶一侧」保留区边界（**`TOP_OF_KERNEL_STACK_PADDING`** 见 §2.3）。
 - `((struct pt_regs *)__ptr) - 1`：指针算术减去 **一整份** `sizeof(struct pt_regs)`，得到 **`struct pt_regs *`**，指向 **落在栈内的那份 `pt_regs` 的最低地址**（即该结构在内存中的 **起始**）。
 
+**位置关系一览**（**上为高地址、下为低地址**；`push` 向低址生长）：
+
+```mermaid
+flowchart TB
+  subgraph ks["单线程内核栈窗口（示意，尺寸 = THREAD_SIZE）"]
+    direction TB
+    hi["stack + THREAD_SIZE 一带（缓冲区高址端）"]
+    pad["TOP_OF_KERNEL_STACK_PADDING 保留区（典型 x86_64 无 FRED 时为 0 字节）"]
+    tos["task_top_of_stack = task_pt_regs + 1<br/>syscall 入口 RSP 先置于此，再向下 push 填 pt_regs"]
+    pr["struct pt_regs 区间 [task_pt_regs, task_top_of_stack)"]
+    tpr["task_pt_regs(task) → pt_regs 起始（低址端）"]
+    mid["中间：调用链、局部变量等"]
+    base["task->stack = task_stack_page(task)（栈底，低址）"]
+  end
+
+  hi --- pad
+  pad --- tos
+  tos --- pr
+  pr --- tpr
+  tpr --- mid
+  mid --- base
+```
+
 因此 **`task_top_of_stack(task)`** = **`(unsigned long)(task_pt_regs(task) + 1)`** = **`task_pt_regs` 所指结构末尾之后的首个地址**（仍是内核虚拟地址，**不是**「用户栈顶」）。在 **启用 `CONFIG_FRAME_POINTER`** 的 x86_64 构建中，它与 **`arch/x86/include/asm/frame.h`** 里 **`encode_frame_pointer(childregs)`** 的返回值 **`(unsigned long)childregs + 1`** **同构**：都是「`pt_regs` 上沿」的编码边界，供 unwinder / 入口路径识别；未启用帧指针时 **`encode_frame_pointer`** 退化为恒 **0**，但 **`task_top_of_stack` 的数值关系不变**。
 
 **与 `entry_SYSCALL_64` 的衔接**（**`arch/x86/entry/entry_64.S`**）：`movq PER_CPU_VAR(cpu_current_top_of_stack), %rsp` 把 RSP 置为该边界后，注释 **「Construct struct pt_regs on stack」** 下的连续 **`pushq`** 从该边界 **向低地址** 填充 **`struct pt_regs`** 各字段——即 **硬件/汇编在 syscall 入口「从上往下」搭出与 `task_pt_regs(current)` 布局一致的寄存器帧**。未发生调度时 **`cpu_current_top_of_stack == task_top_of_stack(current)`**，故入口看到的 RSP 与 **`copy_thread()`** 里为子进程预留的 **`childregs = task_pt_regs(p)`** 对齐方式一致。
@@ -186,6 +209,6 @@ SYM_CODE_START(entry_SYSCALL_64)
 - 配置 **`CONFIG_XEN_PV`、`CONFIG_X86_FRED`、`CONFIG_PARAVIRT_*`** 会改变 **`update_task_stack` / `load_sp0`** 分支；细节以你树内 **`#ifdef`** 为准。
 - **行号**随内核版本漂移；换分支后请用 **`rg`** / 直接打开文件核对。
 
-**文档版本**：1.1  
+**文档版本**：1.2  
 **最后更新**：2026-04-04  
 **校对内核树**：`/Users/weli/works/linux`
