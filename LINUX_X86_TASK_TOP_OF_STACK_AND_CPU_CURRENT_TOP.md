@@ -37,14 +37,55 @@
 })
 ```
 
-**`task_stack_page(task)`** 在 **`include/linux/sched/task_stack.h`**：`#define task_stack_page(task) ((void *)(task)->stack)`。
+**`task_stack_page(task)`** 在 **`include/linux/sched/task_stack.h`**：`#define task_stack_page(task) ((void *)(task)->stack)`（**`CONFIG_THREAD_INFO_IN_TASK`** 下 `task->stack` 即该 task 的 **内核栈缓冲区基址**，与 `task_struct` 本体分离）。
 
 含义：
 
 - **没有**名为 `task_top_of_stack` 的全局存储单元被单独赋值；每次在 C 里写 **`task_top_of_stack(next)`** 都是 **按当前 `task` 当场宏展开**。
-- 数值由 **`task->stack`** 与 **`THREAD_SIZE` / `TOP_OF_KERNEL_STACK_PADDING`** 的几何布局 **唯一确定**；**`task->stack`** 在线程创建路径（如 **`copy_process()`** / **`alloc_thread_stack_node()`**，**`kernel/fork.c`**）里分配并赋给 **`task->stack`** 后，对该 task 而言结果通常 **固定**（栈不迁移的前提下）。
+- 数值由 **`task->stack`** 与 **`THREAD_SIZE` / `TOP_OF_KERNEL_STACK_PADDING`** 的几何布局 **唯一确定**；**`task->stack`** 在线程创建路径（**`dup_task_struct()`** → **`alloc_thread_stack_node()`**，**`kernel/fork.c`**）里分配并赋给 **`task->stack`** 后，对该 task 而言结果通常 **固定**（栈不迁移、未做 `vmalloc` 迁移等特殊路径的前提下）。
 
-**`TOP_OF_INIT_STACK`** 与 **`init_stack`** 同文件，用于 boot 期 per-CPU 初值（见 §4）。
+### 2.1 x86_64 栈几何：`task_pt_regs` 与 `task_top_of_stack` 谁高谁低
+
+内核栈 **向低地址增长**。设 **`stack = (unsigned long)task_stack_page(task)`**，则 **`stack .. stack+THREAD_SIZE-1`** 为该线程内核栈窗口。
+
+宏 **`task_pt_regs`** 先把指针挪到 **接近栈区高址端** 再回退一个 **`struct pt_regs`**：
+
+- `__ptr = stack + THREAD_SIZE - TOP_OF_KERNEL_STACK_PADDING`：指向「栈顶一侧」保留区边界（**`TOP_OF_KERNEL_STACK_PADDING`** 见 §2.3）。
+- `((struct pt_regs *)__ptr) - 1`：指针算术减去 **一整份** `sizeof(struct pt_regs)`，得到 **`struct pt_regs *`**，指向 **落在栈内的那份 `pt_regs` 的最低地址**（即该结构在内存中的 **起始**）。
+
+因此 **`task_top_of_stack(task)`** = **`(unsigned long)(task_pt_regs(task) + 1)`** = **`task_pt_regs` 所指结构末尾之后的首个地址**（仍是内核虚拟地址，**不是**「用户栈顶」）。在 **启用 `CONFIG_FRAME_POINTER`** 的 x86_64 构建中，它与 **`arch/x86/include/asm/frame.h`** 里 **`encode_frame_pointer(childregs)`** 的返回值 **`(unsigned long)childregs + 1`** **同构**：都是「`pt_regs` 上沿」的编码边界，供 unwinder / 入口路径识别；未启用帧指针时 **`encode_frame_pointer`** 退化为恒 **0**，但 **`task_top_of_stack` 的数值关系不变**。
+
+**与 `entry_SYSCALL_64` 的衔接**（**`arch/x86/entry/entry_64.S`**）：`movq PER_CPU_VAR(cpu_current_top_of_stack), %rsp` 把 RSP 置为该边界后，注释 **「Construct struct pt_regs on stack」** 下的连续 **`pushq`** 从该边界 **向低地址** 填充 **`struct pt_regs`** 各字段——即 **硬件/汇编在 syscall 入口「从上往下」搭出与 `task_pt_regs(current)` 布局一致的寄存器帧**。未发生调度时 **`cpu_current_top_of_stack == task_top_of_stack(current)`**，故入口看到的 RSP 与 **`copy_thread()`** 里为子进程预留的 **`childregs = task_pt_regs(p)`** 对齐方式一致。
+
+### 2.2 `copy_thread()`、`fork_frame` 与 `thread.sp`
+
+**`arch/x86/kernel/process.c`** 中 **`copy_thread()`**（x86_64）：
+
+- **`childregs = task_pt_regs(p)`**。
+- **`fork_frame = container_of(childregs, struct fork_frame, regs)`**（**`arch/x86/include/asm/switch_to.h`**：`struct fork_frame { struct inactive_task_frame frame; struct pt_regs regs; }`）。
+- **`p->thread.sp = (unsigned long)fork_frame`**：休眠任务被切换回来时，**`__switch_to_asm`** 依赖的 **内核栈帧链** 从 **`inactive_task_frame`** 起，与 **`pt_regs`** 在 **同一段 `THREAD_SIZE` 缓冲区** 内前后排列；**`task_pt_regs(p)`** 仍指向 **`fork_frame->regs`** 的起始地址。
+
+以上说明：**`task_top_of_stack`** 描述的是 **「syscall/异常帧 `pt_regs` 区段的上边界」**；**`thread.sp`** 描述的是 **调度切换用 `inactive_task_frame` 当前锚在哪里**——二者 **共用同一内核栈对象**，职责不同，**不要**把 **`thread.sp`** 与 **`task_top_of_stack`** 混成一个字段。
+
+### 2.3 `TOP_OF_KERNEL_STACK_PADDING` 如何进入宏
+
+**`arch/x86/include/asm/thread_info.h`** 定义 **`TOP_OF_KERNEL_STACK_PADDING`**：
+
+- **典型 x86_64、未开 `CONFIG_X86_FRED`**：**`0`**——`task_pt_regs` 的「顶」紧贴 **`stack + THREAD_SIZE`** 一侧（仍受 **`struct pt_regs`** 固定大小约束）。
+- **`CONFIG_X86_FRED`**：**`(2 * 8)`**——为将来 FRED 帧长变化预留 **16 字节** 间隙（同文件注释）。
+- **i386**：历史上有 **8/16 字节** 间隙（NMI/SYSENTER/vm86 等边角）；**仅影响 `task_pt_regs` 相对栈底的偏移**，不改变 **`task_top_of_stack = task_pt_regs + 1`** 这一关系。
+
+换内核配置时，若对比 **`task_top_of_stack` 的数值**，应连 **`TOP_OF_KERNEL_STACK_PADDING`** 一起看。
+
+### 2.4 `task->stack` 从哪来、何时变
+
+**`kernel/fork.c`**：**`dup_task_struct()`** 在 **`alloc_thread_stack_node()`** 成功后执行 **`tsk->stack = stack`**。分配路径随配置可能是 **`__vmalloc_node(THREAD_SIZE, …)`（`CONFIG_VMAP_STACK`）**、**`alloc_pages(THREAD_SIZE_ORDER)`** 或 **`kmem` 专用 cache**，但语义一致：**`task->stack` 指向该线程 **THREAD_SIZE** 内核栈的 **低址端**。只要该指针不变且栈体不迁移，**`task_top_of_stack(task)` 的计算结果不变**。
+
+### 2.5 与「是否在 thread stack 上」判断一致
+
+**`arch/x86/include/asm/processor.h`**：**`on_thread_stack()`** 用 **`current_top_of_stack()`**（读 **`cpu_current_top_of_stack`** 或 const 别名）与当前 RSP 的差是否小于 **`THREAD_SIZE`** 判断当前是否落在本线程内核栈窗口内。注释写明 **不能** 直接拿 **`TSS.sp0`** 当「当前线程栈顶」——与本文 **§1**、**`cpu_current_top_of_stack`** 分工一致。
+
+**`TOP_OF_INIT_STACK`** 与 **`init_stack`** 同 **`processor.h`**，用于 boot 期 per-CPU **`cpu_current_top_of_stack`** 初值（见 §4）。
 
 ---
 
@@ -145,6 +186,6 @@ SYM_CODE_START(entry_SYSCALL_64)
 - 配置 **`CONFIG_XEN_PV`、`CONFIG_X86_FRED`、`CONFIG_PARAVIRT_*`** 会改变 **`update_task_stack` / `load_sp0`** 分支；细节以你树内 **`#ifdef`** 为准。
 - **行号**随内核版本漂移；换分支后请用 **`rg`** / 直接打开文件核对。
 
-**文档版本**：1.0  
+**文档版本**：1.1  
 **最后更新**：2026-04-04  
 **校对内核树**：`/Users/weli/works/linux`
