@@ -5,7 +5,7 @@
 > **相关文档**：
 > - [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) - 内核启动流程（包含 identity mapping 的创建）
 > - [X86_NEAR_VS_LONG_JUMP.md](X86_NEAR_VS_LONG_JUMP.md) - Near/Long jump 区别（lret 从 startup_32 跳到 startup_64 时使用 identity mapping）
-> - [X86_64BIT_SEGMENT_LIMIT.md](X86_64BIT_SEGMENT_LIMIT.md) - 64位模式下的段处理
+> - [X86_64_SEGMENT_LIMIT.md](X86_64_SEGMENT_LIMIT.md) - 64位模式下的段处理
 > - [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) - 为什么需要重定位
 
 ---
@@ -980,7 +980,7 @@ Direct Mapping:
 
 - [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) - Linux 内核启动流程详解
 - [WHY_RELOCATE_COMPRESSED_KERNEL.md](WHY_RELOCATE_COMPRESSED_KERNEL.md) - 为什么需要重定位压缩内核
-- [X86_64BIT_SEGMENT_LIMIT.md](X86_64BIT_SEGMENT_LIMIT.md) - 64位模式下的段处理
+- [X86_64_SEGMENT_LIMIT.md](X86_64_SEGMENT_LIMIT.md) - 64位模式下的段处理
 - [GRUB_RELOCATOR.md](GRUB_RELOCATOR.md) - GRUB relocator 机制
 
 ## 参考资料
