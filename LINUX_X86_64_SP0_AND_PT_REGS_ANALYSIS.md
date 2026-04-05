@@ -3,22 +3,16 @@
 本文基于 `linux` 源码目录（`/Users/weli/works/linux`）做静态代码追踪，聚焦三个问题：
 
 1. CPU 何时读取 `TSS.sp0`
-2. `cpu_current_top_of_stack` 如何得到当前进程内核栈位置
+2. `cpu_current_top_of_stack` 如何得到当前进程内核栈位置（**详细推导已合并至专文，见下**）
 3. `pt_regs` 何时、如何被填充
+
+**专文（与 [LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md](LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md) 互补）：** **[LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md](LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md)** — `task_top_of_stack` 宏、`cpu_current_top_of_stack` 谁写谁读、调度链、`entry_SYSCALL_64` 节选、与 `sp0` 分工。
 
 ---
 
 ## 1. 先结论：x86-64 原生路径里，`sp0` 与“当前进程内核栈顶”是两套机制
 
-在现代 Linux x86-64（非 Xen PV 特殊路径）中：
-
-- `TSS.sp0` 主要用于 **entry trampoline stack / entry stack** 相关切换，不等价于“当前 task 线程栈顶”
-- “当前 task 的内核栈顶”由每 CPU 变量 `cpu_current_top_of_stack` 维护
-- 该 per-cpu 变量在上下文切换时（`__switch_to`）更新为 `task_top_of_stack(next_p)`
-
-关键注释（`arch/x86/include/asm/switch_to.h`）已直接写明：
-
-- `sp0 always points to the entry trampoline stack, which is constant`
+**完整表述与注释出处**见专文 **§1**。此处仅保留一句：**`cpu_current_top_of_stack` 在 `__switch_to` 写成 `task_top_of_stack(next_p)`**；**原生 x86_64 的 `TSS.sp0`** 多指 **entry trampoline**，**不是**「每次调度跟随 task 的线程栈顶」的通用模型（**`switch_to.h`** 注释：`sp0 always points to the entry trampoline stack, which is constant`）。
 
 ---
 
@@ -51,31 +45,7 @@ Linux 代码中能看到的是“谁写 `sp0`”：
 
 ## 3. `cpu_current_top_of_stack` 如何知道“当前进程 kernel stack”
 
-### 3.1 在调度切换里写入
-
-`__switch_to()` 中执行：
-
-- `raw_cpu_write(current_task, next_p);`
-- `raw_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p));`
-
-文件：`arch/x86/kernel/process_64.c`
-
-也就是：调度器已经选定 `next_p`，架构切换代码直接把“下一任务的栈顶”写到本 CPU 的 per-cpu 变量。
-
-### 3.2 `task_top_of_stack(next_p)` 从哪里来
-
-定义在 `arch/x86/include/asm/processor.h`：
-
-- `task_top_of_stack(task) ((unsigned long)(task_pt_regs(task) + 1))`
-- `task_pt_regs(task)` 由 `task_stack_page(task)` + `THREAD_SIZE` - padding 推导
-
-`task_stack_page(task)` 在 `include/linux/sched/task_stack.h` 中返回 `task->stack`。
-
-因此数据来源链路是：
-
-`task->stack` -> `task_pt_regs(task)` -> `task_top_of_stack(task)` -> `cpu_current_top_of_stack`（per-cpu）
-
-这是一条纯软件维护链路，不依赖“读 TSS.sp0”来推断当前任务栈。
+**（正文已迁至专文）** 见 **[LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md](LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md) §2–§6**（`task_top_of_stack` 宏、`task->stack`、`__switch_to` 写入、`schedule` 链）。
 
 ---
 
@@ -150,12 +120,7 @@ Linux 代码中能看到的是“谁写 `sp0`”：
 
 ## 5. 为什么会看到 `sp0` 与 `cpu_current_top_of_stack` 同时存在
 
-因为它们服务不同入口阶段：
-
-- `cpu_current_top_of_stack`：SYSCALL 等路径快速切到“当前 task 线程栈”
-- `sp0`：硬件特权切换与 trampoline/entry 场景依赖的入口栈锚点
-
-在 `entry_64.S` 里还能看到返回路径临近 `SYSRET` 时切到 `TSS_sp0` 的片段，体现 entry trampoline 栈的用途。
+**分角色说明**见专文 **§1**；**返回用户态前切 `TSS_sp0`** 与 **syscall 入口读 `cpu_current_top_of_stack`** 的对照见 [LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md](LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md) **§6.2**、**§7.2**。
 
 ---
 
@@ -172,13 +137,5 @@ Linux 代码中能看到的是“谁写 `sp0`”：
 
 ## 7. 对“sp0 里是不是保存 process kernel stack”的精确定义
 
-在 Linux x86-64 当前设计语境里，更准确的说法是：
-
-- “当前进程（task）的内核栈顶”由 `cpu_current_top_of_stack` 维护并在 `__switch_to` 更新
-- `TSS.sp0` 在原生路径不作为“每次调度都跟随 task 变化的线程栈顶”使用；其主要角色是 entry/trampoline 栈相关机制
-
-这样就能解释：
-
-- 为什么 SYSCALL 入口直接读 `cpu_current_top_of_stack`
-- 为什么代码注释明确写 `sp0` 指向 constant entry trampoline stack
+与 **§1** 同旨；完整条目见专文 **[LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md](LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md) §1**。
 

@@ -4,6 +4,67 @@
 
 ---
 
+## 阅读导读
+
+面向：**已能区分用户态/内核态、大致知道 TSS/IDT/syscall 名词**，希望把 **Intel 手册中的 SYSCALL 行为** 与 **Linux x86-64 入口代码** 对齐阅读的读者。
+
+**栈顶 / `task_top_of_stack` / `cpu_current_top_of_stack`** 与正文 **§1、§2** 重叠部分，可优先读 **[LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md](LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md)**，以免重复。
+
+### 阅读目标自查
+
+读完后应能独立回答：
+
+1. **特权级切换时**，内核栈顶信息来自 **TSS.sp0** 还是 **per-CPU 的 `cpu_current_top_of_stack`**，各自在什么路径被使用。
+2. **`SYSCALL` 指令**在硬件上保存/改写了哪些状态，与 **`pt_regs`** 里哪些字段对应。
+3. **设备中断**与 **CPU 异常**路径上，`pt_regs` 是 **硬件 IRET 帧** 加 **汇编补齐** 如何得到；**`sync_regs`** 在什么叙事里出现。
+4. **`entry_SYSCALL_64`** 与 **`asm_common_interrupt` / `asm_exc_*`** 在「谁压栈、谁切栈」上的差异。
+
+若以上任一条仍模糊，按下面顺序重读正文对应节。
+
+### 建议阅读顺序（正文章节）
+
+| 轮次 | 章节 | 侧重点 |
+|------|------|--------|
+| 第一轮 | §1、§2（或先读 [LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md](LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md)） | 先建立 **sp0 ≠ 当前线程内核栈顶** 的心智模型；记住 **`cpu_current_top_of_stack` 在 `__switch_to` 更新**（专文有完整宏与调度链）。 |
+| 第一轮 | §3 | **`pt_regs` 字段名是 C ABI**（`ax`/`ip`/`flags`），读内核与读 Intel 助记符时不要混用。 |
+| 第二轮 | §4、§8.3 | **SYSCALL**：硬件只保证 RCX/R11 等；**完整 `pt_regs` 靠 `entry_SYSCALL_64`**；对照 SDM（见本阅读导读 **「与 Intel SDM 对照」**）。 |
+| 第二轮 | §5 | 需要对照 `calling.h` 时读：**通用寄存器压栈顺序与 `struct pt_regs` 布局一致**。 |
+| 第三轮 | §6、§8.1–8.2（外部 IRQ 相关行）、§8 末「IRQ 源码路径」小条 | **IDT → `irq_entries_start` → `asm_common_interrupt`**；**`orig_ax` 与向量号** 的约定。 |
+| 第三轮 | §7 | **异常与 CR2 / `regs->ip` 分工**（#PF）；**`error_get_trap_addr`** 叙事（#DE）。 |
+| 第四轮 | §8 总览表与出口表 | 把 **syscall / int80 / IRQ / 异常** 收口成一张「进/出**内核**」对照；需要时再进 `entry_64.S` 跟 `error_return`。 |
+| 查索引 | §10、参考文件索引 | 用 **`rg`/`read_file`** 在本地内核树验证符号；正文里的路径以你检出的 `linux` 为准。 |
+
+### 与 Intel SDM（System Programming Guide）的对照
+
+正文不写满手册细节；下列条目便于你 **打开 Vol 3A** 时知道「该翻哪一节」。
+
+| 主题 | SDM Vol 3A（典型位置） | 与本文的连接 |
+|------|-------------------------|--------------|
+| SYSCALL/SYSRET 设计意图与模式限制 | §5.8.8 *Fast System Calls in 64-Bit Mode* | 正文 §4、§8.3：**长模式**、**平坦模型**；**兼容/保护模式无 SYSCALL**。 |
+| 使能位 | `IA32_EFER.SCE`（§2、Table 2-1） | 内核 boot 阶段会配置 EFER 与 STAR/LSTAR/FMASK（本文默认读者已知「已启用」）。 |
+| 目标 RIP / CS / SS / RFLAGS 掩码 | `IA32_LSTAR`、`IA32_STAR`、`IA32_FMASK`，Figure 5-14 | **RCX←次条 RIP、R11←RFLAGS**；**内核入口地址在 LSTAR**（正文 `entry_SYSCALL_64`）。 |
+| 栈 | 手册明确 **SYSCALL 不保存 RSP，SYSRET 不恢复 RSP** | 正文 §4：**用户 RSP 进 TSS.sp2 再写入 `pt_regs->sp`**；**切到 `cpu_current_top_of_stack`**。 |
+| 虚拟化 | VMX 章节中 *Handling SYSCALL/SYSRET*（目录约 §31.10.4.3） | 仅在写 Hypervisor/嵌套虚拟化时需要；读本文可不读。 |
+
+更细的 **单条指令操作**（异常码、边界条件）以 **SDM Volume 2（指令集卷）** 中 SYSCALL/SYSRET 条目为准。
+
+### 内核树阅读提示
+
+- **默认内核根**：`/Users/weli/works/linux`（若与你环境不一致，只替换路径，**符号名**仍以同名文件为准）。
+- **syscall 入口**：`arch/x86/entry/entry_64.S` 中 `entry_SYSCALL_64`、`syscall_return_via_sysret`、`common_interrupt_return` 一带与正文 §4、§8.2 对照。
+- **IRQ stub**：`arch/x86/include/asm/idtentry.h` 中 `irq_entries_start` 与正文 §6.2 一致；**不要**假设 IDT 直接指向一个大写的 `common_interrupt` 手写函数——多为 **宏展开**。
+- **版本差异**：主线会调整 FRED、PTI、paranoid 等分支；本文已单列 **FRED** 与 **IST/paranoid** 的提醒，你那棵树的 `#ifdef` 以实际代码为准。
+
+### 常见误读（读正文时可对照纠正）
+
+1. **「sp0 = 当前进程内核栈顶」**：正文 §1、§2 说明在常见原生 x86-64 上 **不成立**；**sp0 更像 entry trampoline 锚点**。
+2. **「syscall 像中断一样压 IRET 帧」**：正文 §4、§8.3：**硬件不压完整帧**；**`pt_regs` 由入口汇编搭建**。
+3. **「设备 IRQ 的向量号在某个专用寄存器」**：正文 §6：**stub `push imm8` 占位，与 `pt_regs.orig_ax` 布局对齐**，C 层再解释为 `u8` 向量号。
+
+读完正文 §1–§4 后，若愿意动手验证，可按 **§10** 在运行中的系统上看 `kallsyms` 与 `/proc/interrupts`；与静态正文互补。
+
+---
+
 ## 1. 结论先行：`sp0` 与「当前进程内核栈顶」是两套机制
 
 在常见 64 位配置下：
@@ -16,18 +77,9 @@
 
 ## 2. 用户态进程的内核栈地址：谁来记？
 
-调度切换到 `next_p` 时：
+**`cpu_current_top_of_stack` / `task_top_of_stack`、调度切换时 `raw_cpu_write`、与 `update_task_stack` 同一次 `__switch_to` 中的顺序**，见专文 **[LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md](LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md)**。
 
-```671:675:arch/x86/kernel/process_64.c
-	raw_cpu_write(current_task, next_p);
-	raw_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p));
-
-	/* Reload sp0. */
-	update_task_stack(next_p);
-```
-
-`task_top_of_stack()` 由 `task_pt_regs(task) + 1` 计算，而 `task_pt_regs()` 基于 `task->stack` 与 `THREAD_SIZE`（`arch/x86/include/asm/processor.h`、`include/linux/sched/task_stack.h`）。  
-因此：**异常/中断路径里若要把帧挪到「线程内核栈」上的标准 `pt_regs` 槽位，靠的是这个已写好的 per-CPU 栈顶**，而不是在用户态现场里临时推算。
+此处只保留与 **`pt_regs` 落点**相关的结论：**异常/中断路径里若要把帧挪到「线程内核栈」上的标准 `pt_regs` 槽位，靠的是已写好的 per-CPU 栈顶**（`cpu_current_top_of_stack`），而不是在用户态现场里临时推算。
 
 `sync_regs()`（`arch/x86/kernel/traps.c`）把入口栈上的 `pt_regs` 拷到 `(struct pt_regs *)current_top_of_stack() - 1`（与 `error_entry`/`idtentry_body` 配合，真实栈切换在 `entry_64.S`）。
 
@@ -222,7 +274,7 @@ cat /proc/interrupts
 | IRQ stub 生成、`irq_entries_start` | `arch/x86/include/asm/idtentry.h` |
 | `common_interrupt` C | `arch/x86/kernel/irq.c` |
 | `syscall_exit_to_user_mode` / `irqentry_exit`（通用出口） | `include/linux/entry-common.h`，`include/linux/irq-entry-common.h`，`kernel/entry/common.c` |
-| 上下文切换写栈顶 | `arch/x86/kernel/process_64.c` |
+| 上下文切换写栈顶、`task_top_of_stack` | [LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md](LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md)，`arch/x86/kernel/process_64.c` |
 | `sp0`、TSS、load_sp0 | `arch/x86/kernel/cpu/common.c`，`arch/x86/include/asm/processor.h` |
 | `update_task_stack` | `arch/x86/include/asm/switch_to.h` |
 
