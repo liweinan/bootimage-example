@@ -110,6 +110,24 @@ flowchart TB
 
 **`TOP_OF_INIT_STACK`** 与 **`init_stack`** 同 **`processor.h`**，用于 boot 期 per-CPU **`cpu_current_top_of_stack`** 初值（见 §4）。
 
+### 2.6 Call chain：`task->stack` 与 `task_pt_regs`（fork / clone 路径）
+
+**`task_top_of_stack` 不单独分配**：先有 **`task->stack`** 指向 **`THREAD_SIZE`** 内核栈块，再由 **`task_pt_regs` / `task_top_of_stack` 宏** 按固定几何从 **`task->stack`** 推出地址。
+
+```
+kernel_clone()                            kernel/fork.c（如 ~2562 起）
+└── copy_process()                          kernel/fork.c（如 ~1917 起）
+    ├── dup_task_struct()                   kernel/fork.c（如 ~862 起）
+    │   └── alloc_thread_stack_node()       kernel/fork.c（如 ~280 / ~362 / ~397，视 VMAP/页阶/cache 配置）
+    │       └── tsk->stack = …            kernel/fork.c（分配成功后赋值）
+    └── …（copy_mm、copy_signal 等）…
+    └── copy_thread(p, args)                kernel/fork.c（如 ~2182）
+        └── childregs = task_pt_regs(p)     arch/x86/kernel/process.c（如 ~171）
+            └──（宏：`task_stack_page` + `THREAD_SIZE` − `TOP_OF_KERNEL_STACK_PADDING` − `sizeof(pt_regs)`）
+```
+
+**`ret_from_fork` / `kthread` 路径**仍依赖 **`copy_thread()`** 对 **`fork_frame` / `inactive_task_frame`** 的初始化；与 **`task_top_of_stack`** 同属「**同一 `THREAD_SIZE` 栈窗口内的布局约定**」，见上文 **§2.2**。
+
 ---
 
 ## 3. `cpu_current_top_of_stack`：写什么、谁写、谁读
@@ -150,6 +168,27 @@ flowchart TB
 
 **返回用户态**常涉及读 **`TSS_sp0`** 切 trampoline，与 **进入** syscall 时用 **`cpu_current_top_of_stack`** 不同；见 [LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md](LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md) §6.2。
 
+### 3.6 Call chain：读取 `cpu_current_top_of_stack`（与 `task_top_of_stack` 对齐）
+
+**用户态 `syscall` → 进内核后 RSP 装入 per-CPU 值**（与 **[LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md](LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md) §7.2** 同一路径，本文收束为树形）：
+
+```
+用户态执行 syscall（CPU 经 LSTAR 等到入口）
+└── entry_SYSCALL_64                        arch/x86/entry/entry_64.S（如 ~87 起）
+    ├── movq PER_CPU_VAR(cpu_current_top_of_stack), %rsp   entry_64.S（如 ~95）
+    └── call do_syscall_64                  arch/x86/entry/entry_64.S（如 ~121）
+        └── do_syscall_64()                 arch/x86/entry/syscall_64.c（如 ~87 起）
+```
+
+**C 侧读「当前线程栈顶一侧」**（非 syscall 汇编主路径，如 **`on_thread_stack()`**）：
+
+```
+on_thread_stack()                         arch/x86/include/asm/processor.h（如 ~559 起）
+└── current_top_of_stack()                  同文件（如 ~546 起）
+    ├── this_cpu_read_const(const_cpu_current_top_of_stack)   （CONFIG_USE_X86_SEG_SUPPORT 等）
+    └── this_cpu_read_stable(cpu_current_top_of_stack)
+```
+
 ---
 
 ## 4. `next_p` 是什么（不是「刚进内核的用户进程」）
@@ -166,7 +205,24 @@ flowchart TB
 
 ## 6. 调度链：谁调用到 `raw_cpu_write(cpu_current_top_of_stack, …)`（主干）
 
-下列行号以 **`/Users/weli/works/linux`** 当前树为准：
+### 6.1 Call chain：写入 `cpu_current_top_of_stack`（调度路径）
+
+```
+schedule()                                kernel/sched/core.c（如 ~6869）
+└── __schedule_loop(SM_NONE)              kernel/sched/core.c（如 ~6860）
+    └── __schedule(SM_NONE)               kernel/sched/core.c（如 ~6662）
+        └── context_switch(rq, prev, next, &rf)   kernel/sched/core.c（如 ~6786 调用）
+            └── switch_to(prev, next, prev)       arch/x86/include/asm/switch_to.h（宏 → __switch_to_asm）
+                └── __switch_to_asm()           arch/x86/entry/entry_64.S（如 ~177）
+                    └── jmp __switch_to         entry_64.S（如 ~216）
+                        ├── raw_cpu_write(cpu_current_top_of_stack, task_top_of_stack(next_p))
+                        │                       arch/x86/kernel/process_64.c（如 ~672）
+                        └── update_task_stack(next_p)   arch/x86/include/asm/switch_to.h（如 ~69）
+```
+
+**`task_top_of_stack(next_p)`** 在此处为 **宏展开**（见 **§2**），**不是**另一次函数调用。
+
+### 6.2 行号速查表（以本机 `/Users/weli/works/linux` 树为准，版本漂移时请 `rg` 核对）
 
 | 步骤 | 位置（约） |
 |------|------------|
@@ -209,6 +265,6 @@ SYM_CODE_START(entry_SYSCALL_64)
 - 配置 **`CONFIG_XEN_PV`、`CONFIG_X86_FRED`、`CONFIG_PARAVIRT_*`** 会改变 **`update_task_stack` / `load_sp0`** 分支；细节以你树内 **`#ifdef`** 为准。
 - **行号**随内核版本漂移；换分支后请用 **`rg`** / 直接打开文件核对。
 
-**文档版本**：1.2  
+**文档版本**：1.3  
 **最后更新**：2026-04-04  
 **校对内核树**：`/Users/weli/works/linux`
