@@ -114,6 +114,27 @@ static inline void idt_syscall_init(void)
 }
 ```
 
+### 4.1 `syscall_init()` 在何时执行
+
+- **Boot / 每个上线的逻辑 CPU**：**`cpu_init()`**（**`arch/x86/kernel/cpu/common.c`**）在 **64 位**分支末尾调用 **`syscall_init()`**；从处理器调用 **`start_secondary()`** 等路径进入 AP 时也会走到 **`cpu_init()` → `syscall_init()`**（见 **`arch/x86/kernel/smpboot.c`** 对 **`cpu_init()`** 的调用）。
+- **休眠唤醒、恢复处理器的上下文**：**`fix_processor_context()`**（**`arch/x86/power/cpu.c`**）在重装 TSS/GDT 相关项后再次调用 **`syscall_init()`**，注释说明用于恢复 **MSR_*STAR** 等（与休眠前可能丢失的 MSR 状态一致）。
+
+### 4.2 `IA32_FMASK`（`MSR_SYSCALL_MASK`）的含义与 Linux 写入值
+
+**命名**：手册名 **IA32_FMASK**，Linux **`arch/x86/include/asm/msr-index.h`** 中为 **`MSR_SYSCALL_MASK`**（地址 **0xC0000084**）。**不要**与 **`IA32_SYSENTER_CS`（0x174）** 混淆——后者属于 **`sysenter`** 路径，与 **`syscall`** 的 FMASK **无关**。
+
+**硬件语义**（**Vol. 3A §5.8.8**）：执行 **`syscall`** 时，**`RFLAGS ← RFLAGS & ~IA32_FMASK`**，即 **FMASK 中为 1 的位在进入内核时被清除**；原 **`RFLAGS`** 已由硬件存入 **`R11`**，返回用户态时 **`sysret`** 可用 **`R11`** 恢复用户标志（见 **§3**）。
+
+**Linux `idt_syscall_init()` 中写入的掩码**（与上一节源码一致）：清除 **CF、PF、AF、ZF、SF、TF、DF、IF、OF、IOPL、NT、RF、AC、ID**。内核注释意图是 **尽量多清**，减轻用户态 **RFLAGS** 对内核路径的干扰；其中与草稿常强调的几项对应关系如下：
+
+| 位（概念） | 典型用意（句级） |
+|-----------|------------------|
+| **TF** | 避免带着用户态单步进入内核后意外触发与 TF 相关的行为。 |
+| **DF** | 统一内核侧字符串指令的递增方向预期。 |
+| **IF** | 进入 syscall 入口时常关中断；内核会在合适路径再开中断（见 **`entry_SYSCALL_64`** 一侧注释与调度/出口逻辑）。 |
+| **IOPL** | 避免用户态通过高 **IOPL** 间接影响后续在内核态的 **I/O 敏感语义**（与整体「清外部带入状态」一致）。 |
+| **CF…ID 等其余位** | 与用户态算术/状态位隔离，减少与内核假设冲突；具体组合以树内 **`X86_EFLAGS_*`** 并集为准。 |
+
 **FRED**：`syscall_init` 内注释写明：除 **STAR** 外 **可不**配置经典 SYSCALL/SYSENTER MSR，由 **FRED ring3 入口与 ERETU** 等路径替代（实现以树内 **`#ifdef CONFIG_X86_FRED`** 为准）。
 
 ---
@@ -155,6 +176,6 @@ static inline void idt_syscall_init(void)
 - **修订版 SDM** 会调整页码；引用他人时请带 **Order Number 与日期**。
 - **`INTEL_SDM_SYSCALL_SYSRET_GUIDE.md`** 为指向本文的 **短入口**（旧书签仍可用）。
 
-**文档版本**：1.0  
+**文档版本**：1.1  
 **最后更新**：2026-04-04  
 **核对内核树**：`/Users/weli/works/linux`
