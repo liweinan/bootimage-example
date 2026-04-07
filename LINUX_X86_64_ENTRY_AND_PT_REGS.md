@@ -1,6 +1,6 @@
 # Linux x86-64：`sp0`、`cpu_current_top_of_stack` 与 `pt_regs`（入口与栈）
 
-本文对 `/Users/weli/works/linux` 做静态对照，说明：**特权级切换时栈从哪里来**、**`pt_regs` 何时出现在内核栈上**、**系统调用与 IDT 中断/异常入口的差异**。下文默认 **原生 x86-64**（非 Xen PV 特化；FRED 另有 MSR 路径）。
+本文对 `/Users/weli/works/linux` 做静态对照，说明：**特权级切换时栈从哪里来**、**`pt_regs` 何时出现在内核栈上**、**系统调用与 IDT 中断/异常入口的差异**。下文默认 **原生 x86-64**（非 Xen PV 特化；FRED 另有 MSR 路径）。**STAR/LSTAR/FMASK、`syscall_init` 等 MSR 细节**：见 **[LINUX_X86_MSR_REFERENCE.md](LINUX_X86_MSR_REFERENCE.md)**。
 
 ---
 

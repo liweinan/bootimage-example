@@ -30,7 +30,7 @@ start_kernel()
     ↓
 setup_arch（内存接管）
     ↓
-trap_init（IDT异常门 + SYSCALL/SYSENTER MSR设置）
+trap_init（IDT异常门 + SYSCALL/SYSENTER，**MSR 配置**见 [LINUX_X86_MSR_REFERENCE.md](LINUX_X86_MSR_REFERENCE.md)）
     ↓
 init_IRQ（IDT硬件中断门 + INT 0x80）
     ↓
@@ -978,7 +978,7 @@ IDT 在内核启动过程中经历 **5 个阶段**的演化（详见 [IDT 表的
 - GDT 定义"段"（代码/数据/栈）的属性和边界
 - IDT 定义"中断/异常"发生时跳转到哪里
 - 早期 IDT 仅设置 CPU 异常，完整 IDT（包括硬件中断和 INT 0x80）在 init_IRQ() 中设置
-- 现代系统调用（SYSCALL/SYSENTER）不通过 IDT，而是通过 MSR 寄存器配置（详见 [Linux 中断处理指南 - IDT 与中断类型概览](LINUX_INTERRUPT_GUIDE.md#idt-与中断类型概览)）
+- 现代系统调用（SYSCALL/SYSENTER）不通过 IDT，而通过 **MSR** 配置（寄存器表与 `syscall_init` 见 [LINUX_X86_MSR_REFERENCE.md](LINUX_X86_MSR_REFERENCE.md)；机制概览仍见 [Linux 中断处理指南 - IDT 与中断类型概览](LINUX_INTERRUPT_GUIDE.md#idt-与中断类型概览)）
 
 ---
 
@@ -1207,13 +1207,7 @@ start_kernel()
         │       ├─ 设置所有 CPU 异常向量（0-31）
         │       └─ 若启用 ia32，设置 INT 0x80（通过 ia32_idt）
         └─ cpu_init()
-            └─ syscall_init()（arch/x86/kernel/cpu/common.c:2234）【内核接管 syscall】
-                ├─ wrmsr(MSR_STAR, ...)           // 段选择子
-                └─ if (!cpu_feature_enabled(X86_FEATURE_FRED))
-                    └─ idt_syscall_init()
-                        ├─ wrmsrq(MSR_LSTAR, entry_SYSCALL_64)   // SYSCALL 入口
-                        ├─ wrmsrq_cstar(entry_SYSCALL_compat)     // 32位兼容入口
-                        └─ wrmsrq_safe(MSR_IA32_SYSENTER_*)       // SYSENTER 支持
+            └─ syscall_init() → idt_syscall_init()（写 STAR/LSTAR 等 MSR，**详表与源码**见 [LINUX_X86_MSR_REFERENCE.md](LINUX_X86_MSR_REFERENCE.md)）
 ```
 
 **系统调用的两种机制**：
@@ -1243,7 +1237,7 @@ sys_call_table[nr]（系统调用表）
 具体系统调用（如 sys_read）
 ```
 
-> **详细内容**：完整的 syscall_init() 代码、INT 0x80 vs SYSCALL/SYSENTER 详细对比、MSR 寄存器配置、entry_SYSCALL_64 入口机制、32位兼容机制，请参见 **[系统调用初始化详解](LINUX_KERNEL_SYSCALL_INIT.md)**。
+> **详细内容**：**MSR 地址、字段与 `wrmsr` 序列**见 **[LINUX_X86_MSR_REFERENCE.md](LINUX_X86_MSR_REFERENCE.md)**；**trap_init 叙事、INT 0x80 对比、`entry_SYSCALL_64` 逐段分析**见 **[系统调用初始化详解](LINUX_KERNEL_SYSCALL_INIT.md)**。
 
 
 ### 3. init_IRQ() 与接管 INT 服务的过程

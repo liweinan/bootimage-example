@@ -179,7 +179,9 @@
 | [LINUX_KERNEL_IDT_INTEL_SDM_COMPLIANCE.md](LINUX_KERNEL_IDT_INTEL_SDM_COMPLIANCE.md) | **Linux 内核 IDT 结构与 Intel SDM 规范符合性分析** ⭐ 新增<br>• Intel SDM 64 位门描述符规范（16 字节格式、位域详解）<br>• Linux 内核 gate_desc 结构定义（源代码分析）<br>• 逐字节符合性对比（所有字段完全匹配）<br>• idt_data（软件抽象）vs gate_desc（硬件格式）的关系<br>• 为什么需要两个结构（可读性、参数传递、硬件兼容）<br>• 完整的转换流程（idt_init_desc 函数详解）<br>• ✅ 验证结论：gate_desc 完全符合 Intel SDM 规范<br>• 实际验证方法（GDB、内核日志、pahole 工具） |
 | [CALL_GATE_VS_IDT_GATE_KERNEL_STRUCTURES.md](CALL_GATE_VS_IDT_GATE_KERNEL_STRUCTURES.md) | **Call Gate vs IDT Gate：Linux 内核数据结构对比** ⭐ 新增<br>• 澄清常见困惑：为什么两种门描述符看起来很像<br>• 核心区别：存储位置（GDT/LDT vs IDT）<br>• Linux 内核数据结构对应：IDT Gate → `gate_desc`，Call Gate → `desc_struct`（不使用）<br>• Call Gate 为何被废弃（SYSCALL 指令更快）<br>• 权限检查机制对比（主动调用 vs 被动触发）<br>• 现代 Linux 的实际使用情况（只使用 IDT Gate）<br>• 完整示例对比（理论 Call Gate vs 实际 IDT Gate） |
 | [KASAN_INSTRUMENTATION_AND_INIT_ORDER.md](KASAN_INSTRUMENTATION_AND_INIT_ORDER.md) | **KASAN 插桩机制与初始化顺序深度分析** ⭐ 新增<br>• 编译时插桩 vs 运行时初始化的本质区别<br>• 为什么必须先 kasan_early_init() 后 idt_setup_early_handler()<br>• `__asan_loadXX`/`__asan_storeXX` 函数工作原理<br>• 如果 KASAN 未初始化会发生什么（递归 Page Fault → Triple Fault）<br>• 内核源代码证据（head64.c 明确注释）<br>• 为什么不让 KASAN 自动跳过检查（性能、Chicken-and-Egg 问题）<br>• `__head` 和 `KASAN_SANITIZE` 的作用<br>• 影子内存（Shadow Memory）机制详解 |
-| [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md) | **Linux 系统调用初始化详解**<br>• trap_init/syscall_init<br>• INT 0x80 vs SYSCALL/SYSENTER 性能对比<br>• entry_SYSCALL_64 入口分析 |
+| [LINUX_X86_MSR_REFERENCE.md](LINUX_X86_MSR_REFERENCE.md) | **Linux x86/x86_64：MSR 集中参考** ⭐<br>• STAR/LSTAR/CSTAR/FMASK、SYSENTER 三件套、EFER 启动要点<br>• Intel SDM Vol 3A/4 导读摘要、Linux `syscall_init` 摘录 |
+| [LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md) | **Linux 系统调用初始化详解**<br>• trap_init/syscall_init（MSR 细节见上表）<br>• INT 0x80 vs SYSCALL/SYSENTER 性能对比<br>• entry_SYSCALL_64 入口分析 |
+| [INTEL_SDM_SYSCALL_SYSRET_GUIDE.md](INTEL_SDM_SYSCALL_SYSRET_GUIDE.md) | **（入口）** Intel SDM SYSCALL 导读 → 已统合至 **LINUX_X86_MSR_REFERENCE.md** |
 
 ### 中断控制器
 

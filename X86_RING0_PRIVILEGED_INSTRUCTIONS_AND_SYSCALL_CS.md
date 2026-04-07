@@ -72,6 +72,7 @@
 
 - **WRMSR**：写 MSR，需 CPL=0（否则 #GP）。
 - **RDMSR**：读 MSR；是否允许 CPL 3 由 CR4 等控制（如 TSD、PCE），并非一律 CPL 0。
+- **Linux 中与 SYSCALL/SYSENTER/EFER 相关的 MSR 表与初始化**：见 **[LINUX_X86_MSR_REFERENCE.md](LINUX_X86_MSR_REFERENCE.md)**。
 - **XSETBV**：写 XCR0（扩展状态控制），需 CPL=0。
 
 ### 3.5 Cache / TLB（Vol 3A 2.8.4）

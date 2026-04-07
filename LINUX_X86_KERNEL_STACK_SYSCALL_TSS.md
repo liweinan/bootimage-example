@@ -180,6 +180,8 @@ PER_CPU_VAR(cpu_tss_rw+TSS_sp0) → 寄存器   arch/x86/entry/entry_32.S:849
 
 ### 7.2 读取链（syscall 相关：进入内核时把该 per-CPU 值装进 RSP）
 
+**`MSR_LSTAR`/`STAR`/`FMASK` 的设定与 `idt_syscall_init()`**：见 **[LINUX_X86_MSR_REFERENCE.md](LINUX_X86_MSR_REFERENCE.md)**。下列为 **Call chain 速查**（非 FRED）。
+
 **配置链 — MSR `LSTAR` 指向 64 位 syscall 入口（非 FRED 时）**
 
 ```
