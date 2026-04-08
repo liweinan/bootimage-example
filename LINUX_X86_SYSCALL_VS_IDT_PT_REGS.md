@@ -1,6 +1,6 @@
 # x86_64：`syscall` 入口与 IDT 中断/异常入口对比（栈、trampoline、`pt_regs` 与传参）
 
-本文整理 Linux x86_64 上 **系统调用** 与 **经 IDT 的中断/异常** 两条路径的差异：硬件行为、TSS / per-CPU entry 栈（trampoline）、`struct pt_regs` 的构造方式，以及进入 C 时的参数约定。代码引用来自 Linux 源码树中的常规路径（行号随内核版本可能略有偏移，以你本地树为准）。**§8** 为常见问答补充；**§9** 为 **IDT + TSS（RSP0/IST）** 路径上 **CPU 权限与合法性检查** 的步骤概览（架构手册向）。
+本文整理 Linux x86_64 上 **系统调用** 与 **经 IDT 的中断/异常** 两条路径的差异：硬件行为、TSS / per-CPU entry 栈（trampoline）、`struct pt_regs` 的构造方式，以及进入 C 时的参数约定。代码引用来自 Linux 源码树中的常规路径（行号随内核版本可能略有偏移，以你本地树为准）。**§8** 为常见问答补充；**§9** 为 **IDT + TSS（RSP0/IST）** 路径上 **CPU 权限与合法性检查** 的步骤概览（架构手册向）；**§10** 说明 **向量号（vector）** 从何而来、与 **`sp0` 无关**，以及 **是否经寄存器传递**。
 
 **相关文档**：[LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md](LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md)（`cpu_current_top_of_stack`、`TSS.sp0`、调度与 `load_sp0` 等）、[LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md](LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md)。
 
@@ -343,3 +343,31 @@ asmlinkage __visible noinstr struct pt_regs *sync_regs(struct pt_regs *eregs)
 ### 9.4 小结
 
 **`TSS → sp0` 这条线**上，**换栈与压 IRET 帧**由 **CPU 自动完成**；**权限与合法性**分散在 **IDT 门（含软件 `INT` 时的 DPL）、目标代码段、TSS/IST/RSP** 等步骤中，**统一由硬件在投递过程中检查**，失败则异常中止，而不是仅靠 `sp0` 一个字段「单独做权限判断」。
+
+---
+
+## 10. 向量号（vector）与 IDT 项：`sp0` 不参与选型；是否经寄存器传递
+
+### 10.1 CPU 如何知道该用 IDT 里哪一项？
+
+**`TSS.sp0` / RSP0 与「选 IDT 第几项」无关。** 顺序是：**先**确定 **向量号 vector**，**再**用 **`IDTR 基址 + vector × 16`** 取门描述符；**仅在** 已决定经此门进 ring0、且 **CPL 从 ring3 提升** 时，才从 TSS 取 **RSP0**（或 **IST**）作为新 **`%rsp`**。**`sp0` 只提供换栈用的初始 RSP，不提供、也不解析 vector。**
+
+向量来源分三类（教学归纳）：
+
+| 来源 | vector 如何确定 |
+|------|------------------|
+| **CPU 异常**（fault / trap / abort） | 异常类型在架构上 **固定映射** 到 vector（如 `#DE`=0、`#BP`=3、`#PF`=14 等，以手册为准）。CPU **内部**判定异常种类后即得 vector。 |
+| **软件 `INT n`** | **n** 为指令 **立即数**，译码时即知 vector。 |
+| **外部中断（IRQ）** | 由 **APIC / 中断控制器与路由**（如 IOAPIC 重定向项、MSI 消息中的 vector 字段等）在投递时给出；CPU 核心按中断接受逻辑得到 **待服务 vector**。 |
+
+### 10.2 vector 要不要通过通用寄存器「传给 CPU」？
+
+**不需要。** 对 **硬件投递路径** 而言：
+
+- **异常**：由 CPU 在执行中自行识别，**不**经 `rax` 等传递编号。  
+- **`INT n`**：编号在 **指令编码**里，**不**是「先往某寄存器写 n 再触发」的调用约定。  
+- **外部中断**：vector 经 **控制器与 CPU 间约定/内部信号** 交给核心，**不是**应用软件往 GPR 写 vector。
+
+### 10.3 与 Linux `idtentry_irq` 压栈的 vector 的关系
+
+内核在 **`idtentry_irq`** 路径上把 **vector 压入栈上 error code 槽位**，是为了 **C 处理函数**能收到 **第二参数**（与 `idtentry_body` 约定一致），见 **§3.2**。这发生在 **CPU 已经根据 vector 选中 IDT 项并转入入口汇编之后**，属于 **软件对 C ABI 的补充**，**不是**「CPU 靠寄存器或这段压栈才知道该索引 IDT 哪一项」。
