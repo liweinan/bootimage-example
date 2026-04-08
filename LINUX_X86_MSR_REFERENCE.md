@@ -174,15 +174,28 @@ static inline void idt_syscall_init(void)
 
 **硬件语义**（**Vol. 3A §5.8.8**）：执行 **`syscall`** 时，**`RFLAGS ← RFLAGS & ~IA32_FMASK`**，即 **FMASK 中为 1 的位在进入内核时被清除**；原 **`RFLAGS`** 已由硬件存入 **`R11`**，返回用户态时 **`sysret`** 可用 **`R11`** 恢复用户标志（见 **§3**）。
 
-**Linux `idt_syscall_init()` 中写入的掩码**（与上一节源码一致）：清除 **CF、PF、AF、ZF、SF、TF、DF、IF、OF、IOPL、NT、RF、AC、ID**。内核注释意图是 **尽量多清**，减轻用户态 **RFLAGS** 对内核路径的干扰；其中与草稿常强调的几项对应关系如下：
+**Linux `idt_syscall_init()` 中写入的掩码**（与上一节源码一致）：清除 **CF、PF、AF、ZF、SF、TF、DF、IF、OF、IOPL、NT、RF、AC、ID**。内核注释意图是 **尽量多清**，减轻用户态 **RFLAGS** 对内核路径的干扰。
 
-| 位（概念） | 典型用意（句级） |
-|-----------|------------------|
-| **TF** | 避免带着用户态单步进入内核后意外触发与 TF 相关的行为。 |
-| **DF** | 统一内核侧字符串指令的递增方向预期。 |
-| **IF** | 进入 syscall 入口时常关中断；内核会在合适路径再开中断（见 **`entry_SYSCALL_64`** 一侧注释与调度/出口逻辑）。 |
-| **IOPL** | 避免用户态通过高 **IOPL** 间接影响后续在内核态的 **I/O 敏感语义**（与整体「清外部带入状态」一致）。 |
-| **CF…ID 等其余位** | 与用户态算术/状态位隔离，减少与内核假设冲突；具体组合以树内 **`X86_EFLAGS_*`** 并集为准。 |
+**手册依据**（你本地的 *Intel® 64 and IA-32 Architectures Software Developer’s Manual, Volume 3A: System Programming Guide, Part 1*，Order Number **253668**，例如 **September 2016** 版）：
+
+- **§2.3** *System Flags and Fields in the EFLAGS Register*：**TF、IF、IOPL、NT、RF、AC、VIF、VIP、ID** 等系统类位的定义与 **Figure 2-5** 位图。
+- **§2.3.1** *System Flags and Fields in IA-32e Mode*：长模式下 **RFLAGS** 高 32 位保留；并写明 **SYSCALL/SYSRET** 可用可编程方式指定 **RFLAGS/EFLAGS** 中哪些位被清除/保存恢复（与 **IA32_FMASK** 协议一致）。
+
+**算术/方向类状态位**（**CF、PF、AF、ZF、SF、DF、OF**）：在 **Figure 2-5** 中与系统位同图展示位序；逐位语义以 **Vol. 1**（Basic Architecture）*EFLAGS/RFLAGS* 及 **Vol. 2** 各指令对标志位的影响说明为准（Vol. 3A §2.3 侧重系统控制类位的文字定义）。
+
+下表将 **FMASK 置 1 从而经 `RFLAGS & ~FMASK` 被清除** 的位，与 **Vol. 3A §2.3** 的表述对齐（摘意，翻译以手册原文为准），并保留一句 **Linux 侧**常见动机。
+
+| 位 / 域 | Vol. 3A §2.3 含义（摘意） | Linux 侧（FMASK）的典型动机（句级） |
+|--------|---------------------------|-------------------------------------|
+| **CF, PF, AF, ZF, SF, OF** | 算术与逻辑指令产生的**状态标志**（与 Figure 2-5 低位区对应；细节见 Vol. 1 / Vol. 2）。 | 进入 `syscall` 时不携带用户态上次运算残留的标志，减少内核里对**未定义“用户标志依赖”**的假设冲突。 |
+| **DF**（bit 10） | **方向标志**：与字符串等指令的变址方向相关（Figure 2-5 中与 OF、IF 相邻；修改见 Vol. 2 `CLD`/`STD` 等）。 | 清 **DF** 等价于约定内核路径以**递增方向**为主，与常见 **`cld`** 惯例一致，避免用户 **`std`** 遗留在内核。 |
+| **TF**（bit 8） | **Trap**：置位则启用单步调试，处理器在**每条指令后**可能产生 debug 异常（§2.3 原文 *single-step mode*）。 | 避免用户单步状态直接延续到内核入口，带来意外的 **#DB** 行为链。 |
+| **IF**（bit 9） | **Interrupt enable**：置位则响应**可屏蔽硬件中断**；**不**影响异常与 **NMI**（§2.3；并见 Vol. 3A 对 maskable interrupt 的章节交叉引用）。 | 与 **`syscall` 入口常关中断**的设计配合，由内核在明确位置再 `sti` / 恢复（见 `entry_SYSCALL_64` 相关注释与出口路径）。 |
+| **IOPL**（bits 12–13） | **I/O 特权级**：当前任务/程序的 I/O 权限级别；**CPL ≤ IOPL** 才可视情况访问 **I/O 地址空间**；**POPF/IRET** 仅在 **CPL=0** 时允许改此域（§2.3）。 | 清零后相当于 **IOPL=0**，避免用户曾抬高的 **IOPL** 在内核继续生效，影响 **I/O** 与 **IF** 修改许可等语义。 |
+| **NT**（bit 14） | **Nested task**：用于被中断/调用链起来的任务链接；**IRET** 会检查此位（§2.3）。 | 清除嵌套任务语义，避免 **`syscall` 进内核**时夹着「任务链」状态引发异常路径（IA-32e 下 **IRET** 对 **NT** 还有额外约束，见 §2.3.1）。 |
+| **RF**（bit 16） | **Resume**：置位时**抑制**由**指令断点**导致的 **#DB**；用于调试后单步恢复（§2.3）。 | 避免用户或调试器留下的 **RF** 干扰内核入口调试/断点行为。 |
+| **AC**（bit 18） | **Alignment check / access control**：与 **CR0.AM**、用户态对齐检查及 **CR4.SMAP** 下显式 supervisor 访问用户页的规则相关（§2.3）。 | 清除用户随带的对齐/SMAP 相关影响，内核自用 **AC** 时再按需要设置。 |
+| **ID**（bit 21） | **Identification**：能否置位/清除表示是否支持 **CPUID**（§2.3）。 | 与「清外部带入状态」同一策略下一并清零；**CPUID 能力**由 CPU 本身决定，不依赖此位“粘”在用户给定状态上。 |
 
 **FRED**：`syscall_init` 内注释写明：除 **STAR** 外 **可不**配置经典 SYSCALL/SYSENTER MSR，由 **FRED ring3 入口与 ERETU** 等路径替代（实现以树内 **`#ifdef CONFIG_X86_FRED`** 为准）。
 
@@ -209,6 +222,8 @@ static inline void idt_syscall_init(void)
 
 | 章节 | 页码（约，以你本地修订为准） | 主题 |
 |------|------------------------------|------|
+| **Vol.3A Section 2.3** | ~2-9 ~ 2-10 | *System Flags and Fields in the EFLAGS Register*；**Figure 2-5** |
+| **Vol.3A Section 2.3.1** | ~2-11 | *IA-32e Mode* 下 RFLAGS、SYSCALL/SYSRET 对标志的可编程处理 |
 | **Vol.3A Section 5.8.7** | 5-20 ~ 5-21 | SYSENTER and SYSEXIT |
 | **Vol.3A Section 5.8.7.1** | 5-21 | SYSENTER/SYSEXIT in IA-32e Mode |
 | **Vol.3A Section 5.8.8** | 5-22 ~ 5-23 | Fast System Calls in 64-Bit Mode (SYSCALL/SYSRET) |
@@ -225,6 +240,6 @@ static inline void idt_syscall_init(void)
 - **修订版 SDM** 会调整页码；引用他人时请带 **Order Number 与日期**。
 - **`INTEL_SDM_SYSCALL_SYSRET_GUIDE.md`** 为指向本文的 **短入口**（旧书签仍可用）。
 
-**文档版本**：1.1  
-**最后更新**：2026-04-04  
+**文档版本**：1.2  
+**最后更新**：2026-04-08  
 **核对内核树**：`/Users/weli/works/linux`
