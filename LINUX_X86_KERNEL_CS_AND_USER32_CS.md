@@ -168,12 +168,57 @@ struct desc_struct {
 2. **CPL**：决定 CPU 当前运行在哪个 ring
 3. **L 位**：决定代码段是 64 位模式（`L=1`，即 `DESC_CODE64` 的 `_DESC_LONG_CODE`）还是兼容模式（`L=0, D=1`，即 `DESC_CODE32` 的 `_DESC_DB`）
 
+#### 内核 GDT 的实际初始化值（`arch/x86/kernel/cpu/common.c:210-252`）
+
+在 **`CONFIG_X86_64`** 分支下，`gdt_page` 的静态初值（仅列出前 7 个条目）：
+
+| 索引 | 条目名称 | flags | **base** | **limit** | **DPL** | L | D/B | G | Ring | 用途 |
+|------|---------|-------|---------|----------|---------|---|-----|---|------|------|
+| 0 | `NULL` | （空条目） | `0x00000000` | `0x00000` | - | 0 | 0 | 0 | - | CPU 不使用索引 0 |
+| 1 | `GDT_ENTRY_KERNEL32_CS` | `DESC_CODE32` | **`0x00000000`** | `0xfffff` | **`0`** | 0 | 1 | 1 | **ring0** | 32 位内核代码（兼容模式） |
+| 2 | `GDT_ENTRY_KERNEL_CS` | `DESC_CODE64` | **`0x00000000`** | `0xfffff` | **`0`** | 1 | 0 | 1 | **ring0** | 64 位内核代码（长模式） |
+| 3 | `GDT_ENTRY_KERNEL_DS` | `DESC_DATA64` | **`0x00000000`** | `0xfffff` | **`0`** | 0 | 1 | 1 | **ring0** | 内核数据段 |
+| 4 | `GDT_ENTRY_DEFAULT_USER32_CS` | `DESC_CODE32 \| DESC_USER` | **`0x00000000`** | `0xfffff` | **`3`** | 0 | 1 | 1 | **ring3** | 32 位用户代码（兼容模式） |
+| 5 | `GDT_ENTRY_DEFAULT_USER_DS` | `DESC_DATA64 \| DESC_USER` | **`0x00000000`** | `0xfffff` | **`3`** | 0 | 1 | 1 | **ring3** | 用户数据段 |
+| 6 | `GDT_ENTRY_DEFAULT_USER_CS` | `DESC_CODE64 \| DESC_USER` | **`0x00000000`** | `0xfffff` | **`3`** | 1 | 0 | 1 | **ring3** | 64 位用户代码（长模式） |
+
+**内核源码**（`arch/x86/kernel/cpu/common.c`）：
+```c
+DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = { .gdt = {
+#ifdef CONFIG_X86_64
+    [GDT_ENTRY_KERNEL32_CS]       = GDT_ENTRY_INIT(DESC_CODE32, 0, 0xfffff),
+    [GDT_ENTRY_KERNEL_CS]         = GDT_ENTRY_INIT(DESC_CODE64, 0, 0xfffff),
+    [GDT_ENTRY_KERNEL_DS]         = GDT_ENTRY_INIT(DESC_DATA64, 0, 0xfffff),
+    [GDT_ENTRY_DEFAULT_USER32_CS] = GDT_ENTRY_INIT(DESC_CODE32 | DESC_USER, 0, 0xfffff),
+    [GDT_ENTRY_DEFAULT_USER_DS]   = GDT_ENTRY_INIT(DESC_DATA64 | DESC_USER, 0, 0xfffff),
+    [GDT_ENTRY_DEFAULT_USER_CS]   = GDT_ENTRY_INIT(DESC_CODE64 | DESC_USER, 0, 0xfffff),
+#endif
+} };
+```
+
+**关键观察**：
+1. **所有条目的 `base = 0x00000000`**：平坦模型，**线性地址 = 虚拟地址**
+2. **所有条目的 `limit = 0xfffff`**：配合 `G=1`（4KB 粒度）→ 有效范围 **0 到 4GB**（长模式下被忽略）
+3. **DPL 决定 ring**：
+   - **内核条目**（索引 1-3）：`DESC_CODE64`/`DESC_CODE32`/`DESC_DATA64` **不含** `DESC_USER` → **DPL=0** → **ring0**
+   - **用户条目**（索引 4-6）：`DESC_CODE32 | DESC_USER` 等 **包含** `DESC_USER` → **DPL=3** → **ring3**
+4. **L 位区分 64 位 vs 兼容模式**：
+   - **`DESC_CODE64`**（索引 2、6）：**L=1**，CPU 执行 64 位指令
+   - **`DESC_CODE32`**（索引 1、4）：**L=0, D=1**，CPU 执行 32 位指令（兼容模式）
+
+#### 特权级检查示例
+
 **示例：用户态进程访问内核段**（必然失败）：
 - 用户进程的 **CPL=3**（从当前 `CS = 0x0033` 提取）
-- 尝试加载 **`__KERNEL_DS`**（`0x0018`，指向 GDT 索引 3，**DPL=0**）
+- 尝试加载 **`__KERNEL_DS`**（`0x0018`，指向 GDT 索引 3，**base=0, DPL=0**）
 - CPU 检查：**`max(CPL=3, RPL=0) = 3 > DPL=0`** → **#GP（通用保护异常）**
 
-反之，内核态访问用户段是允许的（**`max(CPL=0, RPL=3) = 3 == DPL=3`**），这也是内核能读写用户空间的原因（配合页表的 `U/S` 位）。
+**示例：内核态访问用户段**（允许）：
+- 内核代码的 **CPL=0**（从当前 `CS = 0x0010` 提取）
+- 加载 **`__USER_DS`**（`0x002B`，指向 GDT 索引 5，**base=0, DPL=3**）
+- CPU 检查：**`max(CPL=0, RPL=3) = 3 == DPL=3`** → **允许**
+
+反之，内核态访问用户段是允许的（配合页表的 `U/S` 位），这也是内核能读写用户空间的原因（如 `copy_to_user`/`copy_from_user`）。
 
 ---
 
