@@ -11,6 +11,7 @@
 | `cpu_current_top_of_stack`、TSS、`TSS_sp0` | [LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md](LINUX_X86_TASK_TOP_OF_STACK_AND_CPU_CURRENT_TOP.md)、[LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md](LINUX_X86_KERNEL_STACK_SYSCALL_TSS.md) |
 | 压缩内核阶段 `EFER.LME`、启动序 | [LINUX_KERNEL_INIT.md](LINUX_KERNEL_INIT.md) |
 | Ring0 特权指令列表（含 `WRMSR`/`RDMSR` 一句） | [X86_RING0_PRIVILEGED_INSTRUCTIONS_AND_SYSCALL_CS.md](X86_RING0_PRIVILEGED_INSTRUCTIONS_AND_SYSCALL_CS.md) |
+| `__KERNEL_CS` / `__USER32_CS` 数值、RPL/DPL、与 `MSR_STAR` | [LINUX_X86_KERNEL_CS_AND_USER32_CS.md](LINUX_X86_KERNEL_CS_AND_USER32_CS.md) |
 
 ---
 
@@ -240,6 +241,6 @@ static inline void idt_syscall_init(void)
 - **修订版 SDM** 会调整页码；引用他人时请带 **Order Number 与日期**。
 - **`INTEL_SDM_SYSCALL_SYSRET_GUIDE.md`** 为指向本文的 **短入口**（旧书签仍可用）。
 
-**文档版本**：1.2  
+**文档版本**：1.3  
 **最后更新**：2026-04-08  
 **核对内核树**：`/Users/weli/works/linux`
