@@ -20,6 +20,55 @@
 - **Linux 侧**：索引宏集中在 **`arch/x86/include/asm/msr-index.h`**；封装函数如 **`native_read_msr`** / **`native_write_msr`**、**`wrmsr`** / **`wrmsrq`**（见 **`arch/x86/include/asm/msr.h`** 等）。
 - **Intel SDM**：各 MSR 的**位域、读写属性、复位值**以 **Vol. 4** *Model-Specific Registers* 为准；**SYSCALL/SYSRET 语义**以 **Vol. 3A §5.8.8** 为主，**Vol. 2** 为单指令级异常条件。
 
+### 1.1 Linux 中 `rdmsr/wrmsr` 的具体实现分层（基于 `/Users/weli/works/linux`）
+
+下面按源码分层给出从“裸指令”到“常用宏”的路径，便于和你其它文档里的调用链对齐。
+
+#### A) 最底层 primitive：`__rdmsr()` / `__wrmsrq()`
+
+文件：`arch/x86/include/asm/msr.h`
+
+- `__rdmsr(u32 msr)`：内联 `rdmsr`，输入 `ecx=msr`，输出 `edx:eax` 组装为 `u64` 返回。
+- `__wrmsrq(u32 msr, u64 val)`：内联 `wrmsr`，输入 `ecx=msr`、`eax=low32`、`edx=high32`。
+- 两者都挂了 `_ASM_EXTABLE_TYPE(...)`，异常表类型分别是 `EX_TYPE_RDMSR` / `EX_TYPE_WRMSR`，用于故障时的内核异常修复路径。
+
+#### B) native 包装：`native_read_msr*` / `native_write_msr*`
+
+同文件：
+
+- `native_read_msr()` / `native_write_msr()`：在 primitive 基础上加 tracepoint 钩子（`read_msr` / `write_msr`）。
+- `native_read_msr_safe()` / `native_write_msr_safe()`：使用 `_ASM_EXTABLE_TYPE_REG(..., EX_TYPE_*_SAFE, err)`，返回错误码而非直接异常终止。
+- 对应的常用宏：
+  - `rdmsr(msr, low, high)`、`rdmsrq(msr, val)`
+  - `wrmsr(msr, low, high)`、`wrmsrq(msr, val)`
+  - `rdmsr_safe(...)`、`rdmsrq_safe(...)`、`wrmsrq_safe(...)`
+
+#### C) paravirt 路径：同名宏可重定向到 `pv_ops`
+
+文件：`arch/x86/include/asm/paravirt.h`
+
+- 在 `CONFIG_PARAVIRT_XXL` 下，`rdmsr/wrmsr/rdmsrq/wrmsrq` 宏会走：
+  - `paravirt_read_msr()` / `paravirt_write_msr()`
+  - 底层是 `PVOP_CALL/PVOP_VCALL(..., pv_ops.cpu.read_msr / write_msr, ...)`
+- 即：调用点看起来一样，但后端可由 hypervisor 接管。
+
+#### D) 早期/共享最简版本：`raw_rdmsr()` / `raw_wrmsr()`
+
+文件：`arch/x86/include/asm/shared/msr.h`
+
+- 直接内联 `rdmsr/wrmsr`，不依赖 tracepoint 与完整异常处理基础设施。
+- 注释明确这是给 boot/共享场景的最简访问器，和内核正式 `rdmsr()/wrmsr()` 分工不同。
+
+#### E) 一句话记忆（调用链）
+
+非 paravirt 常见路径：
+
+`wrmsrq()` → `native_write_msr()` → `native_wrmsrq()` → `__wrmsrq()` → `asm("wrmsr")`
+
+`rdmsrq()` → `native_read_msr()` → `__rdmsr()` → `asm("rdmsr")`
+
+safe 版本分别落到 `native_*_msr_safe()` 并返回 `err`。
+
 ---
 
 ## 2. 与快速系统调用、长模式相关的 MSR 速查表
