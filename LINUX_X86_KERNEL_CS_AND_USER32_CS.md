@@ -4,6 +4,8 @@
 
 **相关文档**：[LINUX_X86_MSR_REFERENCE.md](LINUX_X86_MSR_REFERENCE.md)（`MSR_STAR` / `syscall`）、[X86_GDT_STRUCTURE.md](X86_GDT_STRUCTURE.md)（GDT 全表与 `GDT_ENTRY_INIT`）、[LINUX_KERNEL_SYSCALL_INIT.md](LINUX_KERNEL_SYSCALL_INIT.md)（`STAR` 与 `sysret` 选择子）。
 
+**为何不把「GDT 项与 DPL」再单开一篇**：与 **[X86_GDT_STRUCTURE.md](X86_GDT_STRUCTURE.md)** 已有分工——专文管**表结构、初始化块、Long mode 角色**；**`__KERNEL_CS` / `__USER_CS` 与 DPL 推导**与本文主题一致，故将 **`GDT_ENTRY_INIT` → `.dpl`** 的机械说明并入 **§3.1.1**，并在 **X86_GDT_STRUCTURE §5** 增加互链，避免两处维护同一推导链。
+
 ---
 
 ## 1. 宏定义位置与「初始」数值（64 位）
@@ -102,12 +104,14 @@ struct desc_struct {
 
 ## 3. GDT 初始化与选择子→描述符→CPL 的完整映射
 
+与 **[X86_GDT_STRUCTURE.md §5](X86_GDT_STRUCTURE.md)** 的关系：**§5** 概述 `gdt_page` 静态初始化与 `DESC_USER` 结论；**本节 §3.1** 给出「**仅看 `common.c` + `desc_defs.h` 如何机械推出 `GDT_ENTRY_KERNEL_CS` / `GDT_ENTRY_DEFAULT_USER_CS` 对应描述符的 DPL**」的推导链，避免与专文重复时两处漂移。
+
 ### 3.1 GDT 描述符的初始化（内核 vs 用户）
 
-`DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page)` 的静态初值在 **`arch/x86/kernel/cpu/common.c:210-252`**（`CONFIG_X86_64` 分支）：
+`DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page)` 的静态初值在 **`arch/x86/kernel/cpu/common.c`**（`CONFIG_X86_64` 分支，约 210–252 行）：
 
 ```c
-// arch/x86/kernel/cpu/common.c (line 220~225)
+// arch/x86/kernel/cpu/common.c（节选）
 [GDT_ENTRY_KERNEL_CS]         = GDT_ENTRY_INIT(DESC_CODE64, 0, 0xfffff),
 [GDT_ENTRY_KERNEL_DS]         = GDT_ENTRY_INIT(DESC_DATA64, 0, 0xfffff),
 [GDT_ENTRY_DEFAULT_USER32_CS] = GDT_ENTRY_INIT(DESC_CODE32 | DESC_USER, 0, 0xfffff),
@@ -115,24 +119,56 @@ struct desc_struct {
 [GDT_ENTRY_DEFAULT_USER_CS]   = GDT_ENTRY_INIT(DESC_CODE64 | DESC_USER, 0, 0xfffff),
 ```
 
-**标志位展开**（`arch/x86/include/asm/desc_defs.h:24-59`）：
+#### 3.1.1 机械推导：`GDT_ENTRY_KERNEL_CS` 与 `GDT_ENTRY_DEFAULT_USER_CS` 的 DPL 为何是 **0** 与 **3**
+
+1. **只看两条 code 项传入 `GDT_ENTRY_INIT` 的第一个参数 `flags`**：
+   - **`GDT_ENTRY_KERNEL_CS`**：`flags = DESC_CODE64`（**无** `DESC_USER`）。
+   - **`GDT_ENTRY_DEFAULT_USER_CS`**：`flags = DESC_CODE64 | DESC_USER`。
+
+2. **`DESC_USER` 即把 DPL 编成 3**：在 **`arch/x86/include/asm/desc_defs.h`** 中  
+   `#define DESC_USER (_DESC_DPL(3))`，而 `#define _DESC_DPL(dpl) ((dpl) << 5)`。  
+   因此 **`DESC_CODE64 | DESC_USER`** 在 `flags` 里带上了 **DPL=3** 的编码；**仅 `DESC_CODE64`** 时 **不**含 `_DESC_DPL(3)`，**flags 里与 DPL 对应的两比特为 0**（一般不写显式 `_DESC_DPL(0)`，而是「未置用户 DPL」）。
+
+3. **`GDT_ENTRY_INIT` 如何把 `flags` 写进 `struct desc_struct.dpl`**（同文件，宏体以树内为准）：
+
+```73:88:/Users/weli/works/linux/arch/x86/include/asm/desc_defs.h
+#define GDT_ENTRY_INIT(flags, base, limit)			\
+	{							\
+		.limit0		= ((limit) >>  0) & 0xFFFF,	\
+		.limit1		= ((limit) >> 16) & 0x000F,	\
+		.base0		= ((base)  >>  0) & 0xFFFF,	\
+		.base1		= ((base)  >> 16) & 0x00FF,	\
+		.base2		= ((base)  >> 24) & 0x00FF,	\
+		.type		= ((flags) >>  0) & 0x000F,	\
+		.s		= ((flags) >>  4) & 0x0001,	\
+		.dpl		= ((flags) >>  5) & 0x0003,	\
+		.p		= ((flags) >>  7) & 0x0001,	\
+		...
+	}
+```
+
+**读法**：**`.dpl = ((flags) >> 5) & 3`**，即从 `flags` 的 **第 5～6 位**取出 **2 位二进制 DPL**（0～3）。  
+因此：**`DESC_CODE64` alone → DPL=0**；**`DESC_CODE64 | DESC_USER` → DPL=3**。无需在别处再手写 `gdt[...].dpl = 0/3`，初始化器已一次性写入。
+
+#### 3.1.2 `DESC_*` 标志展开（便于对照）
+
+（`arch/x86/include/asm/desc_defs.h` 中与 code/data 相关的组合宏，节选意）
+
 ```c
 #define _DESC_DPL(dpl)       ((dpl) << 5)
-#define DESC_USER            (_DESC_DPL(3))    // bit 7:5 = 011（左移 5 位后占 bit 7:5）
+#define DESC_USER            (_DESC_DPL(3))
 
 #define DESC_CODE64          (_DESC_CODE | _DESC_GRANULARITY_4K | _DESC_LONG_CODE)
 #define DESC_CODE32          (_DESC_CODE | _DESC_GRANULARITY_4K | _DESC_DB)
 #define DESC_DATA64          (_DESC_DATA | _DESC_GRANULARITY_4K | _DESC_DB)
 ```
 
-**DPL 编码逻辑**：
-- **内核段**（`DESC_CODE64`、`DESC_DATA64`）：**无** `DESC_USER` → `_DESC_DPL(0)` → **DPL=0**
-- **用户段**（`DESC_CODE32 | DESC_USER`、`DESC_CODE64 | DESC_USER`）：**有** `DESC_USER` → `_DESC_DPL(3)` → **DPL=3**
+**小结**：
 
-`GDT_ENTRY_INIT` 宏将 `flags` 参数的 **bit 7:5** 提取到描述符的 **`dpl` 字段**（参考 §2.2 的 `struct desc_struct`）：
-```c
-.dpl = ((flags) >> 5) & 0x0003,  // 提取 bit 7:5，右移 5 位后得到 0 或 3
-```
+| GDT 槽位（宏名） | `GDT_ENTRY_INIT` 的 `flags` | 推出 `.dpl` |
+|------------------|----------------------------|-------------|
+| `GDT_ENTRY_KERNEL_CS` | `DESC_CODE64` | **0** |
+| `GDT_ENTRY_DEFAULT_USER_CS` | `DESC_CODE64 \| DESC_USER` | **3** |
 
 ### 3.2 选择子 → GDT 描述符 → CPL 的映射表
 

@@ -240,6 +240,7 @@ DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = { .gdt = {
 - **DPL 的初始化值**：
   - 内核段（`GDT_ENTRY_KERNEL32_CS`、`GDT_ENTRY_KERNEL_CS`、`GDT_ENTRY_KERNEL_DS`）：仅使用 `DESC_CODE32`/`DESC_CODE64`/`DESC_DATA64`，这些宏不含 `_DESC_DPL`，故描述符 **DPL=0**。
   - 用户段（`GDT_ENTRY_DEFAULT_USER32_CS`、`GDT_ENTRY_DEFAULT_USER_DS`、`GDT_ENTRY_DEFAULT_USER_CS`）：使用 `DESC_* | DESC_USER`；`DESC_USER` 在 **arch/x86/include/asm/desc_defs.h** 中定义为 `#define DESC_USER (_DESC_DPL(3))`，即 **DPL=3**。见 §2.3 中“DPL 相关宏的源码”。
+  - **逐步推导**（`GDT_ENTRY_INIT` 中 `((flags)>>5)&3` 与 `GDT_ENTRY_KERNEL_CS` / `GDT_ENTRY_DEFAULT_USER_CS` 对照）：见 **[LINUX_X86_KERNEL_CS_AND_USER32_CS.md §3.1.1](LINUX_X86_KERNEL_CS_AND_USER32_CS.md)**。
 
 TSS、LDT、TLS、PERCPU、CPUNODE 等条目在启动或进程切换时由 `arch/x86/kernel/cpu/common.c` 和 `arch/x86/include/asm/desc.h` 中的接口写入，而不是全部在静态初始化中填满。
 
