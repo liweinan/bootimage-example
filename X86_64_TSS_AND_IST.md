@@ -1,6 +1,6 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 3.3  
+**版本**: 3.5  
 **日期**: 2026-06-21  
 **作者**: Linux 内核启动文档项目
 
@@ -160,6 +160,8 @@ IF (IDT.IST != 0) {
 
 **IST 优先级高于 RSP0**，且**无论从哪个特权级触发都生效**——这是 IST 作为「最后防线」的关键。
 
+运行时硬件逐步路径（IDT → TSS → 栈 VA，不查 `cea_exception_stacks` 指针）见 [§5.3.7](#537-运行时-ist-栈切换idt--tss--栈内存不是查-cea_exception_stacks)。
+
 64 位模式下 privilege-level 切换时 **不加载新的 SS 描述符**，SS 被强制为 NULL，RPL 设为新 CPL；旧的 SS:RSP 被压到新栈上。IRET 时恢复。
 
 ### 3.3 64 位中断栈帧（SDM §6.14.2）
@@ -271,6 +273,329 @@ DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_struct, cpu_tss_rw) = {
 ```
 
 注意：`ist[]` **不在**静态初始化器中赋值，而是在 `tss_setup_ist()` 中运行时填充。
+
+### 5.3 cea_exception_stacks：存储位置与 IDT/TSS 的关系
+
+IST 相关内存在 Linux 里不是「TSS 一块、IDT 一块、cea 一块地址表」这么简单，而是 **三层存储 + 两类硬件配置**，初始化时串成一条链。
+
+#### 5.3.1 三层存储模型
+
+| 层次 | 内核对象 | 定义位置 | 存什么 | 谁主要使用 |
+|------|---------|---------|--------|-----------|
+| **① 物理 backing** | `struct exception_stacks exception_stacks` | `cpu_entry_area.c:18` 静态 per-CPU | IST 栈的**实际字节**（连续排列，无 guard） | 页表映射的**物理页来源** |
+| **② CEA 虚拟映射** | `struct cea_exception_stacks estacks`（嵌在 `cpu_entry_area` 内） | `cpu_entry_area.h:118` | fixmap **虚拟布局**：guard 空洞 + 映射后的可用栈 | **CPU 压栈**、内核读写的 VA |
+| **③ 硬件配置** | `TSS.ist[]` + `IDT[].bits.ist` | `cpu_tss_rw` / `idt_table[]` | 64-bit **栈顶 VA** / 3-bit **IST 索引** | **CPU 硬件**异常入口 |
+
+`cea_exception_stacks` 这个名字在源码里出现 **两次**，不要混为一谈：
+
+| 名称 | 类型 | 含义 |
+|------|------|------|
+| `struct cea_exception_stacks` | 结构体类型 | CEA 内 `estacks` 字段的布局（guard + stack 槽位） |
+| `cea_exception_stacks` | per-CPU **指针变量** | `DEFINE_PER_CPU(..., cea_exception_stacks)`，指向 `&get_cpu_entry_area(cpu)->estacks`（`cpu_entry_area.c:147`） |
+
+`__this_cpu_ist_top_va(DF)` 等宏通过该指针计算栈顶：
+
+```c
+// cpu_entry_area.h:147-148
+#define __this_cpu_ist_top_va(name) \
+    CEA_ESTACK_TOP(__this_cpu_read(cea_exception_stacks), name)
+```
+
+#### 5.3.2 物理页如何进入 CEA
+
+`exception_stacks` 在编译期按 CPU 分配好栈数组；启动时 `percpu_setup_exception_stacks()` 做两件事：
+
+1. `per_cpu(cea_exception_stacks, cpu) = &cea->estacks` — 保存 CEA 虚拟地址
+2. `cea_map_stack(DF/NMI/...)` — 把 `exception_stacks` 里各 `_stack` 的**物理页**映射到 `cea->estacks.*_stack` 的**虚拟页**
+
+```c
+// cpu_entry_area.c:133-137
+#define cea_map_stack(name) do { \
+    cea_map_percpu_pages(cea->estacks.name##_stack, \
+                         estacks->name##_stack, npages, PAGE_KERNEL); \
+} while (0)
+```
+
+Guard 页只存在于 **CEA 虚拟布局**（`ESTACKS_MEMBERS(PAGE_SIZE, ...)`），通常**不映射物理页**；栈溢出触及 guard 即 fault。`exception_stacks` 侧 guard 大小为 0，物理页连续存放。
+
+CEA 整体位于 fixmap 的 `CPU_ENTRY_AREA` 区域，每 CPU 窗口由 `get_cpu_entry_area(cpu)` 计算（`cpu_entry_area.c:70-75`）：
+
+```c
+unsigned long va = CPU_ENTRY_AREA_PER_CPU + cea_offset(cpu) * CPU_ENTRY_AREA_SIZE;
+```
+
+#### 5.3.3 与 IDT、TSS 的分工（总览）
+
+```mermaid
+flowchart TB
+    subgraph INIT["内核初始化"]
+        ES["exception_stacks<br/>物理栈页"]
+        CEA["CEA.estacks<br/>fixmap VA + guard"]
+        PTR["per-CPU cea_exception_stacks 指针"]
+        TSSW["TSS.ist[]<br/>写入栈顶 VA"]
+        IDTW["idt_table[]<br/>ISTG 写入 IST 索引"]
+
+        ES -->|"cea_map_stack PTE"| CEA
+        CEA --> PTR
+        PTR -->|"__this_cpu_ist_top_va"| TSSW
+        IDTW --> IDT
+        TSSW --> TSS
+    end
+
+    subgraph RUN["CPU 异常入口"]
+        V["异常向量"]
+        IDT["IDT 门描述符<br/>bits.ist 3-bit"]
+        TR["TR → TSS"]
+        IST["TSS.ist n 64-bit 栈顶 VA"]
+        RSP["RSP ← 地址，压异常帧"]
+        STK["读写 CEA.estacks 栈内存"]
+
+        V --> IDT --> TR --> IST --> RSP --> STK
+    end
+
+    TSSW -.-> TSS
+    IDTW -.-> IDT
+    CEA -.-> STK
+```
+
+| 组件 | 存储内容 | 与 cea_exception_stacks 的关系 |
+|------|---------|-------------------------------|
+| **IDT** | 每向量 3-bit IST 索引（0–7） | **无直接关系**；只告诉 CPU 读 TSS 第几号槽 |
+| **TSS.ist[]** | 7×64-bit 栈顶 **虚拟地址** | 值来自 `__this_cpu_ist_top_va()`，指向 **CEA.estacks** 中各 `_stack` 的高地址 |
+| **CEA.estacks** | 映射后的 IST **栈内存** | `cea_exception_stacks` 指针指向此处；CPU 通过 TSS 里的 VA 访问 |
+| **exception_stacks** | 栈的**物理 backing** | 经 PTE 与 CEA.estacks 中同名 `_stack` 字段共享物理页 |
+
+**数据流（初始化）**：
+
+```
+exception_stacks.DF_stack  ──PTE──►  CEA.estacks.DF_stack  (fixmap VA)
+                                           ▲
+__this_cpu_ist_top_va(DF)  ──计算栈顶──►  │
+                                           │
+tss_setup_ist()  ──写入──►  TSS.ist[IST_INDEX_DF]  (该 VA)
+
+ISTG(X86_TRAP_DF, ..., IST_INDEX_DF)  ──写入──►  IDT[8].bits.ist = 1
+```
+
+**数据流（运行时 #DF）**：
+
+```
+CPU: IDT[8].IST=1 → TSS.ist[0] → RSP = 栈顶 VA → 在 CEA.estacks.DF_stack 上压帧
+（不调用 tss_setup_ist，不读 cea_exception_stacks 指针；硬件只读 TSS）
+```
+
+#### 5.3.4 单 CPU 内存关系图
+
+```mermaid
+flowchart TB
+    subgraph PHYS ["exception_stacks 每 CPU 物理 backing"]
+        direction TB
+        P_DF[DF_stack]
+        P_NMI[NMI_stack]
+        P_DB[DB_stack]
+        P_MCE[MCE_stack]
+    end
+
+    subgraph FIX ["cpu_entry_area fixmap 虚拟窗口"]
+        direction TB
+        V_GDT[GDT page]
+        V_ENT[entry_stack RSP0]
+        V_TSS[TSS page<br/>cpu_tss_rw 含 ist0-6]
+        V_EST[estacks<br/>guard + 栈映射区]
+    end
+
+    subgraph CPUHW ["CPU 硬件可见"]
+        direction TB
+        H_IDT[IDT RO mapping<br/>IST 索引]
+        H_TR[TR 指向 TSS]
+    end
+
+    P_DF -->|cea_map_stack| V_EST
+    P_NMI -->|cea_map_stack| V_EST
+    P_DB -->|cea_map_stack| V_EST
+    P_MCE -->|cea_map_stack| V_EST
+    V_EST -->|ist 栈顶 VA| V_TSS
+    V_TSS --> H_TR
+    H_IDT --> H_TR
+```
+
+CEA 内 `estacks` 虚拟布局（高地址在上，栈向下增长）：
+
+```
+  DF_stack_guard   [通常未映射，访问 fault]
+  DF_stack         ← TSS.ist[IST_INDEX_DF] 栈顶
+  NMI_stack_guard
+  NMI_stack        ← TSS.ist[IST_INDEX_NMI]
+  DB_stack         ← TSS.ist[IST_INDEX_DB]
+  MCE_stack        ← TSS.ist[IST_INDEX_MCE]
+  VC_stack / VC2_stack ...
+  IST_top_guard
+```
+
+TSS 页与 `estacks` **同属一个** `cpu_entry_area` 结构体，但角色不同：TSS 存 **指针**，estacks 存 **栈内容**。
+
+#### 5.3.5 初始化时序
+
+```mermaid
+sequenceDiagram
+    participant TI as trap_init
+    participant SCA as setup_cpu_entry_areas
+    participant PES as percpu_setup_exception_stacks
+    participant CEH as cpu_init_exception_handling
+    participant IDT as idt_setup_traps
+
+    TI->>SCA: traps.c:1685
+    SCA->>PES: setup_cpu_entry_area :240
+    PES->>PES: cea_exception_stacks 指向 estacks :147
+    PES->>PES: cea_map_stack DF/NMI/DB/MCE :154-157
+
+    TI->>CEH: :1691
+    CEH->>CEH: tss_setup_ist → TSS.ist[] :2420
+    CEH->>CEH: set_tss_desc + load_TR_desc :2422-2424
+    CEH->>CEH: load_current_idt :2448
+
+    TI->>IDT: :1695
+    IDT->>IDT: def_idts ISTG → idt_table :237
+```
+
+完整调用链见 §8.1。
+
+#### 5.3.6 软件在何时直接访问 cea_exception_stacks
+
+| 场景 | 用途 |
+|------|------|
+| `tss_setup_ist()` | 初始化时算栈顶 VA 写入 TSS |
+| `dumpstack_64.c` | oops 时判断 RSP 是否落在 IST 栈范围 |
+| `noinstr.c` / `#VC` | 嵌套时临时改 `TSS.ist[IST_INDEX_VC]`（改的是 TSS，地址仍源自 CEA） |
+| KVM / FRED | 读取主机 IST 栈地址填入 VMCS 或 FRED MSR |
+
+正常运行时 IST 异常入口 **不读** `cea_exception_stacks` 指针——CPU 只读 **TSS**；该指针供**内核软件**在初始化与诊断时使用。
+
+#### 5.3.7 运行时 IST 栈切换：IDT → TSS → 栈内存（不是「查 cea_exception_stacks」）
+
+常见误解是：异常时 CPU 依次查 **IDT → TSS → cea_exception_stacks 指针 → 栈**。  
+**正确路径只有两级硬件查表**：**IDT（IST 索引）→ TSS（64-bit 栈顶 VA）→ 按 VA 访问栈内存**。`cea_exception_stacks` 是内核软件指针，**不参与** CPU 异常入口。
+
+##### SDM 规定（硬件逐步做什么）
+
+**Step 1 — 读 IDT 门描述符的 IST 字段**（Vol 3A §6.14.1 *64-Bit Mode IDT*, Figure 6-7）：
+
+> Each 64-bit gate descriptor contains a **3-bit IST index** field. If the index is **non-zero**, the processor loads the corresponding IST pointer from the TSS **before** delivering the interrupt or exception.
+
+**Step 2 — 从 TSS 加载 IST 指针到 RSP**（Vol 3A §6.14.5 *Interrupt Stack Table*）：
+
+> The IST pointers are referenced by the 3-bit IST index field of the 64-bit gate descriptors. … When an interrupt occurs, the processor loads the pointer from the corresponding IST entry into **RSP**.
+
+**Step 3 — 在新 RSP 上压栈并跳转**（§6.14.4 *Stack Switching in IA-32e Mode*, §6.14.2 *64-Bit Mode Stack Frame*）：
+
+- IST 切换时 SS 强制为 NULL，旧 SS:RSP 压入新栈
+- 64 位模式**无条件**压 SS:RSP，每项 8 字节
+
+SDM **未定义**任何「第三级」去查 `cea_exception_stacks` 或 per-CPU 变量——TSS 里的 IST 条目已是**完整的 64-bit 线性地址**。
+
+##### 运行时硬件时序（以 #DF 为例）
+
+```mermaid
+sequenceDiagram
+    participant CPU as CPU 硬件
+    participant IDT as IDT 门描述符
+    participant TR as TR 寄存器
+    participant TSS as TSS 内存
+    participant MMU as 页表 MMU
+    participant STK as 栈内存 CEA.estacks
+
+    Note over CPU: 向量 8 Double Fault 发生
+
+    CPU->>IDT: 读 IDT[8]（IDTR.base + 8×16）
+    IDT-->>CPU: bits.ist = 1（使用 IST1）
+
+    CPU->>TR: 读 Task Register
+    TR-->>CPU: TSS 基址（指向 cpu_tss_rw 映射页）
+
+    CPU->>TSS: 读 IST1 即 offset 36 的 ist[0]
+    TSS-->>CPU: 64-bit 栈顶 VA（初始化时 tss_setup_ist 写入）
+
+    CPU->>CPU: RSP ← 该 VA；SS ← NULL；对齐 RSP
+
+    CPU->>STK: 经 MMU 向 RSP 压 SS/RSP/RFLAGS/CS/RIP/ErrorCode
+    Note over STK: 物理页来自 exception_stacks<br/>虚拟地址在 CEA.estacks
+
+    CPU->>IDT: 读处理程序偏移
+    CPU->>CPU: 跳转 asm_exc_double_fault
+
+    Note over CPU,STK: 全程不读 cea_exception_stacks 指针<br/>不调用 tss_setup_ist
+```
+
+##### 初始化 vs 运行时对照
+
+| 步骤 | 初始化（软件，`trap_init` 路径） | 运行时（CPU 硬件） |
+|------|--------------------------------|-------------------|
+| 1 | `cea_map_stack()` 建立 `exception_stacks` → CEA.estacks PTE | — |
+| 2 | `cea_exception_stacks = &cea->estacks`（软件指针） | **不读**该指针 |
+| 3 | `__this_cpu_ist_top_va(DF)` **计算**栈顶 VA | — |
+| 4 | `tss_setup_ist()` **写入** `TSS.ist[0]` | **读取** `TSS.ist[0]` → RSP |
+| 5 | `ISTG` **写入** `IDT[8].bits.ist = 1` | **读取** `IDT[8].bits.ist` |
+| 6 | `load_TR_desc()` / `load_current_idt()` | 使用已加载的 TR、IDTR |
+| 7 | — | 在栈顶 VA 处压异常帧（MMU 解析到 CEA 栈页） |
+
+**结论**：CEA / `cea_exception_stacks` 在**初始化**阶段参与「把栈顶 VA 算出来并写入 TSS」；**运行时** CPU 只持有 TSS 里已写好的 VA，直接访问对应虚拟地址上的栈内存。
+
+##### Linux 内核源码对照
+
+**初始化链（软件写配置，供日后硬件读）**：
+
+```c
+// cpu_entry_area.c:147 — 软件指针，仅内核使用
+per_cpu(cea_exception_stacks, cpu) = &cea->estacks;
+
+// cpu/common.c:2379 — 从 CEA 算栈顶，写入 TSS
+tss->x86_tss.ist[IST_INDEX_DF] = __this_cpu_ist_top_va(DF);
+
+// idt.c:103, :45-46 — 写 IDT IST 索引（IST_INDEX_DF+1 = 1）
+ISTG(X86_TRAP_DF, asm_exc_double_fault, IST_INDEX_DF)
+// → G(..., _ist + 1, ...) → idt_table[8].bits.ist = 1
+```
+
+**运行时链（硬件 + 入口汇编，不碰 cea_exception_stacks）**：
+
+```asm
+// entry_64.S:518-537 — idtentry_df
+// CPU 已完成 IDT→TSS→RSP 切换并压硬件帧
+call    paranoid_entry          /* 在 IST 栈上保存通用寄存器 */
+call    exc_double_fault        /* traps.c:597 */
+```
+
+```c
+// dumpstack_64.c:103 — 仅 oops 诊断时软件才读 cea_exception_stacks
+begin = (unsigned long)__this_cpu_read(cea_exception_stacks);
+```
+
+全内核 **`grep cea_exception_stacks`** 仅出现在：初始化赋值、`__this_cpu_ist_top_va` 宏展开、栈回溯、`#VC` 辅助判断——**无一在 IDT 异常硬件入口路径**。
+
+##### 为何栈内存「看起来像是 CEA」但 CPU 不「查 cea_exception_stacks」
+
+```
+初始化时：
+  __this_cpu_ist_top_va(DF)
+    = CEA_ESTACK_TOP(cea_exception_stacks, DF)
+    = &cea->estacks.DF_stack + sizeof(DF_stack)    // 栈顶 VA
+
+  TSS.ist[0] = 上述 VA    // 拷贝进 TSS，此后通常不变
+
+运行时：
+  CPU: RSP = TSS.ist[0]   // 已是 CEA.estacks 区域内的 VA
+  MMU: VA → PTE → exception_stacks 物理页
+  CPU: 在该 VA 压栈
+
+  （cea_exception_stacks 指针变量不再参与）
+```
+
+**准确表述**：
+
+- ✅ 异常时：**IDT 查 IST 索引 → TSS 取栈顶 VA → 在该 VA（CEA 映射的栈页）上压栈**
+- ❌ 异常时：**IDT → TSS → 查 cea_exception_stacks 指针 → 栈**（多了一步，且不存在）
+
+`cea_exception_stacks` 是 Linux 为了**方便内核代码定位 CEA.estacks** 而设的 per-CPU 指针；**TSS.ist[]** 才是 CPU 硬件认的「IST 栈地址寄存器文件」。
 
 ---
 
@@ -588,7 +913,7 @@ static void __init percpu_setup_exception_stacks(unsigned int cpu)
 }
 ```
 
-物理页存储在 `exception_stacks`（per-CPU 数组），通过 fixmap 映射到 CEA 中带 guard page 的 `cea_exception_stacks`。TSS 中的 IST 指针指向 CEA 映射的**栈顶**。
+物理页存储在 `exception_stacks`（per-CPU 数组），通过 fixmap 映射到 CEA 中带 guard page 的 `estacks` 布局；详见 §5.3。TSS 中的 IST 指针指向 CEA 映射的**栈顶**。
 
 ### 7.4 内存布局示意
 
