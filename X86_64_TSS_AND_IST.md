@@ -1,6 +1,6 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 3.5  
+**版本**: 3.6  
 **日期**: 2026-06-21  
 **作者**: Linux 内核启动文档项目
 
@@ -14,7 +14,7 @@
 2. [硬件：64 位 TSS 结构](#2-硬件64-位-tss-结构)
 3. [硬件：IST 机制](#3-硬件ist-机制)
 4. [数据栈 IST 与影子栈 SSP](#4-数据栈-ist-与影子栈-ssp)
-5. [Linux 数据结构总览](#5-linux-数据结构总览)
+5. [Linux 数据结构总览](#5-linux-数据结构总览)（含 [CEA 全景 §5.4](#54-cpu-entry-area-cea-全景)）
 6. [Linux 七个 IST 槽位：定义、分配与使用](#6-linux-七个-ist-槽位定义分配与使用)
 7. [Linux IST 栈内存布局与分配](#7-linux-ist-栈内存布局与分配)
 8. [Linux 初始化时序](#8-linux-初始化时序)
@@ -597,6 +597,129 @@ begin = (unsigned long)__this_cpu_read(cea_exception_stacks);
 
 `cea_exception_stacks` 是 Linux 为了**方便内核代码定位 CEA.estacks** 而设的 per-CPU 指针；**TSS.ist[]** 才是 CPU 硬件认的「IST 栈地址寄存器文件」。
 
+### 5.4 CPU Entry Area（CEA）全景
+
+源码中 **`cea_` 前缀即 CPU Entry Area 的缩写**（如 `cea_set_pte()`、`cea_offset()`、`cea_exception_stacks`、`cea_map_stack()`）。CEA 是 x86-64 上**每个逻辑 CPU 一份**、位于 **fixmap 固定虚拟地址窗口**内的入口相关数据结构集合——从用户态陷入内核（中断、异常、syscall 早期路径）时，CPU 和入口汇编必须能**在不依赖进程上下文**的情况下找到 GDT、TSS、入口栈、IST 栈等。
+
+#### 5.4.1 重要澄清：CEA 不是「指针容器」
+
+`cpu_entry_area.h` 对 `struct cpu_entry_area` 的注释写得很明确：
+
+> Every field is a **virtual alias** of some other allocated backing store.  
+> There is **no direct allocation** of a struct cpu_entry_area.
+
+因此：
+
+| 常见误解 | 源码事实 |
+|---------|---------|
+| `cpu_entry_area` 是根结构，内含指向各子组件的指针 | ❌ 字段是**内嵌布局**（`gdt[]`、`entry_stack_page`、`tss`、`estacks` 等），不是指针数组 |
+| `cea_exception_stacks` 就是 `exception_stacks` | ❌ 前者是 CEA 内 **`estacks` 的 fixmap 视图**（含 guard 空洞）；后者是 **per-CPU 物理 backing**（`cpu_entry_area.c:18`） |
+| `ist` 是 CEA 里单独一块 | ❌ **IST 指针**在 **TSS** 的 `x86_tss.ist[]`；**IST 栈内存**在 CEA 的 **`estacks`** |
+
+x86-64 上 **`get_cpu_entry_area(cpu)` 用公式算 VA**，不依赖 per-CPU 指针变量（`cpu_entry_area.c:70-75`）：
+
+```c
+unsigned long va = CPU_ENTRY_AREA_PER_CPU + cea_offset(cpu) * CPU_ENTRY_AREA_SIZE;
+return (struct cpu_entry_area *) va;
+```
+
+#### 5.4.2 fixmap 虚拟地址布局
+
+CEA 占据 P4D 级 fixmap 槽位（`pgtable_64_types.h:183-184`）：
+
+```c
+#define CPU_ENTRY_AREA_PGD    (-4UL)
+#define CPU_ENTRY_AREA_BASE   (CPU_ENTRY_AREA_PGD << P4D_SHIFT)
+```
+
+`pgtable_areas.h` 将区域划分为：
+
+```c
+#define CPU_ENTRY_AREA_RO_IDT    CPU_ENTRY_AREA_BASE          /* 第 0 页：只读 IDT 映射 */
+#define CPU_ENTRY_AREA_PER_CPU   (CPU_ENTRY_AREA_RO_IDT + PAGE_SIZE)  /* 之后：每 CPU 窗口 */
+```
+
+```mermaid
+flowchart TB
+    subgraph CEA_REGION ["CPU_ENTRY_AREA fixmap 区域"]
+        direction TB
+        IDT_PG["页 0: CPU_ENTRY_AREA_RO_IDT<br/>idt_table 只读映射 idt.c:279"]
+        CPU0["CPU0 窗口 sizeof cpu_entry_area"]
+        CPU1["CPU1 窗口 ..."]
+        CPUn["CPU n 窗口 cea_offset n"]
+    end
+
+    subgraph WIN ["单个 cpu_entry_area 窗口 内布局"]
+        direction TB
+        W_GDT["gdt PAGE_SIZE RO 映射"]
+        W_ENT["entry_stack_page RSP0 跳板栈"]
+        W_TSS["tss cpu_tss_rw RO 映射 TR 指向"]
+        W_EST["estacks IST 栈 + guard 布局"]
+        W_DBG["cpu_debug_store / buffers"]
+    end
+
+    IDT_PG --> CPU0
+    CPU0 --> WIN
+```
+
+启用 KASLR 时，每 CPU 的 `cea_offset(cpu)` 随机化（`init_cea_offsets()`，`cpu_entry_area.c:28-57`），但**窗口大小与内部字段偏移固定**。
+
+#### 5.4.3 `struct cpu_entry_area` 各字段与 backing store
+
+| CEA 内字段 | 类型 / 作用 | 物理 backing（per-CPU） | 映射函数 |
+|-----------|------------|------------------------|---------|
+| `gdt[]` | GDT 的 fixmap **只读**视图 | `get_cpu_gdt_paddr(cpu)` 处真实 GDT | `cea_set_pte(&cea->gdt, ...)` :199 |
+| `entry_stack_page` | **Entry trampoline stack**（`TSS.sp0` 指向此处） | `entry_stack_storage` :15 | `cea_map_percpu_pages` :201-203 |
+| `tss` | **TSS**（含 `ist[]`、`sp0`）；TR 经 GDT 指向此映射 | `cpu_tss_rw`（`process.c`） | `cea_map_percpu_pages(&cea->tss, &cpu_tss_rw, ...)` :233-234 |
+| `estacks` | **IST 异常栈** fixmap 布局（guard + 栈页） | `exception_stacks` :18 | `cea_map_stack()` :154-157 |
+| `cpu_debug_store` 等 | Intel 性能监控 debug store | `cpu_debug_store` 等 | `percpu_setup_debug_store()` |
+
+**与 IST 的关系**：`estacks` 提供栈**内存**；同窗口内的 `tss.x86_tss.ist[]` 保存栈**顶 VA**（初始化时由 `tss_setup_ist()` 写入）。二者在同一 `cpu_entry_area` 结构体内相邻，但职责不同（§5.3）。
+
+**IDT 与 CEA 区域**：`idt_table` 本体在普通内核内存；`idt_map_in_cea()`（`idt.c:271-281`）在 CEA **第 0 页**建立**只读 alias**，使 `sidt` 不泄露内核地址，并防止任意写破坏 IDT：
+
+```c
+cea_set_pte(CPU_ENTRY_AREA_RO_IDT_VADDR, __pa_symbol(idt_table), PAGE_KERNEL_RO);
+idt_descr.address = CPU_ENTRY_AREA_RO_IDT;
+```
+
+#### 5.4.4 Entry stack（跳板栈）与 KPTI
+
+`entry_stack_page` 即 §14 所述 **entry trampoline stack**：64 位下用户态→内核态中断时，CPU 先从 `TSS.sp0` 落在此 4KB 栈，再经 `sync_regs()` 复制到进程内核栈。
+
+`cea_set_pte()` 注释（`cpu_entry_area.c:84-86`）指出 CEA 映射在**用户页表与内核页表间共享**（`_PAGE_GLOBAL`），以便 PTI 下用户态陷入时仍能访问入口栈。PTI 还会 clone 整个 CEA 区域到用户可见页表（`pti.c:449-456` `pti_clone_p4d(CPU_ENTRY_AREA_BASE)`）。
+
+#### 5.4.5 为何集中设计 CEA
+
+| 动机 | 源码/行为依据 |
+|------|-------------|
+| **入口路径可靠** | 中断/异常早期不能依赖进程 mm；固定 fixmap VA + 每 CPU 窗口，`get_cpu_entry_area()` 可 `noinstr` 调用 |
+| **页表切换安全** | PTI 下 CR3 切换后仍需访问 GDT、TSS、entry stack；CEA 在用户/内核页表均映射 |
+| **安全 hardening** | IDT 只读映射防篡改；TSS/GDT 在 64 位下 RO 映射（`setup_cpu_entry_area` :181-183） |
+| **地址可预测** | `cpu_entry_stack(cpu)`、`__this_cpu_ist_top_va()` 等通过固定偏移计算，无需动态分配 |
+| **虚拟化** | KVM 等从 CEA 读取主机 IST 栈顶地址填入 VMCS / FRED MSR（§5.3.6） |
+
+#### 5.4.6 初始化入口
+
+```c
+// traps.c:1684-1685
+setup_cpu_entry_areas();
+  └─ init_cea_offsets()           // cpu_entry_area.c:267
+  └─ for_each_possible_cpu(cpu)
+       setup_cpu_entry_area(cpu)  // :177 — GDT / entry stack / TSS / estacks PTE
+```
+
+完整时序见 §5.3.5、§8.1。IST 相关路径：**`exception_stacks` 分配物理页 → `cea_map_stack` 映射到 `cea->estacks` → `tss_setup_ist` 把栈顶 VA 写入同窗口的 `tss.x86_tss.ist[]` → `load_TR_desc()`**。
+
+#### 5.4.7 与本文其他章节的关系
+
+| 主题 | 章节 |
+|------|------|
+| IST 栈三层存储、`cea_exception_stacks` 指针 | §5.3 |
+| 运行时 IDT→TSS→栈 VA（不查 cea 指针） | §5.3.7 |
+| Entry trampoline 与 `sp0` | §14.2 |
+| `trap_init` 初始化顺序 | §8.1 |
+
 ---
 
 ## 6. Linux 七个 IST 槽位：定义、分配与使用
@@ -615,16 +738,34 @@ begin = (unsigned long)__this_cpu_read(cea_exception_stacks);
 | IST6 | `ist[5]` | — | — | **未使用** | — | — | — | — |
 | IST7 | `ist[6]` | — | — | **未使用** | — | — | — | — |
 
-常量定义（`arch/x86/include/asm/page_64_types.h`）：
+常量定义（`arch/x86/include/asm/page_64_types.h:24-31`）：
 
 ```c
-#define IST_INDEX_DF    0
-#define IST_INDEX_NMI   1
-#define IST_INDEX_DB    2
-#define IST_INDEX_MCE   3
-#define IST_INDEX_VC    4
-/* 无 IST_INDEX_5 / IST_INDEX_6 — ist[5] 和 ist[6] 保持 0 */
+/*
+ * tss.ist[] 的下标；硬件共 7 个 IST 槽（IST1–IST7 对应 ist[0]–ist[6]）。
+ * IDT 门描述符里的 IST 字段存的是 1-based 编号（IST_INDEX + 1），0 表示不用 IST。
+ */
+#define IST_INDEX_DF    0   /* IST1 → #DF  Double Fault（双重故障），向量 8  */
+#define IST_INDEX_NMI   1   /* IST2 → NMI  不可屏蔽中断，向量 2              */
+#define IST_INDEX_DB    2   /* IST3 → #DB  Debug（调试异常），向量 1          */
+#define IST_INDEX_MCE   3   /* IST4 → #MC  Machine Check（机器检查），向量 18 */
+#define IST_INDEX_VC    4   /* IST5 → #VC  VMM Communication（SEV-ES GHCB），向量 29 */
+/* 无 IST_INDEX_5 / IST_INDEX_6 — ist[5]、ist[6] 保持 0，无 IDT 表项绑定 */
 ```
+
+各宏与异常/中断的对应关系（`idt.c:84-116` 中 `ISTG` 绑定）：
+
+| `IST_INDEX_*` | TSS | IDT.IST | 向量 | 异常名 | 典型触发场景 |
+|---------------|-----|---------|------|--------|-------------|
+| `DF` | `ist[0]` | 1 | 8 | **#DF** Double Fault | 处理 #PF/#TS 等时再 fault；或 IRET 失败 |
+| `NMI` | `ist[1]` | 2 | 2 | **NMI** | 硬件 NMI 引脚、PMI、某些 MCE 路径 |
+| `DB` | `ist[2]` | 3 | 1 | **#DB** Debug | `INT3`、单步、`DR` 断点/监视点 |
+| `MCE` | `ist[3]` | 4 | 18 | **#MC** Machine Check | 不可恢复硬件错误（需 `CONFIG_X86_MCE`） |
+| `VC` | `ist[4]` | 5 | 29 | **#VC** VMM Communication | AMD SEV-ES 客户机经 GHCB 请求主机（需 `CONFIG_AMD_MEM_ENCRYPT`） |
+| — | `ist[5]` | — | — | *未使用* | — |
+| — | `ist[6]` | — | — | *未使用* | — |
+
+说明：`IST_INDEX_*` 是 **TSS `ist[]` 的 0-based 下标**；CPU 手册里的 IST1–IST7 即 `ist[0]`–`ist[6]`。`#DE`（除零，向量 0）等普通异常 **不** 使用 IST，走当前 RSP。
 
 ### 6.2 TSS 中写入 IST 指针
 
