@@ -104,7 +104,7 @@ struct desc_struct {
 
 ## 3. GDT 初始化与选择子→描述符→CPL 的完整映射
 
-与 **[X86_GDT_STRUCTURE.md §5](X86_GDT_STRUCTURE.md)** 的关系：**§5** 概述 `gdt_page` 静态初始化与 `DESC_USER` 结论；**本节 §3.1** 给出「**仅看 `common.c` + `desc_defs.h` 如何机械推出 `GDT_ENTRY_KERNEL_CS` / `GDT_ENTRY_DEFAULT_USER_CS` 对应描述符的 DPL**」的推导链，避免与专文重复时两处漂移。
+与 **[X86_GDT_STRUCTURE.md §5](X86_GDT_STRUCTURE.md)** 的关系：**§5** 概述 `gdt_page` 静态初始化与 `DESC_USER` 结论；**本节 §3.1** 给出「**仅看 `common.c` + `desc_defs.h` 如何机械推出 `GDT_ENTRY_KERNEL_CS` / `GDT_ENTRY_DEFAULT_USER_CS` 对应描述符的 DPL**」的推导链，避免与专文重复时两处漂移；**§3.1.3** 单独说明 **`gdt_page.gdt[索引]` 的方括号含义、`gdt[]` 元素类型为 `struct desc_struct`，以及 `[索引] = GDT_ENTRY_INIT(...)` 与 `DEFINE_PER_CPU_PAGE_ALIGNED` 静态初值的关系**。
 
 ### 3.1 GDT 描述符的初始化（内核 vs 用户）
 
@@ -169,6 +169,40 @@ struct desc_struct {
 |------------------|----------------------------|-------------|
 | `GDT_ENTRY_KERNEL_CS` | `DESC_CODE64` | **0** |
 | `GDT_ENTRY_DEFAULT_USER_CS` | `DESC_CODE64 \| DESC_USER` | **3** |
+
+#### 3.1.3 `gdt_page.gdt[GDT_ENTRY_KERNEL_CS]`：方括号语法、成员类型、`GDT_ENTRY_INIT` 填的是谁
+
+**1）`gdt` 里每个元素是什么类型？**
+
+`struct gdt_page` 在 **`arch/x86/include/asm/desc.h`** 中定义为：
+
+```44:46:/Users/weli/works/linux/arch/x86/include/asm/desc.h
+struct gdt_page {
+	struct desc_struct gdt[GDT_ENTRIES];
+} __attribute__((aligned(PAGE_SIZE)));
+```
+
+因此：**成员 `gdt` 的类型是「长度为 `GDT_ENTRIES` 的 `struct desc_struct` 数组」**；**任意 `gdt[i]` 的类型都是 `struct desc_struct`**（数组下标表达式的元素类型即数组元素类型）。
+
+**2）方括号 `[GDT_ENTRY_KERNEL_CS]` 是什么？**
+
+在 C 中 **`a[i]`** 表示取**数组 `a` 的第 `i` 个元素**。`GDT_ENTRY_KERNEL_CS` 在 **`segment.h`** 里为整数常量（64 位下为 **2**），表示 **GDT 槽位索引**。
+
+- **`gdt_page.gdt`**：`gdt_page` 结构体里的 **`gdt` 数组**；
+- **`gdt_page.gdt[GDT_ENTRY_KERNEL_CS]`**：该数组**下标为 `GDT_ENTRY_KERNEL_CS` 的那一个元素**，类型为 **`struct desc_struct`**。
+
+**3）哪里体现「填入一个 `struct desc_struct`」？**
+
+在 **`arch/x86/kernel/cpu/common.c`** 的 **`DEFINE_PER_CPU_PAGE_ALIGNED(struct gdt_page, gdt_page) = { .gdt = { ... } }`** 里，每一项形如：
+
+```c
+[GDT_ENTRY_KERNEL_CS] = GDT_ENTRY_INIT(DESC_CODE64, 0, 0xfffff),
+```
+
+这是 C 的**指定初始化**：**`gdt` 数组中下标为 `GDT_ENTRY_KERNEL_CS` 的元素**，用 **`=` 右侧**的初值初始化。  
+**`GDT_ENTRY_INIT(...)`** 展开为 **`{ .limit0 = ..., .dpl = ..., ... }`**，花括号内的**字段名与 `struct desc_struct` 的成员一致**，编译器据此把它当作 **一个 `struct desc_struct` 的初值** 写进 **`gdt[...]`**，无需再写单独的 `memcpy` 或逐字段赋值语句。
+
+**小结**：**类型来自 `struct gdt_page` 里 `struct desc_struct gdt[]` 的声明**；**填入来自 `[索引] = GDT_ENTRY_INIT(...)` 的聚合初始化**。
 
 ### 3.2 选择子 → GDT 描述符 → CPL 的映射表
 
