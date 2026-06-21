@@ -1,6 +1,6 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 3.0  
+**版本**: 3.3  
 **日期**: 2026-06-21  
 **作者**: Linux 内核启动文档项目
 
@@ -20,7 +20,7 @@
 8. [Linux 初始化时序](#8-linux-初始化时序)
 9. [Linux 异常入口路径](#9-linux-异常入口路径)
 10. [IST 与 IDT 的集成](#10-ist-与-idt-的集成)
-11. [为什么需要 IST](#11-为什么需要-ist)
+11. [为什么需要 IST](#11-为什么需要-ist)（含 [§11.4 IST 使用后的状态恢复](#114-ist-使用后的状态恢复)）
 12. [启动早期约束](#12-启动早期约束)
 13. [调试与验证](#13-调试与验证)
 14. [附录：TSS 角色演变与 Entry Trampoline](#14-附录tss-角色演变与-entry-trampoline)
@@ -45,6 +45,8 @@
 | 影子栈指针（SSP） | 内存中的一张表，基址由 `IA32_INTERRUPT_SSP_TABLE` MSR 指向 | CET 影子栈切换（与 TSS 中的 RSP 独立） |
 
 IDT 里**只有 3 个比特的索引**，存不下 64 位地址；真正的大指针数组在 TSS（数据栈）和 MSR 指向的内存表（影子栈）中。
+
+> **为何 TSS 与 IDT 都要配置？** TSS 提供 7 个栈**地址**，IDT 每个向量声明**是否使用 IST 及用几号**——详见 [§6.3](#63-tss-与-idt-的分工为什么两侧都要配置-ist)。
 
 ### 1.3 Per-CPU 作用域
 
@@ -322,7 +324,126 @@ static inline void tss_setup_ist(struct tss_struct *tss)
     CEA_ESTACK_TOP(__this_cpu_read(cea_exception_stacks), name)
 ```
 
-### 6.3 IDT 中绑定 IST
+### 6.3 TSS 与 IDT 的分工：为什么两侧都要配置 IST
+
+IST 指针在 TSS 里，但**仅配置 TSS 不够**——还必须让每个 IDT 表项声明「这次异常用不用 IST、用几号」。二者缺一不可。
+
+#### 6.3.1 各自存什么、各管什么
+
+| 组件 | 物理位置 | 存储内容 | 作用 |
+|------|---------|---------|------|
+| **TSS** | 由 TR 指向的内存（每 CPU 一份） | IST1–IST7 共 7 个 **64 位栈地址** | 提供备用栈的**实际 RSP 值** |
+| **IDT 门描述符** | `idt_table[vector]`（每向量 16 字节） | **3-bit IST 索引**（0–7） | 告诉 CPU **本次**是否换 IST 栈、用 **IST 几号** |
+
+SDM 对此的表述（Vol 3A §6.14.5 *Interrupt Stack Table*）：
+
+> The IST mechanism … is part of the 64-bit mode TSS. … The IST pointers are **referenced by the 3-bit IST index field** of the 64-bit gate descriptors.
+
+以及（§6.14.1 *64-Bit Mode IDT*，Figure 6-7）：
+
+> Each 64-bit gate descriptor contains a **3-bit IST index** field. If the index is **non-zero**, the processor loads the corresponding IST pointer from the TSS **before** delivering the interrupt or exception.
+
+要点：
+
+- TSS 是**地址表**（7 个槽位），不含「#DF 用哪块、#PF 用哪块」的 per-vector 规则
+- IDT 是**选择器**（每个向量独立 3 bit），放不下 64 位地址，只能存索引 0–7
+- **IST = 0** 表示不使用 IST，走 §3.2 的 legacy/RSP0 路径；**IST = N (1–7)** 才读 `TSS.IST[N-1]`
+
+#### 6.3.2 硬件处理流程
+
+结合 §3.2 的栈切换逻辑，CPU 在异常/中断入口的完整决策链为：
+
+```
+1. 根据向量号查 IDT[vector]（IDTR 基址 + vector × 16）
+2. 读该门描述符的 IST 字段（3 bit）
+   ├─ IST = 0  → 不使用 IST；若 CPL 改变则 RSP = TSS.RSP0，否则保持当前 RSP
+   └─ IST = N  → 读 TR → 定位 TSS → RSP = TSS.IST[N-1]（N = 1..7）
+3. 向新 RSP 压入 SS/RSP/RFLAGS/CS/RIP（64 位模式无条件压 SS:RSP，§3.3）
+4. 跳转到门描述符中的处理程序偏移
+```
+
+因此：**TSS 回答「7 块备用栈分别在哪」；IDT 回答「这次异常去取第几块」**。没有 IDT 里的 IST 字段，CPU 即使 TR 已指向填好地址的 TSS，也不知道该读 `ist[0]` 还是 `ist[1]`，甚至不知道要不要读。
+
+#### 6.3.3 为什么不能只在一边配置
+
+**只在 TSS 里写地址、不在 IDT 里绑定**——无效。硬件按向量查 IDT，IST 字段默认为 0 的条目（如 #PF、#GP）**永远不会**读取 TSS 的 `ist[]`，即使用户态/内核态触发 #DF 所需的独立栈地址已经写在 `ist[0]` 里，只要 IDT[8] 的 IST 仍为 0，#DF 仍会在当前（可能已损坏的）栈上压帧。
+
+**只在 IDT 里写 IST 索引、不在 TSS 里填地址**——更危险。CPU 会按索引去读 TSS 中对应槽位；若该值为 0 或未初始化，RSP 指向无效地址 → 压栈再次 fault → Triple Fault。
+
+Linux 启动顺序因此强制：**先** `tss_setup_ist()` + `ltr`，**后** `idt_setup_traps()` 写入带 IST 的 `def_idts[]`（详见 §8.1）。
+
+#### 6.3.4 Linux 内核中的两侧配置（源码对照）
+
+**TSS 侧：写入 7 个槽位中的实际栈顶地址**
+
+`arch/x86/kernel/cpu/common.c` — `tss_setup_ist()`，在 `cpu_init_exception_handling()` 里调用：
+
+```c
+static inline void tss_setup_ist(struct tss_struct *tss)
+{
+    tss->x86_tss.ist[IST_INDEX_DF]  = __this_cpu_ist_top_va(DF);
+    tss->x86_tss.ist[IST_INDEX_NMI] = __this_cpu_ist_top_va(NMI);
+    tss->x86_tss.ist[IST_INDEX_DB]  = __this_cpu_ist_top_va(DB);
+    tss->x86_tss.ist[IST_INDEX_MCE] = __this_cpu_ist_top_va(MCE);
+    tss->x86_tss.ist[IST_INDEX_VC]  = __this_cpu_ist_top_va(VC);
+}
+```
+
+**IDT 侧：为每个向量指定 IST 索引**
+
+`arch/x86/include/asm/desc_defs.h` — 门描述符中的 3-bit IST 字段：
+
+```c
+struct idt_bits {
+    u16     ist  : 3,    /* 对应 SDM Figure 6-7 的 IST 字段 */
+            zero : 5,
+            type : 5,
+            dpl  : 2,
+            p    : 1;
+} __attribute__((packed));
+```
+
+`arch/x86/kernel/idt.c` — `ISTG` 宏把 Linux 的 0-based `IST_INDEX_*` 转为 SDM 的 1-based IDT.IST 值：
+
+```c
+/*
+ * Interrupt gate with interrupt stack. The _ist index is the index in
+ * the tss.ist[] array, but for the descriptor it needs to start at 1.
+ */
+#define ISTG(_vector, _addr, _ist) \
+    G(_vector, _addr, _ist + 1, GATE_INTERRUPT, DPL0, __KERNEL_CS)
+```
+
+`G` 宏将 `_ist + 1` 写入 `bits.ist`；`idt_setup_from_table()` → `idt_init_desc()` 将其拷贝进 `idt_table[]`：
+
+```c
+// arch/x86/include/asm/desc.h
+static inline void idt_init_desc(gate_desc *gate, const struct idt_data *d)
+{
+    gate->bits = d->bits;   /* 含 bits.ist → 写入 IDT 门描述符 */
+    /* ... offset、segment 等 ... */
+}
+```
+
+**完整示例：#DF（向量 8）两侧如何配合**
+
+| 步骤 | 位置 | 值 | 含义 |
+|------|------|-----|------|
+| 1 | `tss->x86_tss.ist[IST_INDEX_DF]` 即 `ist[0]` | `__this_cpu_ist_top_va(DF)` | TSS 侧：IST1 的数据栈地址 |
+| 2 | `ISTG(X86_TRAP_DF, asm_exc_double_fault, IST_INDEX_DF)` | `bits.ist = 0 + 1 = 1` | IDT 侧：向量 8 使用 IST1 |
+| 3 | CPU 处理 #DF | 读 IDT[8].IST=1 → `TSS.ist[0]` | 硬件完成索引→地址解析 |
+
+同一 TSS 中 `ist[1]` 存的是 NMI 栈，但只有 IDT[2]（NMI 向量）的 IST=2 时 CPU 才会去读它；#DF 永远不会误用 NMI 的栈。
+
+**对比：#PF 不使用 IST**
+
+```c
+INTG(X86_TRAP_PF, asm_exc_page_fault),   /* bits.ist = DEFAULT_STACK = 0 */
+```
+
+IST=0 时 CPU 不查 `ist[]`——这正是「per-vector 选择」必须由 IDT 而非 TSS 单独完成的体现。
+
+#### 6.3.5 IDT 表项实例（`def_idts[]`）
 
 `arch/x86/kernel/idt.c` 的 `def_idts[]`：
 
@@ -343,18 +464,7 @@ static const __initconst struct idt_data def_idts[] = {
 };
 ```
 
-`ISTG` 宏的 +1 转换（`arch/x86/kernel/idt.c`）：
-
-```c
-/*
- * The _ist index is the index in the tss.ist[] array,
- * but for the descriptor it needs to start at 1.
- */
-#define ISTG(_vector, _addr, _ist) \
-    G(_vector, _addr, _ist + 1, GATE_INTERRUPT, DPL0, __KERNEL_CS)
-```
-
-**常见笔误**：`X86_TRAP_DF` 在 Linux 中**一定**使用 IST（`ISTG` 宏），不是 `IST=0`。若 #DF 不使用 IST，当前栈损坏时会直接 Triple Fault。
+**常见笔误**：`X86_TRAP_DF` 在 Linux 中**一定**使用 IST（`ISTG` 宏），不是 `IST=0`。若 #DF 不使用 IST，当前栈损坏时会直接 Triple Fault。`ISTG` 的 `+1` 转换见 §6.3.4。
 
 ### 6.4 软件层面的额外栈（不占硬件 IST 槽位）
 
@@ -506,21 +616,26 @@ CPU N 的 CEA 异常栈区域（高地址在上）:
 
 ### 8.1 正确的启动顺序
 
-实际代码路径（`arch/x86/kernel/traps.c` 的 `trap_init()`）：
+实际代码路径（Boot CPU 的 `trap_init()`，源码树：`/Users/weli/works/linux`）：
 
 ```
-trap_init()
-  ├─ setup_cpu_entry_areas()          // 分配并映射 CEA、异常栈、TSS
-  ├─ sev_es_init_vc_handling()
-  ├─ cpu_init_exception_handling(true)
-  │    ├─ setup_getcpu()
-  │    ├─ tss_setup_ist()              // 填充 TSS.ist[]
-  │    ├─ tss_setup_io_bitmap()
-  │    ├─ set_tss_desc() + load_TR_desc()  // ltr
-  │    └─ load_current_idt()           // 加载 idt_table
-  ├─ idt_setup_traps()                 // 写入 def_idts（含 IST 条目）
-  └─ cpu_init()                        // load_sp0(entry_stack) 等
+trap_init()                                         traps.c:1682
+  ├─ setup_cpu_entry_areas()                        cpu_entry_area.c:263
+  ├─ sev_es_init_vc_handling()                      coco/sev/core.c:1230
+  ├─ cpu_init_exception_handling(true)              cpu/common.c:2410
+  │    ├─ setup_getcpu(cpu)                         cpu/common.c:2354  (调用 :2416)
+  │    ├─ tss_setup_ist(tss)                        cpu/common.c:2376  (调用 :2420)
+  │    ├─ tss_setup_io_bitmap(tss)                  cpu/common.c:2390  (调用 :2421)
+  │    ├─ set_tss_desc(...)                         include/asm/desc.h:190  (调用 common.c:2422)
+  │    ├─ load_TR_desc()                            include/asm/desc.h:254  (调用 common.c:2424)
+  │    └─ load_current_idt()                        idt.c:183  (调用 common.c:2448，非 FRED 路径)
+  ├─ idt_setup_traps()                              idt.c:235  (调用 traps.c:1695，非 FRED 路径)
+  │    └─ idt_setup_from_table(..., def_idts, ...)  idt.c:237
+  └─ cpu_init()                                     cpu/common.c:2466  (调用 traps.c:1697)
+       └─ load_sp0(cpu_entry_stack(cpu) + 1)        cpu/common.c:2506
 ```
+
+路径均相对于 `arch/x86/`。Secondary CPU 不调用 `trap_init()`，在 `start_secondary()`（`smpboot.c:229`）中调用 `cpu_init_exception_handling(false)`（`:248`），经同步点后进入 `cpu_init()`（`:275`）。
 
 **关键约束**：`idt_setup_traps()`（写入 IST 条目）必须在 `cpu_init_exception_handling()`（设置 TSS + ltr）**之后**调用。在此之前 IDT 中的 IST 字段必须全为 0。
 
@@ -534,7 +649,7 @@ trap_init()
 | `trap_init` → `cpu_init_exception_handling` | — | — | TSS 初始化 + ltr |
 | `trap_init` → `idt_setup_traps` | `idt_table` + `def_idts` | #DF/NMI/#DB/#MC/#VC 非 0 | TR 已就绪 |
 
-Secondary CPU 在 `start_secondary()` → `cpu_init_exception_handling(false)` 中走相同路径（`arch/x86/kernel/smpboot.c`）。
+Secondary CPU 在 `start_secondary()`（`smpboot.c:229`）中调用 `cpu_init_exception_handling(false)`（`:248`），再进入 `cpu_init()`（`:275`），不重复走 `trap_init()`。
 
 ### 8.3 TR 加载
 
@@ -674,6 +789,8 @@ struct idt_bits {
     → 成功压栈 → exc_double_fault() → panic + oops 日志
 ```
 
+§11.2 描述的是**典型栈溢出路径**——系统不会从 #DF 正常返回，因此不存在「恢复后继续运行」的问题（见 §11.4）。
+
 ### 11.3 同特权级不查 RSP0 的含义
 
 内核态触发 IST=0 的异常（如 #PF）时，CPU **不会**读取 TSS.RSP0，而是继续使用当前 RSP。这意味着：
@@ -681,6 +798,150 @@ struct idt_bits {
 - 即使 TSS.RSP0 指向完全有效的栈，CPU 也不会用它
 - 若 RSP 已被 bug 损坏，普通异常无法恢复
 - **IST 的价值正在于此**：对 #DF/NMI/#MC/#DB，无论当前特权级，都强制换栈
+
+### 11.4 IST 使用后的「状态恢复」
+
+「恢复 IST 到 good state」需要区分两层含义：**TSS 里的 IST 指针**（配置）和 **IST 栈内存里的内容**（运行时数据）。Linux 对二者的处理不同。
+
+#### 11.4.1 两层「状态」分别指什么
+
+| 层次 | 内容 | 「Good state」的含义 |
+|------|------|-------------------|
+| **TSS 配置** | `TSS.ist[n]` 中的 64 位地址 | 仍指向该 IST 栈的**栈顶**（`__this_cpu_ist_top_va(...)`） |
+| **栈内存** | IST 栈页上的压栈数据、局部变量 | 空栈或可被下次异常覆盖的「脏」数据 |
+
+SDM（Vol 3A §6.14.5）规定：发生 IST 切换时，CPU 将 TSS 中对应 IST 指针的**完整值**加载到 RSP——**不会**在 TSS 里递减该指针。TSS 中的 IST 条目始终是「下次 IST 切换时的目标 RSP」，而不是「当前栈顶位置」。
+
+#### 11.4.2 典型 #DF 路径：不恢复，直接停机
+
+§11.2 的栈溢出场景走 `exc_double_fault()`（`traps.c:597`），最终：
+
+```c
+pr_emerg("PANIC: double fault, error_code: 0x%lx\n", error_code);
+die("double fault", regs, error_code);
+panic("Machine halted.");
+```
+
+这是 **noreturn** 路径：不会 `iret` 回到 faulting 上下文，**不需要**也**不会**清理 IST 栈或修改 `TSS.ist[IST_INDEX_DF]`。机器 halt 后，Per-CPU IST 配置仍保持初始化时的栈顶地址，但已无意义。
+
+入口汇编虽写了 `jmp paranoid_exit`（`entry_64.S:537`），正常 #DF 处理函数不会返回到该路径。
+
+#### 11.4.3 可返回的 IST 异常：指针不变，栈内存复用
+
+对 **#DB、#MC**（内核态）、**NMI** 等**会正常返回**的 IST 异常，恢复机制如下：
+
+**TSS.ist[] 指针——通常全程不改**
+
+初始化时 `tss_setup_ist()`（`cpu/common.c:2376`）写入栈顶地址后，除 #VC 嵌套（§11.4.4）外 **Linux 不再修改** `ist[]`。每次 IST 切换，硬件都把 RSP 设为该固定栈顶。
+
+**返回路径——RSP 回到被打断的栈，而非 IST 栈**
+
+- 内核态：`paranoid_exit`（`entry_64.S:965`）→ `restore_regs_and_return_to_kernel` → **IRET** 从 IST 栈帧弹出旧的 SS/RSP，RSP 回到**被打断时的内核栈**
+- 用户态：`sync_regs` 把帧复制到进程内核栈后 IRET，同样离开 IST 栈
+
+IRET 之后，IST 栈上留下本次异常的「脏」帧和 `paranoid_entry` 压入的寄存器——**软件不擦除**。下次同一 IST 槽位再次触发时，CPU 仍从 `TSS.ist[n]`（栈顶）开始压栈，**直接覆盖**旧内容。这就是 IST 栈的复用模型：**good state = 指针仍指向栈顶 + 下次使用时硬件重置 RSP**。
+
+```
+第一次 #DB（内核态）:
+  RSP → TSS.ist[2]（DB 栈顶）→ 压帧 → 处理 → IRET → 回到原内核栈
+  DB_stack 内存: [脏数据，无人清理]
+
+第二次 #DB:
+  RSP ← TSS.ist[2]（同一栈顶）→ 新帧覆盖旧脏数据 ✅
+```
+
+#### 11.4.3.1 常见误解：不是每次异常都调用 `tss_setup_ist()`
+
+栈内存的「覆盖式复用」**不是**软件再次执行 `tss_setup_ist()` 去 refresh TSS，而是 **CPU 硬件**在每次 IST 异常入口重复同一套动作。
+
+**`tss_setup_ist()` 只在初始化时调用一次**
+
+全内核仅一处调用点（Secondary CPU 启动时各执行一次）：
+
+```c
+// arch/x86/kernel/cpu/common.c:2410 cpu_init_exception_handling()
+tss_setup_ist(tss);   // :2420
+```
+
+作用是把各 IST 栈的**栈顶虚拟地址**写入 `TSS.ist[]`。之后正常运行期间这些指针**保持不变**（#VC 嵌套见 §11.4.4）。
+
+**每次 IST 异常：纯硬件，不经过任何 C 函数**
+
+```
+异常 → CPU 读 IDT.IST → 读 TR → 读 TSS.ist[n] → RSP = 该地址
+     → 向 RSP 压 SS/RSP/RFLAGS/CS/RIP（及可选 Error Code）
+```
+
+不调用 `tss_setup_ist()`，也不改写 `TSS.ist[n]`——只是**读取**已有指针并设 RSP，再从栈顶往下压新帧，从而覆盖旧脏数据。
+
+| | `tss_setup_ist()` | 硬件 IST 切换 |
+|---|------------------|--------------|
+| **何时** | CPU 初始化（`trap_init` / `start_secondary` 路径） | 每次 IDT 条目 IST≠0 的异常/中断 |
+| **执行者** | 内核软件 | CPU 硬件 |
+| **对 TSS.ist[]** | **写入**栈顶地址（初始化） | **只读**，加载到 RSP |
+| **对栈内存** | 不涉及 | 从栈顶压入新异常帧，覆盖旧内容 |
+
+**时间线对照**：
+
+```
+初始化（一次）:
+  tss_setup_ist()
+    → TSS.ist[IST_INDEX_DB] = __this_cpu_ist_top_va(DB)   /* 写一次 */
+
+第 1 次 #DB:
+  [硬件] RSP ← TSS.ist[2]  →  压帧  →  处理  →  IRET 回原内核栈
+  DB_stack: 脏数据；TSS.ist[2]: 未变
+
+第 2 次 #DB:
+  [硬件] RSP ← TSS.ist[2]（同一地址）→  新帧覆盖旧脏数据
+  /* 全程无 tss_setup_ist() */
+```
+
+**结论**：IST 的 good state 复用模型是 **「TSS 指针固定指向栈顶 + 硬件每次从栈顶重新压栈」**，不是「每次异常重新 `tss_setup_ist()` refresh 一下」。
+
+#### 11.4.4 例外：#VC 运行时修改并恢复 TSS.ist[]
+
+#VC 是唯一在运行时**主动改 TSS.ist[]** 以支持嵌套的路径（`coco/sev/noinstr.c`）：
+
+```c
+void noinstr __sev_es_ist_enter(struct pt_regs *regs)
+{
+    new_ist = old_ist = __this_cpu_read(cpu_tss_rw.x86_tss.ist[IST_INDEX_VC]);
+    if (on_vc_stack(regs))
+        new_ist = regs->sp;          /* 嵌套时在栈上留空位 */
+    new_ist -= sizeof(old_ist);
+    *(unsigned long *)new_ist = old_ist;  /* 保存原指针 */
+    this_cpu_write(cpu_tss_rw.x86_tss.ist[IST_INDEX_VC], new_ist);
+}
+
+void noinstr __sev_es_ist_exit(void)
+{
+    ist = __this_cpu_read(cpu_tss_rw.x86_tss.ist[IST_INDEX_VC]);
+    this_cpu_write(cpu_tss_rw.x86_tss.ist[IST_INDEX_VC],
+                   *(unsigned long *)ist);  /* 从栈上恢复旧指针 */
+}
+```
+
+这里「恢复 good state」是**显式**的：把 `ist[IST_INDEX_VC]` 从嵌套时的中间值写回 `__this_cpu_ist_top_va(VC)`。
+
+#### 11.4.5 NMI 嵌套：改栈帧，不改 TSS.ist[]
+
+NMI 嵌套时（`entry_64.S:1105` 起），Linux 在 **NMI IST 栈**上操纵 `nmi_executing` 标志和 iret 帧，使嵌套 NMI 跳转到 `repeat_nmi`，**不修改** `TSS.ist[IST_INDEX_NMI]`。外层 NMI 返回后，栈顶标志位被清除，下次 NMI 仍从同一 `ist[1]` 地址进入。
+
+#### 11.4.6 #DF 的特殊可恢复路径（ESPFIX64）
+
+`exc_double_fault()` 在 **ESPFIX64** 场景下可以 `return`（`traps.c:658`）：当 IRET 在 espfix 栈上 fault 被提升为 #DF 时，内核修改 `regs` 使其经 `paranoid_exit` 返回到 `#GP` 处理程序，而非 panic。此路径仍**不修改** `TSS.ist[IST_INDEX_DF]`，仅调整当前 `pt_regs` 的 ip/sp 实现控制流转移。
+
+#### 11.4.7 小结
+
+| 场景 | TSS.ist[] 是否恢复 | IST 栈内存是否清理 | 系统是否继续运行 |
+|------|-------------------|-------------------|----------------|
+| #DF 栈溢出（§11.2） | 不需要（指针未改） | 不需要 | ❌ panic/halt |
+| #DB/#MC 正常返回 | 不需要（指针未改） | 不清理，下次覆盖 | ✅ |
+| NMI 嵌套 | 不需要 | 清 `nmi_executing` 标志 | ✅ |
+| #VC 嵌套 | **显式恢复**（`__sev_es_ist_exit`） | 指针恢复即等价于释放栈空间 | ✅ |
+
+**核心结论**：Linux 的 IST「good state」主要指 **`TSS.ist[n]` 始终指向栈顶**；栈页内容靠**下次硬件 IST 切换从栈顶重新压栈**来隐式「复位」，而非 exception handler 返回时逐字节清零。只有 #VC 嵌套需要在软件层显式 restore `TSS.ist[]`。
 
 ---
 
