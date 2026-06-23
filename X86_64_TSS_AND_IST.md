@@ -1,6 +1,6 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 3.6  
+**版本**: 3.7  
 **日期**: 2026-06-21  
 **作者**: Linux 内核启动文档项目
 
@@ -12,7 +12,7 @@
 
 1. [概述](#1-概述)
 2. [硬件：64 位 TSS 结构](#2-硬件64-位-tss-结构)
-3. [硬件：IST 机制](#3-硬件ist-机制)
+3. [硬件：IST 机制](#3-硬件ist-机制)（含 [§3.5 SDM 章节索引](#35-sdm-章节索引idttssist-投递机制)）
 4. [数据栈 IST 与影子栈 SSP](#4-数据栈-ist-与影子栈-ssp)
 5. [Linux 数据结构总览](#5-linux-数据结构总览)（含 [CEA 全景 §5.4](#54-cpu-entry-area-cea-全景)）
 6. [Linux 七个 IST 槽位：定义、分配与使用](#6-linux-七个-ist-槽位定义分配与使用)
@@ -160,7 +160,7 @@ IF (IDT.IST != 0) {
 
 **IST 优先级高于 RSP0**，且**无论从哪个特权级触发都生效**——这是 IST 作为「最后防线」的关键。
 
-运行时硬件逐步路径（IDT → TSS → 栈 VA，不查 `cea_exception_stacks` 指针）见 [§5.3.7](#537-运行时-ist-栈切换idt--tss--栈内存不是查-cea_exception_stacks)。
+运行时硬件逐步路径（IDT → TSS → 栈 VA，不查 `cea_exception_stacks` 指针）见 [§5.3.7](#537-运行时-ist-栈切换idt--tss--栈内存不是查-cea_exception_stacks)；SDM 各章节如何描述该机制见 [§3.5](#35-sdm-章节索引idttssist-投递机制)。
 
 64 位模式下 privilege-level 切换时 **不加载新的 SS 描述符**，SS 被强制为 NULL，RPL 设为新 CPL；旧的 SS:RSP 被压到新栈上。IRET 时恢复。
 
@@ -204,6 +204,71 @@ IDT.IST = N        →  TSS.ist[N - 1]     (N = 1..7)
 Linux IST_INDEX_x  →  TSS.ist[IST_INDEX_x]
 IDT.IST            =  IST_INDEX_x + 1     (ISTG 宏负责 +1)
 ```
+
+### 3.5 SDM 章节索引：IDT→TSS→IST 投递机制
+
+本节对照 Intel SDM Vol 3A（本地副本：`reference-docs/253668-sdm-vol-3a.pdf`），说明手册**在何处**描述「向量 → IDT 门 → TSS.IST 指针 → 换栈 → 跳 handler」这条硬件链，以及**何处不再涉及** Linux 的 CEA 实现。
+
+#### 3.5.1 SDM 描述了什么
+
+SDM 给出的是 **CPU/ISA 视角**：TSS.ISTn 里存的是 **64-bit canonical 线性地址（VA）**；OS 可把它放在任意已映射 VA，手册**不规定**必须落在 CEA。
+
+| SDM 章节 | 内容 | 与 IST 投递的关系 |
+|---------|------|------------------|
+| **§6.10** *Interrupt Descriptor Table* | 向量作为 IDT 下标；64 位模式下 **vector × 16**（§6.14.1，门描述符 16 字节） | 异常/中断的**第一步**：用向量定位 IDT 表项 |
+| **§6.12 / §6.12.1** *Exception- or Interrupt-Handler Procedures* | vector 索引 IDT → 取 interrupt/trap gate → 调用 handler（类似经 call gate 的 CALL） | 通用投递框架；§6.12.1 侧重 **legacy CPL 变化**时从 TSS 取 RSP |
+| **§6.14.1** *64-Bit Mode IDT*（Figure 6-8） | 64 位 gate 含 **3-bit IST 字段**（byte 4 bits 4:0） | IDT 侧：**本次**是否用 IST、用 IST 几号 |
+| **§6.14.4** *Stack Switching in IA-32e Mode* | modified legacy 栈切换（CPL 变化时从 TSS 取 inner-level RSP；64 位不加载新 SS） | **IST index = 0** 时的路径 |
+| **§6.14.5** *Interrupt Stack Table* | IST 是 64-bit TSS 的一部分；gate 的 IST index 引用 TSS 中 IST 项；**处理器把 IST 指针值装入 RSP**；SS 强制 NULL；旧帧压新栈 | **IST 机制的核心文字**（Vol 3A 约 6-22 页） |
+| **§6.14.2** *64-Bit Mode Stack Frame* | 64 位无条件压 SS:RSP、8 字节对齐 | IST 切换**之后**的压栈格式 |
+| **§7.7 / Figure 8-11** *64-bit TSS* | TSS 含 **IST1–IST7（ISTn）**：64-bit canonical **IST 指针** | TSS 侧：7 个备用栈顶 **VA** 的存放位置 |
+
+§6.14.5 原文要点（与 §3.1 呼应）：
+
+> The IST mechanism provides up to seven IST pointers in the TSS. The pointers are **referenced by an interrupt-gate descriptor in the IDT** … The gate descriptor contains a **3-bit IST index field** … the processor **loads the value pointed by an IST pointer into the RSP**. … If the **IST index is zero**, the modified legacy stack-switching mechanism … is used.
+
+#### 3.5.2 SDM 未描述的内容（与 Linux/CEA 的分界）
+
+| 说法 | SDM 是否覆盖 |
+|------|-------------|
+| 用 **vector** 查 IDT 门 → 读 **IST index** | ✅ §6.10、§6.14.1、§6.14.5 |
+| 经 **TR** 定位 TSS → 读 `ist[n]` 的 **64-bit VA** | ✅ §6.14.5、Figure 8-11 |
+| 将该 VA 装入 **RSP**，在该栈上压帧 | ✅ §6.14.5、§6.14.2 |
+| 按 gate 的 CS:RIP 跳 handler | ✅ §6.12.1 |
+| 该 VA 落在 **CEA.estacks** | ❌ **CEA 是 Linux 专有概念**，SDM 无此术语 |
+| 运行时读 **`cea_exception_stacks` 指针** | ❌ 纯 Linux 软件辅助，CPU 不参与 |
+| `exception_stacks` backing → fixmap PTE 映射 | ❌ OS/MMU 实现细节 |
+
+对 CPU 而言只有：**RSP ← TSS 里已有的 canonical VA**；MMU 将该 VA 解析到物理页。Linux 选择把 IST 栈映射进 **CPU Entry Area** fixmap，是为了 PTI、固定地址、`noinstr` 入口路径等——见 [§5.4](#54-cpu-entry-area-cea-全景)。
+
+#### 3.5.3 硬件视角 vs Linux 实现
+
+```text
+硬件（SDM 描述，§3.2 / §6.3.2）:
+  vector → IDT[vector] → gate.IST (0 或 1..7)
+       → 若 IST ≠ 0: RSP ← TSS.ist[IST − 1]    /* SDM IST1 = ist[0] */
+       → SS ← NULL；对齐 RSP
+       → 压 SS/RSP/RFLAGS/CS/RIP（± Error Code）
+       → 跳 gate 中的 handler CS:RIP
+
+Linux（SDM 不描述，§5.3 / §8.1）:
+  初始化: exception_stacks 物理页 → cea_map_stack → CEA.estacks
+          __this_cpu_ist_top_va() 算栈顶 VA → tss_setup_ist() 写入 TSS.ist[]
+          ISTG 写入 IDT.IST = IST_INDEX + 1
+  运行时: CPU 只读 IDT + TSS；不读 cea_exception_stacks
+          MMU: 栈顶 VA → PTE → exception_stacks 物理页
+```
+
+**准确表述**：
+
+- ✅ 异常时：**IDT 查 IST 索引 → TSS 取栈顶 VA → 在该 VA 上压栈**（若 VA 由 Linux 映射在 CEA，则栈内存在 CEA 区域）
+- ❌ 异常时：**IDT → TSS → 查 cea_exception_stacks → 栈**（多一步，硬件不存在）
+
+运行时时序图与源码对照见 [§5.3.7](#537-运行时-ist-栈切换idt--tss--栈内存不是查-cea_exception_stacks)。
+
+#### 3.5.4 更细的逐步伪代码在哪
+
+Vol 3A **§6.14.5 是概念性描述**，未把 IDT 投递拆成完整 IF/THEN 伪代码。更细的 **event delivery 算法**（含 IST 分支）通常在 **Intel SDM Volume 2**（Instruction Set Reference）的 **IDT event delivery** 相关章节；阅读 Vol 3A 时，建议与 §6.12.1（通用 handler 调用）、§6.14.4（legacy 栈切换）、§6.14.5（IST 栈切换）对照使用。
 
 ---
 
@@ -478,6 +543,8 @@ sequenceDiagram
 
 ##### SDM 规定（硬件逐步做什么）
 
+各章节在 SDM 中的分布见 [§3.5](#35-sdm-章节索引idttssist-投递机制)。此处摘录与 IST 直接相关的原文。
+
 **Step 1 — 读 IDT 门描述符的 IST 字段**（Vol 3A §6.14.1 *64-Bit Mode IDT*, Figure 6-7）：
 
 > Each 64-bit gate descriptor contains a **3-bit IST index** field. If the index is **non-zero**, the processor loads the corresponding IST pointer from the TSS **before** delivering the interrupt or exception.
@@ -715,6 +782,7 @@ setup_cpu_entry_areas();
 
 | 主题 | 章节 |
 |------|------|
+| SDM 章节索引、硬件 vs Linux/CEA 分界 | §3.5 |
 | IST 栈三层存储、`cea_exception_stacks` 指针 | §5.3 |
 | 运行时 IDT→TSS→栈 VA（不查 cea 指针） | §5.3.7 |
 | Entry trampoline 与 `sp0` | §14.2 |
@@ -817,7 +885,7 @@ SDM 对此的表述（Vol 3A §6.14.5 *Interrupt Stack Table*）：
 
 #### 6.3.2 硬件处理流程
 
-结合 §3.2 的栈切换逻辑，CPU 在异常/中断入口的完整决策链为：
+结合 §3.2 的栈切换逻辑与 [§3.5](#35-sdm-章节索引idttssist-投递机制) 的 SDM 章节索引，CPU 在异常/中断入口的完整决策链为：
 
 ```
 1. 根据向量号查 IDT[vector]（IDTR 基址 + vector × 16）
@@ -1499,13 +1567,16 @@ movq    PER_CPU_VAR(cpu_current_top_of_stack), %rsp
 
 ### 15.1 Intel/AMD 手册
 
-1. **Intel SDM Vol 3A**
-   - §6.14.1: 64-Bit Mode IDT
+1. **Intel SDM Vol 3A**（本地：`reference-docs/253668-sdm-vol-3a.pdf`）
+   - §6.10: Interrupt Descriptor Table（向量 → IDT 下标）
+   - §6.12.1: Exception- or Interrupt-Handler Procedures（通用 handler 调用框架）
+   - §6.14.1: 64-Bit Mode IDT（Figure 6-8，IST 字段）
    - §6.14.2: 64-Bit Mode Stack Frame
-   - §6.14.4: Stack Switching in IA-32e Mode
-   - §6.14.5: Interrupt Stack Table
-   - §7.7: Task Management in 64-bit Mode (Figure 7-11)
+   - §6.14.4: Stack Switching in IA-32e Mode（legacy / IST index = 0）
+   - §6.14.5: Interrupt Stack Table（**IST 机制核心**）
+   - §7.7: Task Management in 64-bit Mode（Figure 7-11 / Figure 8-11，TSS ISTn）
    - §7.2.3: TSS Descriptor in 64-bit mode
+   - 更细的 IDT event delivery 伪代码：见 **SDM Vol 2**（Instruction Set Reference）
 
 2. **AMD64 Architecture Programmer's Manual, Volume 2** — §8.9 Long Mode Interrupt Stack
 
