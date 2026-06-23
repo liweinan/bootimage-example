@@ -782,7 +782,7 @@ static inline void tss_setup_ist(struct tss_struct *tss)
 }
 ```
 
-宏 `__this_cpu_ist_top_va(name)` 展开为 CEA 中对应异常栈的**栈顶虚拟地址**（栈向下增长，顶 = 高地址）：
+宏 `__this_cpu_ist_top_va(name)` 展开为 CEA 中对应异常栈的**栈顶虚拟地址**（**VA**，Virtual Address；相对 **PA** Physical Address 物理地址，经 MMU 页表翻译后访问实际内存。栈向下增长，顶 = 高地址）：
 
 ```c
 // arch/x86/include/asm/cpu_entry_area.h
