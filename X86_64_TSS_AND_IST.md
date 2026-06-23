@@ -1,6 +1,6 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 3.7  
+**版本**: 3.9  
 **日期**: 2026-06-21  
 **作者**: Linux 内核启动文档项目
 
@@ -14,7 +14,7 @@
 2. [硬件：64 位 TSS 结构](#2-硬件64-位-tss-结构)
 3. [硬件：IST 机制](#3-硬件ist-机制)（含 [§3.5 SDM 章节索引](#35-sdm-章节索引idttssist-投递机制)）
 4. [数据栈 IST 与影子栈 SSP](#4-数据栈-ist-与影子栈-ssp)
-5. [Linux 数据结构总览](#5-linux-数据结构总览)（含 [CEA 全景 §5.4](#54-cpu-entry-area-cea-全景)）
+5. [Linux 数据结构总览](#5-linux-数据结构总览)（含 [CEA §5.4](#54-cpu-entry-area-cea-全景)：定位 §5.4.8、[内核/CEA VA §5.4.9](#549-内核-vacea-与-per-task-va)、用户态访问 §5.4.10）
 6. [Linux 七个 IST 槽位：定义、分配与使用](#6-linux-七个-ist-槽位定义分配与使用)
 7. [Linux IST 栈内存布局与分配](#7-linux-ist-栈内存布局与分配)
 8. [Linux 初始化时序](#8-linux-初始化时序)
@@ -160,7 +160,7 @@ IF (IDT.IST != 0) {
 
 **IST 优先级高于 RSP0**，且**无论从哪个特权级触发都生效**——这是 IST 作为「最后防线」的关键。
 
-运行时硬件逐步路径（IDT → TSS → 栈 VA，不查 `cea_exception_stacks` 指针）见 [§5.3.7](#537-运行时-ist-栈切换idt--tss--栈内存不是查-cea_exception_stacks)；SDM 各章节如何描述该机制见 [§3.5](#35-sdm-章节索引idttssist-投递机制)。
+运行时硬件逐步路径（IDT → TSS → 栈 VA）见 [§5.3.7](#537-运行时-ist-栈切换idt--tss--栈内存)；SDM 各章节如何描述该机制见 [§3.5](#35-sdm-章节索引idttssist-投递机制)。
 
 64 位模式下 privilege-level 切换时 **不加载新的 SS 描述符**，SS 被强制为 NULL，RPL 设为新 CPL；旧的 SS:RSP 被压到新栈上。IRET 时恢复。
 
@@ -227,19 +227,18 @@ SDM 给出的是 **CPU/ISA 视角**：TSS.ISTn 里存的是 **64-bit canonical �
 
 > The IST mechanism provides up to seven IST pointers in the TSS. The pointers are **referenced by an interrupt-gate descriptor in the IDT** … The gate descriptor contains a **3-bit IST index field** … the processor **loads the value pointed by an IST pointer into the RSP**. … If the **IST index is zero**, the modified legacy stack-switching mechanism … is used.
 
-#### 3.5.2 SDM 未描述的内容（与 Linux/CEA 的分界）
+#### 3.5.2 SDM 与 Linux/CEA 的分界
 
-| 说法 | SDM 是否覆盖 |
-|------|-------------|
-| 用 **vector** 查 IDT 门 → 读 **IST index** | ✅ §6.10、§6.14.1、§6.14.5 |
-| 经 **TR** 定位 TSS → 读 `ist[n]` 的 **64-bit VA** | ✅ §6.14.5、Figure 8-11 |
-| 将该 VA 装入 **RSP**，在该栈上压帧 | ✅ §6.14.5、§6.14.2 |
-| 按 gate 的 CS:RIP 跳 handler | ✅ §6.12.1 |
-| 该 VA 落在 **CEA.estacks** | ❌ **CEA 是 Linux 专有概念**，SDM 无此术语 |
-| 运行时读 **`cea_exception_stacks` 指针** | ❌ 纯 Linux 软件辅助，CPU 不参与 |
-| `exception_stacks` backing → fixmap PTE 映射 | ❌ OS/MMU 实现细节 |
+| 范畴 | 说明 |
+|------|------|
+| vector → IDT 门 → IST index | SDM §6.10、§6.14.1、§6.14.5 |
+| TR → TSS → `ist[n]` 的 64-bit VA | SDM §6.14.5、Figure 8-11 |
+| VA 装入 RSP、压栈、跳 handler | SDM §6.14.5、§6.14.2、§6.12.1 |
+| VA 落在 CEA.estacks | **Linux 实现**；CEA 为内核专有概念，SDM 无此术语 |
+| `cea_exception_stacks` 指针 | **Linux 软件辅助**；初始化/诊断用，CPU 异常入口不参与 |
+| backing → fixmap PTE | **OS/MMU 实现** |
 
-对 CPU 而言只有：**RSP ← TSS 里已有的 canonical VA**；MMU 将该 VA 解析到物理页。Linux 选择把 IST 栈映射进 **CPU Entry Area** fixmap，是为了 PTI、固定地址、`noinstr` 入口路径等——见 [§5.4](#54-cpu-entry-area-cea-全景)。
+对 CPU 而言：**RSP ← TSS 里已有的 canonical VA**；MMU 将该 VA 解析到物理页。Linux 选择把 IST 栈映射进 **CPU Entry Area** fixmap，是为了 PTI、固定地址、`noinstr` 入口路径等——见 [§5.4](#54-cpu-entry-area-cea-全景)。
 
 #### 3.5.3 硬件视角 vs Linux 实现
 
@@ -255,16 +254,11 @@ Linux（SDM 不描述，§5.3 / §8.1）:
   初始化: exception_stacks 物理页 → cea_map_stack → CEA.estacks
           __this_cpu_ist_top_va() 算栈顶 VA → tss_setup_ist() 写入 TSS.ist[]
           ISTG 写入 IDT.IST = IST_INDEX + 1
-  运行时: CPU 只读 IDT + TSS；不读 cea_exception_stacks
+  运行时: CPU 读 IDT + TSS，RSP ← TSS.ist[] 中的栈顶 VA
           MMU: 栈顶 VA → PTE → exception_stacks 物理页
 ```
 
-**准确表述**：
-
-- ✅ 异常时：**IDT 查 IST 索引 → TSS 取栈顶 VA → 在该 VA 上压栈**（若 VA 由 Linux 映射在 CEA，则栈内存在 CEA 区域）
-- ❌ 异常时：**IDT → TSS → 查 cea_exception_stacks → 栈**（多一步，硬件不存在）
-
-运行时时序图与源码对照见 [§5.3.7](#537-运行时-ist-栈切换idt--tss--栈内存不是查-cea_exception_stacks)。
+运行时时序图与源码对照见 [§5.3.7](#537-运行时-ist-栈切换idt--tss--栈内存)。
 
 #### 3.5.4 更细的逐步伪代码在哪
 
@@ -446,7 +440,6 @@ ISTG(X86_TRAP_DF, ..., IST_INDEX_DF)  ──写入──►  IDT[8].bits.ist = 1
 
 ```
 CPU: IDT[8].IST=1 → TSS.ist[0] → RSP = 栈顶 VA → 在 CEA.estacks.DF_stack 上压帧
-（不调用 tss_setup_ist，不读 cea_exception_stacks 指针；硬件只读 TSS）
 ```
 
 #### 5.3.4 单 CPU 内存关系图
@@ -534,12 +527,11 @@ sequenceDiagram
 | `noinstr.c` / `#VC` | 嵌套时临时改 `TSS.ist[IST_INDEX_VC]`（改的是 TSS，地址仍源自 CEA） |
 | KVM / FRED | 读取主机 IST 栈地址填入 VMCS 或 FRED MSR |
 
-正常运行时 IST 异常入口 **不读** `cea_exception_stacks` 指针——CPU 只读 **TSS**；该指针供**内核软件**在初始化与诊断时使用。
+`cea_exception_stacks` 供**内核软件**在初始化（算栈顶 VA）、栈回溯、部分 `#VC` 路径使用；IST 异常硬件入口只读 **IDT** 与 **TSS**。
 
-#### 5.3.7 运行时 IST 栈切换：IDT → TSS → 栈内存（不是「查 cea_exception_stacks」）
+#### 5.3.7 运行时 IST 栈切换：IDT → TSS → 栈内存
 
-常见误解是：异常时 CPU 依次查 **IDT → TSS → cea_exception_stacks 指针 → 栈**。  
-**正确路径只有两级硬件查表**：**IDT（IST 索引）→ TSS（64-bit 栈顶 VA）→ 按 VA 访问栈内存**。`cea_exception_stacks` 是内核软件指针，**不参与** CPU 异常入口。
+异常/中断入口时，CPU 经 **IDT（IST 索引）→ TSS（64-bit 栈顶 VA）→ 按 VA 访问栈内存** 完成换栈；`cea_exception_stacks` 是内核 per-CPU 指针，仅在初始化等软件路径参与。
 
 ##### SDM 规定（硬件逐步做什么）
 
@@ -558,7 +550,7 @@ sequenceDiagram
 - IST 切换时 SS 强制为 NULL，旧 SS:RSP 压入新栈
 - 64 位模式**无条件**压 SS:RSP，每项 8 字节
 
-SDM **未定义**任何「第三级」去查 `cea_exception_stacks` 或 per-CPU 变量——TSS 里的 IST 条目已是**完整的 64-bit 线性地址**。
+TSS 里的 IST 条目是**完整的 64-bit 线性地址**，CPU 直接装入 RSP。
 
 ##### 运行时硬件时序（以 #DF 为例）
 
@@ -589,8 +581,6 @@ sequenceDiagram
 
     CPU->>IDT: 读处理程序偏移
     CPU->>CPU: 跳转 asm_exc_double_fault
-
-    Note over CPU,STK: 全程不读 cea_exception_stacks 指针<br/>不调用 tss_setup_ist
 ```
 
 ##### 初始化 vs 运行时对照
@@ -598,7 +588,7 @@ sequenceDiagram
 | 步骤 | 初始化（软件，`trap_init` 路径） | 运行时（CPU 硬件） |
 |------|--------------------------------|-------------------|
 | 1 | `cea_map_stack()` 建立 `exception_stacks` → CEA.estacks PTE | — |
-| 2 | `cea_exception_stacks = &cea->estacks`（软件指针） | **不读**该指针 |
+| 2 | `cea_exception_stacks = &cea->estacks`（软件指针） | — |
 | 3 | `__this_cpu_ist_top_va(DF)` **计算**栈顶 VA | — |
 | 4 | `tss_setup_ist()` **写入** `TSS.ist[0]` | **读取** `TSS.ist[0]` → RSP |
 | 5 | `ISTG` **写入** `IDT[8].bits.ist = 1` | **读取** `IDT[8].bits.ist` |
@@ -623,7 +613,7 @@ ISTG(X86_TRAP_DF, asm_exc_double_fault, IST_INDEX_DF)
 // → G(..., _ist + 1, ...) → idt_table[8].bits.ist = 1
 ```
 
-**运行时链（硬件 + 入口汇编，不碰 cea_exception_stacks）**：
+**运行时链（硬件 + 入口汇编）**：
 
 ```asm
 // entry_64.S:518-537 — idtentry_df
@@ -637,9 +627,9 @@ call    exc_double_fault        /* traps.c:597 */
 begin = (unsigned long)__this_cpu_read(cea_exception_stacks);
 ```
 
-全内核 **`grep cea_exception_stacks`** 仅出现在：初始化赋值、`__this_cpu_ist_top_va` 宏展开、栈回溯、`#VC` 辅助判断——**无一在 IDT 异常硬件入口路径**。
+全内核 **`grep cea_exception_stacks`** 出现在：初始化赋值、`__this_cpu_ist_top_va` 宏展开、栈回溯、`#VC` 辅助判断——均不在 IDT 异常硬件入口路径。
 
-##### 为何栈内存「看起来像是 CEA」但 CPU 不「查 cea_exception_stacks」
+##### 初始化 VA 如何写入 TSS
 
 ```
 初始化时：
@@ -650,38 +640,29 @@ begin = (unsigned long)__this_cpu_read(cea_exception_stacks);
   TSS.ist[0] = 上述 VA    // 拷贝进 TSS，此后通常不变
 
 运行时：
-  CPU: RSP = TSS.ist[0]   // 已是 CEA.estacks 区域内的 VA
+  CPU: RSP = TSS.ist[0]   // CEA.estacks 区域内的 VA
   MMU: VA → PTE → exception_stacks 物理页
   CPU: 在该 VA 压栈
-
-  （cea_exception_stacks 指针变量不再参与）
 ```
 
-**准确表述**：
-
-- ✅ 异常时：**IDT 查 IST 索引 → TSS 取栈顶 VA → 在该 VA（CEA 映射的栈页）上压栈**
-- ❌ 异常时：**IDT → TSS → 查 cea_exception_stacks 指针 → 栈**（多了一步，且不存在）
-
-`cea_exception_stacks` 是 Linux 为了**方便内核代码定位 CEA.estacks** 而设的 per-CPU 指针；**TSS.ist[]** 才是 CPU 硬件认的「IST 栈地址寄存器文件」。
+`cea_exception_stacks` 便于内核代码定位 CEA.estacks；**TSS.ist[]** 是 CPU 硬件读取的 IST 栈顶 VA 寄存器文件。
 
 ### 5.4 CPU Entry Area（CEA）全景
 
-源码中 **`cea_` 前缀即 CPU Entry Area 的缩写**（如 `cea_set_pte()`、`cea_offset()`、`cea_exception_stacks`、`cea_map_stack()`）。CEA 是 x86-64 上**每个逻辑 CPU 一份**、位于 **fixmap 固定虚拟地址窗口**内的入口相关数据结构集合——从用户态陷入内核（中断、异常、syscall 早期路径）时，CPU 和入口汇编必须能**在不依赖进程上下文**的情况下找到 GDT、TSS、入口栈、IST 栈等。
+源码中 **`cea_` 前缀即 CPU Entry Area 的缩写**（如 `cea_set_pte()`、`cea_offset()`、`cea_exception_stacks`、`cea_map_stack()`）。CEA 是 x86-64 上**每个逻辑 CPU 一份**、位于 **fixmap 固定虚拟地址窗口**内的入口相关数据结构集合——从用户态陷入内核（中断、异常、syscall 早期路径）时，CPU 和入口汇编必须能**在不依赖进程上下文**的情况下找到 GDT、TSS、入口栈、IST 栈等（具体机制见 [§5.4.8](#548-运行时如何找到-cea-内的各组件)）。
 
-#### 5.4.1 重要澄清：CEA 不是「指针容器」
+#### 5.4.1 `struct cpu_entry_area` 的布局
 
 `cpu_entry_area.h` 对 `struct cpu_entry_area` 的注释写得很明确：
 
 > Every field is a **virtual alias** of some other allocated backing store.  
 > There is **no direct allocation** of a struct cpu_entry_area.
 
-因此：
-
-| 常见误解 | 源码事实 |
-|---------|---------|
-| `cpu_entry_area` 是根结构，内含指向各子组件的指针 | ❌ 字段是**内嵌布局**（`gdt[]`、`entry_stack_page`、`tss`、`estacks` 等），不是指针数组 |
-| `cea_exception_stacks` 就是 `exception_stacks` | ❌ 前者是 CEA 内 **`estacks` 的 fixmap 视图**（含 guard 空洞）；后者是 **per-CPU 物理 backing**（`cpu_entry_area.c:18`） |
-| `ist` 是 CEA 里单独一块 | ❌ **IST 指针**在 **TSS** 的 `x86_tss.ist[]`；**IST 栈内存**在 CEA 的 **`estacks`** |
+| 概念 | 源码事实 |
+|------|---------|
+| `cpu_entry_area` 是根结构 + 子组件指针 | 字段是**内嵌布局**（`gdt[]`、`entry_stack_page`、`tss`、`estacks` 等） |
+| `cea_exception_stacks` 与 `exception_stacks` 同一对象 | 前者是 CEA 内 **`estacks` 的 fixmap 视图**；后者是 **per-CPU 物理 backing**（`cpu_entry_area.c:18`） |
+| `ist` 是 CEA 里单独一块 | **IST 指针**在 **TSS** 的 `x86_tss.ist[]`；**IST 栈内存**在 CEA 的 **`estacks`** |
 
 x86-64 上 **`get_cpu_entry_area(cpu)` 用公式算 VA**，不依赖 per-CPU 指针变量（`cpu_entry_area.c:70-75`）：
 
@@ -778,13 +759,138 @@ setup_cpu_entry_areas();
 
 完整时序见 §5.3.5、§8.1。IST 相关路径：**`exception_stacks` 分配物理页 → `cea_map_stack` 映射到 `cea->estacks` → `tss_setup_ist` 把栈顶 VA 写入同窗口的 `tss.x86_tss.ist[]` → `load_TR_desc()`**。
 
-#### 5.4.7 与本文其他章节的关系
+#### 5.4.8 运行时如何「找到」CEA 内的各组件
+
+CEA **不是**运行时搜索出来的名字，而是启动时映射到 fixmap、并把 **GDTR / TR / IDTR** 与 **TSS 内容**预填好；之后硬件与入口汇编按下列路径访问。
+
+**前提（每 CPU 一次，`cpu_init_exception_handling()` + `setup_cpu_entry_area()`）**：
+
+1. `get_cpu_entry_area(cpu)` 算出该核 fixmap 窗口 VA，建立 PTE（`cpu_entry_area.c:177-243`）
+2. `set_tss_desc(cpu, &get_cpu_entry_area(cpu)->tss.x86_tss)` — GDT 中 TSS 基址指向 **CEA 内 TSS VA**（`common.c:2422`）
+3. `load_fixmap_gdt(cpu)` — **GDTR** ← `&get_cpu_entry_area(cpu)->gdt`（`common.c:774-780`，`desc.h:63-65`）
+4. `load_TR_desc()` → `ltr GDT_ENTRY_TSS×8`（`desc.h:272`）
+5. `load_sp0(cpu_entry_stack(cpu)+1)` — 把 **CEA entry stack 顶 VA** 写入 `TSS.sp0`（`common.c:2506`）
+6. `tss_setup_ist()` — 把 **CEA.estacks 栈顶 VA** 写入 `TSS.ist[]`（`common.c:2379-2384`）
+7. `load_current_idt()` — **IDTR** 指向 IDT（含 CEA 只读 alias，§5.4.3）
+
+| 组件 | 硬件如何找到 | Linux 配置要点 |
+|------|-------------|---------------|
+| **GDT** | **GDTR** + 段选择子索引 | `load_fixmap_gdt` → GDTR = CEA 内 `gdt[]`（与 `gdt_page` 同物理页，`cea_set_pte` :199） |
+| **TSS**（`sp0`、`ist[]`） | **TR** → GDT[TSS] → TSS **基址 VA** + 偏移 | `set_tss_desc(..., &cea->tss.x86_tss)`；`cea->tss` 映射 `cpu_tss_rw` backing（:233-234） |
+| **Entry stack** | TR → TSS → **`sp0`** → RSP（CPL 变 0、非 IST） | `load_sp0(cpu_entry_stack(cpu)+1)`；`cpu_entry_stack` = `&cea->entry_stack_page.stack` |
+| **IST 栈** | **IDT.IST** → TR → TSS → **`ist[n]`** → RSP | `tss_setup_ist()` 预填 CEA.estacks 栈顶 VA（§5.3.7） |
+| **IDT** | **IDTR.base + vector×16** | `idt_map_in_cea()` + `load_current_idt()` |
+
+**每 CPU 对应关系**：硬件**不计算** `cea_offset(cpu)`；每核 `cpu_init` 时各自 `load_fixmap_gdt` / `set_tss_desc` / `ltr`，TR 与 GDTR 已指向**本核** CEA 窗口。
+
+**内核软件访问 CEA**（已知 CPU 号或已在 per-CPU 上下文）：
+
+- `get_cpu_entry_area(cpu)` — fixmap 公式（§5.4.1）
+- `PER_CPU_VAR(cpu_tss_rw + TSS_sp0)` — 经 GS/per-CPU 基址访问 TSS backing（如 `entry_64.S:146` syscall 返回切 trampoline stack）
+- `setup_getcpu()` — 在 GDT 的 `GDT_ENTRY_CPUNODE` 写入 CPU 号，供 `paranoid_entry` 等识核（`common.c:2354-2372`）
+
+```text
+启动时（每 CPU）:
+  backing 物理页 ──PTE──► CEA fixmap VA
+  GDT[TSS].base = &cea->tss.x86_tss
+  TSS.sp0       = cpu_entry_stack(cpu)+1
+  TSS.ist[i]    = CEA.estacks 栈顶 VA
+  GDTR → &cea->gdt ; TR → GDT_ENTRY_TSS ; IDTR → idt_table
+
+用户态陷入（硬件）:
+  entry/legacy: TR → TSS.sp0 → entry stack（CEA）
+  IST 异常:     IDT.IST → TR → TSS.ist[n] → IST 栈（CEA.estacks）
+```
+
+#### 5.4.9 内核 VA、CEA 与 per-task VA
+
+##### 5.4.9.1 内核访问内存（含 CEA）用的是 VA 还是 PA？
+
+**分页开启后，内核正常工作几乎全程使用 VA**，CEA 也不例外。CPU 在 ring 0 下的 load/store、取指、指针解引用，都把操作数当作 **VA**，经 **CR3 → 页表 → PA** 完成访问。
+
+| 场景 | 用的地址 |
+|------|---------|
+| 读写 CEA、`cpu_tss_rw`、`kmalloc` 缓冲区 | **VA**（指针） |
+| `get_cpu_entry_area()`、`cpu_entry_stack()`、`__this_cpu_ist_top_va()` | 返回 **VA** |
+| `set_tss_desc(..., &cea->tss.x86_tss)`、TSS 的 `sp0`/`ist[]` | 存入 **VA**；硬件经 TR→GDT 同样按 **VA** 访问 TSS |
+| `cea_set_pte(cea_vaddr, pa, flags)` | **VA**（映射目标）+ **PA**（写入 PTE 的物理页帧） |
+| DMA、`struct page`、memblock | **PA** 用于描述/交给设备，不是日常 C 代码解引用方式 |
+| 极早期 boot（页表未启用） | 短暂直接使用 **PA**；很快切到 VA |
+
+「访问物理内存」在内核代码里通常表现为 **`__va(pa)` / `page_to_virt()` 得到 VA 再读写**，而不是把 PA 当指针。CEA 在 `setup_cpu_entry_area()` 阶段用 PA 填 PTE，之后内核与 CPU 都只通过 **fixmap VA** 使用 CEA。
+
+##### 5.4.9.2 同一套 MMU，不同类别的 VA
+
+在 MMU 视角下，**内核 VA 与 per-task 用户 VA 机制相同**（都是 VA → PTE → PA）。**fixmap（含 CEA）** 是内核虚拟地址布局里 **预留的一块固定 VA 窗口**（`CPU_ENTRY_AREA_BASE` 起），启动时用 `cea_set_pte` 把物理页挂上去——可以粗略理解为：**都是 VA 体系里的地址，fixmap 是其中布局固定、per-CPU 钉死的那一段**。
+
+但**不能**因此忽略归属与页表策略的差异：
+
+| | **Per-task 用户 VA** | **内核 VA（含 fixmap/CEA）** |
+|---|----------------------|------------------------------|
+| **典型范围** | 低地址：`0` ~ `TASK_SIZE_MAX` | 高地址：direct map、vmalloc、**fixmap** 等 |
+| **绑谁** | **Per-mm**（每进程 CR3 下用户映射） | **全局 / Per-CPU**（同数字 VA 在全系统语义一致） |
+| **换进程** | 同一 VA 常映射**不同物理页** | fixmap/CEA 上**同 CPU 同一 VA 映射不变** |
+| **谁建 PTE** | `mmap`、`exec`、loader | boot `setup_cpu_entry_areas()` 等 |
+| **PTE 权限** | 通常 **U=1** | **U=0**（supervisor-only） |
+
+**内核 VA 还有 per-thread 一类**（如 `task->thread.sp` 线程内核栈）：是内核地址空间里的 VA，但 **per-thread、随调度变化**，仍不同于 fixmap 的「全系统固定布局」。
+
+##### 5.4.9.3 CEA / TSS 中的 VA 与 per-task 的对照
+
+CEA 与 per-task 在 MMU 层面**都是 VA**，差别在**归属、生命周期与页表绑定**：
+
+| | **CEA / TSS 中的 VA** | **Per-task VA** |
+|---|------------------------|-----------------|
+| **归属** | **Per-CPU** fixmap，全系统共享的内核窗口 | **Per-mm**（用户空间）或 **per-thread**（如 `thread.sp` 内核栈） |
+| **建立时机** | 启动 `setup_cpu_entry_areas()`，之后基本不变 | `fork` / `mmap` / 线程创建 |
+| **调度切换** | **不变**（同 CPU 上地址固定） | 用户 VA 随 **CR3（mm）** 变；线程内核栈指针也变 |
+| **TSS 是否存储** | **`sp0`、`ist[]` 存此类 VA** | **不存**用户 VA 或线程内核栈 VA |
+
+**与三种「栈」的对应**（勿与 per-task 内核栈混淆）：
+
+| 栈 | VA 性质 | 用途 |
+|----|---------|------|
+| Entry trampoline（`TSS.sp0` / CEA `entry_stack_page`） | Per-CPU fixmap | 用户→内核**最早**几拍 |
+| IST 栈（`TSS.ist[]` → CEA `estacks`） | Per-CPU fixmap | #DF / NMI / #DB / #MC / #VC |
+| 线程内核栈（`task->thread.sp`） | 每线程不同 | `sync_regs()` 之后正常内核 C 代码 |
+
+**CR3 切换（PTI）时**：进程用户 VA 只在原 mm 的页表中有意义；CEA VA 在内核页表固定存在，且 PTI 下 **clone 到用户页表副本**（§5.4.4），以便陷入早期仍可用 **supervisor 访问** 解析这些 PTE。入口路径因此**不依赖 `current` 或进程 mm**。
+
+**小结**：内核与用户使用 **同一套 MMU 与 VA 译址**；CEA 是内核 VA 空间中 **fixmap 固定窗口 + per-CPU 映射**，专门服务于不依赖进程上下文的入口路径；per-task 用户 VA 则随 **mm/CR3** 变化。二者**都是 VA**，**不是同一类 VA**。
+
+#### 5.4.10 用户态程序能否访问 CEA 内的 VA
+
+**不能。** 用户态（CPL=3）程序**不能**合法读/写 CEA 中的 VA。
+
+PTI 将 CEA **clone 进用户进程页表**（`pti.c:456` `pti_clone_p4d(CPU_ENTRY_AREA_BASE)`），目的是：用户态触发中断/异常时，在**仍可能持有用户 CR3** 的早期阶段，**ring 0** 的 CPU/入口代码仍能访问 GDT、TSS、entry stack、IST 栈——**不是**给用户程序访问。
+
+CEA 页表的 PTE 使用 **`PAGE_KERNEL` / `PAGE_KERNEL_RO`**，**不带 `_PAGE_USER`**（U=0，supervisor-only）。用户态对该 VA 做 load/store → **#PF** → 通常 **SIGSEGV**。
+
+| 机制 | 作用 |
+|------|------|
+| **PTE U=0** | Ring 3 不能直接访问 CEA 页 |
+| **内核高地址 fixmap** | 正常用户指针不落在该区域；KASLR 随机 `cea_offset` |
+| **SMEP** | 用户态不能执行内核代码页 |
+| **IDT RO alias** | `sidt` 只见 CEA 只读映射，不暴露 `idt_table` 真实地址 |
+
+| | 用户程序堆/栈/代码 VA | CEA VA |
+|---|------------------------|--------|
+| 典型 PTE | U=1 用户映射 | U=0 内核映射 |
+| PTI 用户页表 | 有用户映射 | 有映射，但仍是 **supervisor 页** |
+| Ring 3 访问 | 允许（权限内） | **不允许** |
+
+可访问 CEA VA 的主体：**ring 0 内核**（含中断/异常入口、`noinstr` 路径）以及 **CPU 硬件**在异常投递时经 TR/TSS/`sp0`/`ist[]` 中的 VA 做 supervisor 访问。
+
+#### 5.4.11 与本文其他章节的关系
 
 | 主题 | 章节 |
 |------|------|
 | SDM 章节索引、硬件 vs Linux/CEA 分界 | §3.5 |
 | IST 栈三层存储、`cea_exception_stacks` 指针 | §5.3 |
-| 运行时 IDT→TSS→栈 VA（不查 cea 指针） | §5.3.7 |
+| 运行时 IDT→TSS→栈 VA | §5.3.7 |
+| 运行时定位 GDT/TSS/栈（GDTR/TR/IDTR） | §5.4.8 |
+| CEA VA vs per-task VA、内核是否用 VA | §5.4.9 |
+| 用户态能否访问 CEA | §5.4.10 |
 | Entry trampoline 与 `sp0` | §14.2 |
 | `trap_init` 初始化顺序 | §8.1 |
 
