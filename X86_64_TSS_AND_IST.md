@@ -1,6 +1,6 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 3.11  
+**版本**: 3.12  
 **日期**: 2026-06-21  
 **作者**: Linux 内核启动文档项目
 
@@ -1124,28 +1124,73 @@ INTG(X86_TRAP_PF, asm_exc_page_fault),   /* bits.ist = DEFAULT_STACK = 0 */
 
 IST=0 时 CPU 不查 `ist[]`——这正是「per-vector 选择」必须由 IDT 而非 TSS 单独完成的体现。
 
-#### 6.3.6 IDT 表项实例（`def_idts[]`）
+#### 6.3.6 `def_idts[]`：IDT 初始化与 IST 索引配置
 
-`arch/x86/kernel/idt.c` 的 `def_idts[]`：
+`arch/x86/kernel/idt.c` 中的 **`def_idts[]`** 是 **IDT 门描述符的初始化表**——在 `idt_setup_traps()` 里经 `idt_setup_from_table()` → `idt_init_desc()` 写入 `idt_table[]`（`idt.c:235-237`）。  
+每条记录配置：**向量号、handler 地址、门类型、DPL、代码段选择子**，以及 **`bits.ist`（3-bit IST 索引）**。  
+**不是**只写 IST，也**不是**写 TSS 里的栈地址；TSS 栈顶 VA 由 `tss_setup_ist()` 单独完成（§6.3.5）。
+
+**`INTG` 与 `ISTG`**（`idt.c:19-46`）：
+
+```c
+#define DEFAULT_STACK  0
+
+#define INTG(_vector, _addr) \
+    G(_vector, _addr, DEFAULT_STACK, GATE_INTERRUPT, DPL0, __KERNEL_CS)
+
+#define ISTG(_vector, _addr, _ist) \
+    G(_vector, _addr, _ist + 1, GATE_INTERRUPT, DPL0, __KERNEL_CS)
+```
+
+| 宏 | 写入 `idt_table[vector].bits.ist` | CPU 行为 |
+|----|-----------------------------------|---------|
+| **`INTG`** | **0** | 不用 IST；当前 RSP 或 legacy（`TSS.RSP0` 等） |
+| **`ISTG`** | **`IST_INDEX_* + 1`** | 读 `TSS.ist[IST_INDEX_*]` 作为新 RSP |
+
+`def_idts[]` 开头一段（`idt.c:84-98`）示例：
 
 ```c
 static const __initconst struct idt_data def_idts[] = {
-    INTG(X86_TRAP_DE,  asm_exc_divide_error),               /* IST=0 */
-    ISTG(X86_TRAP_NMI, asm_exc_nmi, IST_INDEX_NMI),         /* IDT.IST=2 */
-    /* ... 其他 IST=0 的异常 ... */
-    ISTG(X86_TRAP_DF,  asm_exc_double_fault, IST_INDEX_DF), /* IDT.IST=1 */
-    ISTG(X86_TRAP_DB,  asm_exc_debug, IST_INDEX_DB),        /* IDT.IST=3 */
-#ifdef CONFIG_X86_MCE
-    ISTG(X86_TRAP_MC,  asm_exc_machine_check, IST_INDEX_MCE),/* IDT.IST=4 */
-#endif
-#ifdef CONFIG_AMD_MEM_ENCRYPT
-    ISTG(X86_TRAP_VC,  asm_exc_vmm_communication, IST_INDEX_VC), /* IDT.IST=5 */
-#endif
-    /* ... */
+    INTG(X86_TRAP_DE,  asm_exc_divide_error),        /* IST=0 */
+    ISTG(X86_TRAP_NMI, asm_exc_nmi, IST_INDEX_NMI),  /* IDT.IST=2 → TSS.ist[1] */
+    INTG(X86_TRAP_BR,  asm_exc_bounds),              /* IST=0 */
+    INTG(X86_TRAP_UD,  asm_exc_invalid_op),          /* IST=0 */
+    INTG(X86_TRAP_NM,  asm_exc_device_not_available),
+    INTG(X86_TRAP_OLD_MF, asm_exc_coproc_segment_overrun),
+    INTG(X86_TRAP_TS,  asm_exc_invalid_tss),
+    INTG(X86_TRAP_NP,  asm_exc_segment_not_present),
+    INTG(X86_TRAP_SS,  asm_exc_stack_segment),
+    INTG(X86_TRAP_GP,  asm_exc_general_protection),
+    INTG(X86_TRAP_SPURIOUS, asm_exc_spurious_interrupt_bug),
+    INTG(X86_TRAP_MF,  asm_exc_coprocessor_error),
+    INTG(X86_TRAP_AC,  asm_exc_alignment_check),
+    INTG(X86_TRAP_XF,  asm_exc_simd_coprocessor_error),
+    /* 后续还有 ISTG(#DF/#DB/#MC/#VC) 等，见下表 */
 };
 ```
 
-**常见笔误**：`X86_TRAP_DF` 在 Linux 中**一定**使用 IST（`ISTG` 宏），不是 `IST=0`。若 #DF 不使用 IST，当前栈损坏时会直接 Triple Fault。`ISTG` 的 `+1` 转换见 §6.3.5。
+**`def_idts[]` 中全部 IST 绑定**（x86-64，`idt.c:84-119`）：
+
+| 宏 | 向量 | 异常 | `bits.ist` | `TSS.ist[]` |
+|----|------|------|------------|-------------|
+| `INTG` | 0 #DE | Divide error | 0 | （不读） |
+| `ISTG` | 2 NMI | NMI | 2 | `ist[1]` |
+| `INTG` | 3–19 等 | #BR/#UD/#GP/#PF… | 0 | （不读） |
+| `ISTG` | 8 #DF | Double fault | 1 | `ist[0]` |
+| `ISTG` | 1 #DB | Debug | 3 | `ist[2]` |
+| `ISTG` | 18 #MC | Machine check | 4 | `ist[3]` | `CONFIG_X86_MCE` |
+| `ISTG` | 29 #VC | VMM comm | 5 | `ist[4]` | `CONFIG_AMD_MEM_ENCRYPT` |
+
+**与 TSS 的分工**（同 §6.3.5，对照 `def_idts` 理解）：
+
+| | `def_idts[]` / `ISTG` | `tss_setup_ist()` |
+|---|------------------------|-------------------|
+| 写入对象 | **IDT** 门的 IST **索引** | **TSS** `ist[]` 的栈顶 **VA** |
+| 回答 | 该向量**用不用** IST、**用几号** | 各 IST 槽的**地址在哪** |
+
+**初始化顺序**（`idt.c:78-82` 注释）：`def_idts` 在 `trap_init()` 中安装，但 IST **栈**须等 `cpu_init()` 里 TSS 就绪；因此 x86-64 上须 **先** `cpu_init_exception_handling()`（`tss_setup_ist` + `ltr`），**后** `idt_setup_traps()` 写入 `def_idts[]`（§8.1）。
+
+**常见笔误**：`X86_TRAP_DF` 在 Linux 中**一定**使用 `ISTG`（`IST=1`），不是 `INTG`。若 #DF 的 IDT.IST=0，当前栈损坏时会直接 Triple Fault。`ISTG` 的 `+1` 转换见 §6.3.5。
 
 ### 6.4 软件层面的额外栈（不占硬件 IST 槽位）
 
