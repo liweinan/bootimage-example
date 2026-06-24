@@ -1,6 +1,6 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 3.9  
+**版本**: 3.11  
 **日期**: 2026-06-21  
 **作者**: Linux 内核启动文档项目
 
@@ -15,7 +15,7 @@
 3. [硬件：IST 机制](#3-硬件ist-机制)（含 [§3.5 SDM 章节索引](#35-sdm-章节索引idttssist-投递机制)）
 4. [数据栈 IST 与影子栈 SSP](#4-数据栈-ist-与影子栈-ssp)
 5. [Linux 数据结构总览](#5-linux-数据结构总览)（含 [CEA §5.4](#54-cpu-entry-area-cea-全景)：定位 §5.4.8、[内核/CEA VA §5.4.9](#549-内核-vacea-与-per-task-va)、用户态访问 §5.4.10）
-6. [Linux 七个 IST 槽位：定义、分配与使用](#6-linux-七个-ist-槽位定义分配与使用)
+6. [Linux 七个 IST 槽位：定义、分配与使用](#6-linux-七个-ist-槽位定义分配与使用)（含 [为何必须查 IDT.IST §6.3.2](#632-为何必须查-idtist-而不能直接查-tss)）
 7. [Linux IST 栈内存布局与分配](#7-linux-ist-栈内存布局与分配)
 8. [Linux 初始化时序](#8-linux-初始化时序)
 9. [Linux 异常入口路径](#9-linux-异常入口路径)
@@ -46,7 +46,7 @@
 
 IDT 里**只有 3 个比特的索引**，存不下 64 位地址；真正的大指针数组在 TSS（数据栈）和 MSR 指向的内存表（影子栈）中。
 
-> **为何 TSS 与 IDT 都要配置？** TSS 提供 7 个栈**地址**，IDT 每个向量声明**是否使用 IST 及用几号**——详见 [§6.3](#63-tss-与-idt-的分工为什么两侧都要配置-ist)。
+> **为何 TSS 与 IDT 都要配置？** TSS 提供 7 个栈**地址**，IDT 每个向量声明**是否使用 IST 及用几号**——详见 [§6.3](#63-tss-与-idt-的分工为什么两侧都要配置-ist)（[§6.3.2 为何必须先查 IDT](#632-为何必须查-idtist-而不能直接查-tss)）。
 
 ### 1.3 Per-CPU 作用域
 
@@ -243,7 +243,7 @@ SDM 给出的是 **CPU/ISA 视角**：TSS.ISTn 里存的是 **64-bit canonical �
 #### 3.5.3 硬件视角 vs Linux 实现
 
 ```text
-硬件（SDM 描述，§3.2 / §6.3.2）:
+硬件（SDM 描述，§3.2 / §6.3.3）:
   vector → IDT[vector] → gate.IST (0 或 1..7)
        → 若 IST ≠ 0: RSP ← TSS.ist[IST − 1]    /* SDM IST1 = ist[0] */
        → SS ← NULL；对齐 RSP
@@ -535,22 +535,32 @@ sequenceDiagram
 
 ##### SDM 规定（硬件逐步做什么）
 
-各章节在 SDM 中的分布见 [§3.5](#35-sdm-章节索引idttssist-投递机制)。此处摘录与 IST 直接相关的原文。
+各章节在 SDM 中的分布见 [§3.5](#35-sdm-章节索引idttssist-投递机制)。以下引文均对照本地 **`reference-docs/253668-sdm-vol-3a.pdf`**（Vol 3A §6.14.1–§6.14.5）。  
+**校对说明**：该 PDF 中 **Figure 6-7** 为 *Error Code*，64 位 IDT 门描述符（含 IST 字段）为 **Figure 6-8**；§6.14.1 **未**出现 “before delivering the interrupt or exception” 等句——IST 索引如何引用 TSS、何时走 legacy，**完整表述在 §6.14.5**。
 
-**Step 1 — 读 IDT 门描述符的 IST 字段**（Vol 3A §6.14.1 *64-Bit Mode IDT*, Figure 6-7）：
+**Step 1 — IDT 门中的 IST 字段**（Vol 3A §6.14.1 *64-Bit Mode IDT*，**Figure 6-8**）：
 
-> Each 64-bit gate descriptor contains a **3-bit IST index** field. If the index is **non-zero**, the processor loads the corresponding IST pointer from the TSS **before** delivering the interrupt or exception.
+> The Interrupt Stack Table (IST) field **(bits 4:0 in bytes 7:4)** is used by the stack switching mechanisms described in Section 6.14.5, “Interrupt Stack Table.”
 
-**Step 2 — 从 TSS 加载 IST 指针到 RSP**（Vol 3A §6.14.5 *Interrupt Stack Table*）：
+（同节：64 位模式下 IDT 下标为 **vector × 16**；门描述符 16 字节。）
 
-> The IST pointers are referenced by the 3-bit IST index field of the 64-bit gate descriptors. … When an interrupt occurs, the processor loads the pointer from the corresponding IST entry into **RSP**.
+**Step 2 — IST 索引 → TSS → RSP**（Vol 3A §6.14.5 *Interrupt Stack Table*，**Figure 6-8**）：
 
-**Step 3 — 在新 RSP 上压栈并跳转**（§6.14.4 *Stack Switching in IA-32e Mode*, §6.14.2 *64-Bit Mode Stack Frame*）：
+> The IST mechanism provides up to seven IST pointers in the TSS. The pointers are **referenced by an interrupt-gate descriptor in the interrupt-descriptor table (IDT)**; see Figure 6-8. The gate descriptor contains a **3-bit IST index field** that provides an **offset into the IST section of the TSS**. Using the IST mechanism, the processor **loads the value pointed by an IST pointer into the RSP**.
 
-- IST 切换时 SS 强制为 NULL，旧 SS:RSP 压入新栈
-- 64 位模式**无条件**压 SS:RSP，每项 8 字节
+> If the **IST index is zero**, the modified legacy stack-switching mechanism described above is used.
 
-TSS 里的 IST 条目是**完整的 64-bit 线性地址**，CPU 直接装入 RSP。
+**Step 3 — 压栈与 SS**（§6.14.5、§6.14.2 *64-Bit Mode Stack Frame*）：
+
+§6.14.5：
+
+> When an interrupt occurs, the **new SS selector is forced to NULL** and the SS selector’s RPL field is set to the new CPL. The **old SS, RSP, RFLAGS, CS, and RIP are pushed onto the new stack**.
+
+§6.14.2（64 位中断栈帧，含 IST 与非 IST 路径）：
+
+> In 64-bit mode, the size of interrupt stack-frame pushes is fixed at eight bytes. … **64-bit mode also pushes SS:RSP unconditionally**, rather than only on a CPL change.
+
+TSS 中 IST 条目为 **64-bit 线性地址**（Figure 8-11 中 ISTn）；Step 2 中 “value pointed by an IST pointer” 即该地址，由 CPU 装入 RSP。
 
 ##### 运行时硬件时序（以 #DF 为例）
 
@@ -975,13 +985,13 @@ IST 指针在 TSS 里，但**仅配置 TSS 不够**——还必须让每个 IDT 
 | **TSS** | 由 TR 指向的内存（每 CPU 一份） | IST1–IST7 共 7 个 **64 位栈地址** | 提供备用栈的**实际 RSP 值** |
 | **IDT 门描述符** | `idt_table[vector]`（每向量 16 字节） | **3-bit IST 索引**（0–7） | 告诉 CPU **本次**是否换 IST 栈、用 **IST 几号** |
 
-SDM 对此的表述（Vol 3A §6.14.5 *Interrupt Stack Table*）：
+SDM 对此的表述（Vol 3A §6.14.5 *Interrupt Stack Table*，`253668-sdm-vol-3a.pdf`）：
 
-> The IST mechanism … is part of the 64-bit mode TSS. … The IST pointers are **referenced by the 3-bit IST index field** of the 64-bit gate descriptors.
+> The IST mechanism … is part of the 64-bit mode TSS. … The pointers are **referenced by an interrupt-gate descriptor in the IDT** … The gate descriptor contains a **3-bit IST index field** … Using the IST mechanism, the processor **loads the value pointed by an IST pointer into the RSP**. … If the **IST index is zero**, the modified legacy stack-switching mechanism … is used.
 
-以及（§6.14.1 *64-Bit Mode IDT*，Figure 6-7）：
+§6.14.1（**Figure 6-8**，非 Figure 6-7）仅定义 IST 字段位域：
 
-> Each 64-bit gate descriptor contains a **3-bit IST index** field. If the index is **non-zero**, the processor loads the corresponding IST pointer from the TSS **before** delivering the interrupt or exception.
+> The Interrupt Stack Table (IST) field **(bits 4:0 in bytes 7:4)** is used by the stack switching mechanisms described in Section 6.14.5, “Interrupt Stack Table.”
 
 要点：
 
@@ -989,7 +999,38 @@ SDM 对此的表述（Vol 3A §6.14.5 *Interrupt Stack Table*）：
 - IDT 是**选择器**（每个向量独立 3 bit），放不下 64 位地址，只能存索引 0–7
 - **IST = 0** 表示不使用 IST，走 §3.2 的 legacy/RSP0 路径；**IST = N (1–7)** 才读 `TSS.IST[N-1]`
 
-#### 6.3.2 硬件处理流程
+#### 6.3.2 为何必须查 IDT.IST，而不能「直接查 TSS」？
+
+这是 Intel **64 位 IST 机制的硬件定义**，不是 Linux 额外加的一层。TSS 只有 **7 个栈地址槽**；**「这次异常用不用 IST、用第几个」是 per-vector 策略**，只能写在 **IDT 门描述符**里。
+
+**TSS 回答不了的问题**：若 CPU 只持有 TSS、不读 IDT 的 IST 字段，同一颗 CPU 上 #PF（向量 14）与 #DF（向量 8）同时「知道 TSS 里有 7 个地址」，却无法决定：
+
+| 向量 | Linux 策略（`def_idts[]`） | 若「只查 TSS」会怎样 |
+|------|---------------------------|---------------------|
+| 8 #DF | `ISTG` → IDT.IST=1 → `TSS.ist[0]` | 无法指定「只有 #DF 用 ist[0]」 |
+| 14 #PF | `INTG` → IDT.IST=0 → 当前 RSP / legacy | 无法指定「#PF 不用任何 ist[]」 |
+| 2 NMI | `ISTG` → IDT.IST=2 → `TSS.ist[1]` | 无法让 NMI 与 #DF 用不同 IST 槽 |
+| 1 #DB | `ISTG` → IDT.IST=3 → `TSS.ist[2]` | 无法让 #DB 与 #DF/NMI 分流 |
+
+**用哪块栈是「异常种类」的属性**（256 个向量各自一条 IDT 表项），TSS 只是 **7 个共享槽位的地址簿**，不含 per-vector 规则。
+
+SDM §6.14.5：IST 指针在 TSS 中，但由 **gate 的 IST index 引用**；**IST index = 0** 时走 §6.14.4 的 modified legacy 栈切换，**不读** `TSS.ist[]`。
+
+**硬件顺序（必须先 IDT，后 TSS）**：
+
+```text
+vector → IDT[vector]           /* 先确定「是哪类异常」 */
+       → 读 gate.IST（3 bit）  /* 再确定「用不用 IST、用几号」 */
+       ├─ IST = 0 → legacy（当前 RSP 或 TSS.RSP0），不读 ist[]
+       └─ IST = N → TR → TSS.ist[N−1] → RSP ← 栈顶 VA
+       → 压栈 → 跳 handler CS:RIP
+```
+
+**类比**：TSS.ist[] 是 7 个**应急会议室的门牌地址**；IDT.IST 是每种警报（火警/断电/网络）手册里的「去几号室」。只有门牌、没有手册，无法区分 #DF 与 #PF 该待在哪；只有手册、门牌未填，写了「去 3 号室」也找不到物理栈。
+
+与 [§6.3.4](#634-为什么不能只在一边配置) 的区别：本节说明 **为何 IDT 侧不可省略**；该节说明 **只配一边时的具体后果**。
+
+#### 6.3.3 硬件处理流程
 
 结合 §3.2 的栈切换逻辑与 [§3.5](#35-sdm-章节索引idttssist-投递机制) 的 SDM 章节索引，CPU 在异常/中断入口的完整决策链为：
 
@@ -1004,7 +1045,7 @@ SDM 对此的表述（Vol 3A §6.14.5 *Interrupt Stack Table*）：
 
 因此：**TSS 回答「7 块备用栈分别在哪」；IDT 回答「这次异常去取第几块」**。没有 IDT 里的 IST 字段，CPU 即使 TR 已指向填好地址的 TSS，也不知道该读 `ist[0]` 还是 `ist[1]`，甚至不知道要不要读。
 
-#### 6.3.3 为什么不能只在一边配置
+#### 6.3.4 为什么不能只在一边配置
 
 **只在 TSS 里写地址、不在 IDT 里绑定**——无效。硬件按向量查 IDT，IST 字段默认为 0 的条目（如 #PF、#GP）**永远不会**读取 TSS 的 `ist[]`，即使用户态/内核态触发 #DF 所需的独立栈地址已经写在 `ist[0]` 里，只要 IDT[8] 的 IST 仍为 0，#DF 仍会在当前（可能已损坏的）栈上压帧。
 
@@ -1012,7 +1053,7 @@ SDM 对此的表述（Vol 3A §6.14.5 *Interrupt Stack Table*）：
 
 Linux 启动顺序因此强制：**先** `tss_setup_ist()` + `ltr`，**后** `idt_setup_traps()` 写入带 IST 的 `def_idts[]`（详见 §8.1）。
 
-#### 6.3.4 Linux 内核中的两侧配置（源码对照）
+#### 6.3.5 Linux 内核中的两侧配置（源码对照）
 
 **TSS 侧：写入 7 个槽位中的实际栈顶地址**
 
@@ -1035,7 +1076,7 @@ static inline void tss_setup_ist(struct tss_struct *tss)
 
 ```c
 struct idt_bits {
-    u16     ist  : 3,    /* 对应 SDM Figure 6-7 的 IST 字段 */
+    u16     ist  : 3,    /* 对应 SDM Figure 6-8 的 IST 字段（bits 4:0 in bytes 7:4） */
             zero : 5,
             type : 5,
             dpl  : 2,
@@ -1083,7 +1124,7 @@ INTG(X86_TRAP_PF, asm_exc_page_fault),   /* bits.ist = DEFAULT_STACK = 0 */
 
 IST=0 时 CPU 不查 `ist[]`——这正是「per-vector 选择」必须由 IDT 而非 TSS 单独完成的体现。
 
-#### 6.3.5 IDT 表项实例（`def_idts[]`）
+#### 6.3.6 IDT 表项实例（`def_idts[]`）
 
 `arch/x86/kernel/idt.c` 的 `def_idts[]`：
 
@@ -1104,7 +1145,7 @@ static const __initconst struct idt_data def_idts[] = {
 };
 ```
 
-**常见笔误**：`X86_TRAP_DF` 在 Linux 中**一定**使用 IST（`ISTG` 宏），不是 `IST=0`。若 #DF 不使用 IST，当前栈损坏时会直接 Triple Fault。`ISTG` 的 `+1` 转换见 §6.3.4。
+**常见笔误**：`X86_TRAP_DF` 在 Linux 中**一定**使用 IST（`ISTG` 宏），不是 `IST=0`。若 #DF 不使用 IST，当前栈损坏时会直接 Triple Fault。`ISTG` 的 `+1` 转换见 §6.3.5。
 
 ### 6.4 软件层面的额外栈（不占硬件 IST 槽位）
 
@@ -1383,7 +1424,7 @@ NMI 入口（`asm_exc_nmi`）逻辑最复杂：
 
 ### 10.1 64 位 IDT 门描述符
 
-16 字节，IST 字段位于 byte 4 的低 3 位（SDM Figure 6-7）。Linux 结构（`arch/x86/include/asm/desc_defs.h`）：
+16 字节，IST 字段位于 byte 4 的低 3 位（SDM Figure 6-8 *64-Bit IDT Gate Descriptors*；Figure 6-7 为 Error Code）。Linux 结构（`arch/x86/include/asm/desc_defs.h`）：
 
 ```c
 struct idt_bits {
