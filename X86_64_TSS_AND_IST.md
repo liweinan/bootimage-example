@@ -1,6 +1,6 @@
 # x86-64 任务状态段（TSS）与中断栈表（IST）详解
 
-**版本**: 3.12  
+**版本**: 3.13  
 **日期**: 2026-06-21  
 **作者**: Linux 内核启动文档项目
 
@@ -593,6 +593,65 @@ sequenceDiagram
     CPU->>CPU: 跳转 asm_exc_double_fault
 ```
 
+##### Linux 内核 runtime call chain（#DF，x86-64，非 FRED）
+
+上图之后进入内核代码；以下路径对照 `/Users/weli/works/linux`（`CONFIG_X86_64`，典型 native 内核）。**全程在 IST1 栈（CEA.estacks.DF_stack）上**，不读 `cea_exception_stacks` 指针。
+
+```text
+─── A. CPU 硬件（见上方时序图）────────────────────────────────────
+vector 8
+  → IDT[8]（idt.c:103 ISTG，bits.ist=1）
+  → TR → TSS.ist[IST_INDEX_DF]（common.c:2379 tss_setup_ist）
+  → RSP ← 栈顶 VA（CEA.estacks）
+  → 压硬件帧（低地址=新 RSP）：ErrorCode, RIP, CS, RFLAGS, RSP₀, SS
+  → RIP ← idt_table[8] 偏移 → asm_exc_double_fault
+
+─── B. 汇编入口 idtentry_df ─────────────────────────────────────
+asm_exc_double_fault                    entry_64.S:518-540
+  │                                     idtentry.h:663 DECLARE_IDTENTRY_DF
+  ├─ ENDBR / ASM_CLAC / cld
+  ├─ call paranoid_entry                 entry_64.S:526 → :868-940
+  │    PUSH_AND_CLEAR_REGS               gp 寄存器 → pt_regs（仍在 IST 栈）
+  │    SAVE_AND_SWITCH_TO_KERNEL_CR3     PTI：切内核 CR3（%r14 存旧 CR3）
+  │    swapgs 或 FSGSBASE 路径           内核 per-CPU / GSBASE
+  │    IBRS_ENTER
+  │    ret
+  ├─ movq %rsp, %rdi                     第 1 参：struct pt_regs *
+  ├─ movq ORIG_RAX(%rsp), %rsi           第 2 参：error_code
+  └─ call exc_double_fault               traps.c:597
+
+─── C. C 处理函数（noinstr，不经 irqentry_enter）──────────────────
+exc_double_fault(regs, error_code)       traps.c:597-716
+  │                                     idtentry.h:391 DEFINE_IDTENTRY_DF
+  ├─ [CONFIG_X86_ESPFIX64]              traps.c:607-659
+  │    espfix64 上 IRET fault 提升为 #DF 时：复制帧到 entry stack，
+  │    改 regs→#GP handler，return（唯一常见 return 路径）
+  ├─ irqentry_nmi_enter(regs)           traps.c:662
+  ├─ notify_die(DIE_TRAP, ...)          traps.c:664
+  ├─ [CONFIG_VMAP_STACK]                traps.c:669-708
+  │    handle_stack_overflow(...)       CR2 近 guard 页时诊断栈溢出
+  ├─ die("double fault", regs, ...)     traps.c:712
+  └─ panic("Machine halted.")           traps.c:714  （noreturn）
+
+─── D. 汇编返回（仅 C 函数 return 时，如 ESPFIX 路径）──────────────
+jmp paranoid_exit                        entry_64.S:537 → :965+
+  IBRS_EXIT → 恢复 CR3/GSBASE → POP regs → iretq
+```
+
+| 阶段 | 关键符号 | 源文件:行 |
+|------|---------|----------|
+| IDT 绑定 | `ISTG(X86_TRAP_DF, asm_exc_double_fault, IST_INDEX_DF)` | `idt.c:103` |
+| ASM 桩 | `asm_exc_double_fault` | `entry_64.S:518`（`idtentry_df` 宏） |
+| 入口公共路径 | `paranoid_entry` | `entry_64.S:868` |
+| C handler | `exc_double_fault` | `traps.c:597` |
+| 终止 | `die` → `panic` | `traps.c:712-714` |
+
+说明：
+
+- **`paranoid_entry`**：#DF 始终走此路径（不区分 user/kernel，见 `idtentry_df` 注释 `entry_64.S:514-516`）。
+- **`DEFINE_IDTENTRY_DF`** 映射为 **`DEFINE_IDTENTRY_RAW_ERRORCODE`**（`idtentry.h:391-392`），**不**自动调用 `irqentry_enter()`/`irqentry_exit()`；#DF 自行 `irqentry_nmi_enter` 后以 `die`/`panic` 结束。
+- **FRED** 路径不走 `asm_exc_double_fault`，改由 `entry_fred.c` 分发到 `exc_double_fault`（§6.7）。
+
 ##### 初始化 vs 运行时对照
 
 | 步骤 | 初始化（软件，`trap_init` 路径） | 运行时（CPU 硬件） |
@@ -623,14 +682,7 @@ ISTG(X86_TRAP_DF, asm_exc_double_fault, IST_INDEX_DF)
 // → G(..., _ist + 1, ...) → idt_table[8].bits.ist = 1
 ```
 
-**运行时链（硬件 + 入口汇编）**：
-
-```asm
-// entry_64.S:518-537 — idtentry_df
-// CPU 已完成 IDT→TSS→RSP 切换并压硬件帧
-call    paranoid_entry          /* 在 IST 栈上保存通用寄存器 */
-call    exc_double_fault        /* traps.c:597 */
-```
+**运行时链**见上方 [Linux 内核 runtime call chain（#DF）](#linux-内核-runtime-call-chaindfx86-64非-fred)；此处仅列与初始化对照相关的 grep 引用：
 
 ```c
 // dumpstack_64.c:103 — 仅 oops 诊断时软件才读 cea_exception_stacks
@@ -1401,6 +1453,8 @@ IST 异常进入内核后，Linux 根据**来源特权级**走不同路径。核
 - **内核态触发**：留在 IST 栈上，走 `paranoid_entry` / `paranoid_exit`
 
 ### 9.1 #DF — 始终 paranoid
+
+完整 runtime call chain（硬件 → `asm_exc_double_fault` → `exc_double_fault` → `die`/`panic`）见 [§5.3.7](#linux-内核-runtime-call-chaindfx86-64非-fred)。
 
 ```asm
 // arch/x86/entry/entry_64.S — idtentry_df 宏
